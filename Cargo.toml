@@ -11,6 +11,14 @@ crate-type = ["cdylib", "rlib"]
 name = "test_connect"
 path = "examples/test_connect.rs"
 
+[[example]]
+name = "dcom_activation"
+path = "examples/dcom_activation.rs"
+
+[[example]]
+name = "wmi_probe"
+path = "examples/wmi_probe.rs"
+
 [dependencies]
 serde_json = "1.0"
 libc = "0.2"
@@ -18,12 +26,10 @@ uuid = { version = "1.10", features = ["v4", "serde"] }
 thiserror = "1.0"
 byteorder = "1.5"
 socket2 = "0.5"
-anyhow = "1.0"
-base64 = "0.22"
 md5 = "0.7"
-sha2 = "0.10"
-num-bigint = "0.4"
-num-traits = "0.2"
-regex = "1.11.2"
 hmac = "0.12"
 hex-literal = "0.4"
+hex = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "time"] }
+nom = "7.1"

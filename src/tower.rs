@@ -1,20 +1,62 @@
-//! Helpers for building and parsing RPC towers used by the endpoint mapper.
+//! Helpers for building RPC towers for the endpoint mapper.
 //!
-//! The real implementation will construct the "floors" required to locate the
-//! WMI activation interface. For the moment the module only exposes a stub so
-//! that the transport layer can depend on a well-defined API surface.
+//! The structures follow [MS-EPMR] §2.2.3 (`twr_t`). Each floor is encoded as a
+//! pair of length-prefixed octet strings representing the protocol identifier
+//! (LHS) and address information (RHS).
 
-/// Builds the tower for querying the WMI interface via the endpoint mapper.
+use byteorder::{LittleEndian, WriteBytesExt};
+
+#[derive(Debug)]
+struct TowerFloor {
+    lhs: Vec<u8>,
+    rhs: Vec<u8>,
+}
+
+impl TowerFloor {
+    fn new(lhs: impl Into<Vec<u8>>, rhs: impl Into<Vec<u8>>) -> Self {
+        Self {
+            lhs: lhs.into(),
+            rhs: rhs.into(),
+        }
+    }
+
+    fn write(&self, buf: &mut Vec<u8>) {
+        buf.write_u16::<LittleEndian>(self.lhs.len() as u16)
+            .expect("write lhs length");
+        buf.extend_from_slice(&self.lhs);
+        buf.write_u16::<LittleEndian>(self.rhs.len() as u16)
+            .expect("write rhs length");
+        buf.extend_from_slice(&self.rhs);
+    }
+}
+
+/// Builds the IWbemLocator tower used when issuing EptMap requests.
 #[allow(dead_code)]
 pub fn build_wmi_tower() -> Vec<u8> {
-    // Tower extracted from a known-good EptMap request.
-    hex_literal::hex!(
-        "00 00 00 00 00 00 02 00 01 00 00 00 00 00 00 00 01 00 00 00"
-        "05 00 10 00 c4 fe 9f 99 60 52 1b 10 bb cb 00 aa 00 21 34 7a 00 00"
-        "02 00 00 00 14 00 04 5d 88 8a eb 1c c9 11 9f e8 08 00 2b 10 48 60 02 00 00 00"
-        "02 00 07 00 06 00 00 00 00 00 00 00 00"
-    )
-    .to_vec()
+    let floors = vec![
+        // Abstract syntax: CLSID_WbemLocator {4590F811-1D3A-11D0-891F-00AA004B2E24}
+        // This is the CLSID for WMI activation, not the interface IID
+        TowerFloor::new(
+            hex_literal::hex!("11 f8 90 45 3a 1d d0 11 89 1f 00 aa 00 4b 2e 24 00 00"),
+            Vec::new(),
+        ),
+        // Transfer syntax: NDR v2.0 (8a885d04-1ceb-11c9-9fe8-08002b104860, version 2)
+        TowerFloor::new(
+            hex_literal::hex!("04 5d 88 8a eb 1c c9 11 9f e8 08 00 2b 10 48 60 02 00 00 00"),
+            Vec::new(),
+        ),
+        // Protocol sequence: ncacn_ip_tcp (protocol ID 0x07) with unspecified addr/port
+        TowerFloor::new(vec![0x07], vec![0x00; 6]),
+    ];
+
+    let mut buffer = Vec::with_capacity(81);
+    buffer
+        .write_u16::<LittleEndian>(floors.len() as u16)
+        .expect("write floor count");
+    for floor in &floors {
+        floor.write(&mut buffer);
+    }
+    buffer
 }
 
 /// Returns a representative EPM request stub (tower) captured from a real
@@ -70,7 +112,16 @@ mod tests {
     #[test]
     fn tower_builder_returns_expected_length() {
         let tower = build_wmi_tower();
-        assert_eq!(tower.len(), 81);
+        assert_eq!(tower.len(), 59);
+        assert_eq!(u16::from_le_bytes([tower[0], tower[1]]), 3);
+
+        // Floor 1 should contain the CLSID_WbemLocator abstract syntax UUID.
+        let lhs_len = u16::from_le_bytes([tower[2], tower[3]]) as usize;
+        let lhs = &tower[4..4 + lhs_len];
+        assert_eq!(
+            lhs,
+            hex_literal::hex!("11 f8 90 45 3a 1d d0 11 89 1f 00 aa 00 4b 2e 24 00 00")
+        );
     }
 
     #[test]

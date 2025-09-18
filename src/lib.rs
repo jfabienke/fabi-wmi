@@ -11,9 +11,17 @@ mod auth;
 mod dcom;
 mod ndr;
 mod rpc;
+mod rpc_fixtures;
 mod tower;
 mod transport;
 mod wmi;
+
+// Export auth module for examples
+pub mod auth_exports {
+    pub use crate::auth::{
+        AuthError, AuthenticateMessage, Credentials, NegotiateMessage, NtlmV2Client,
+    };
+}
 
 pub use auth::AuthError;
 pub use dcom::DcomError;
@@ -95,24 +103,51 @@ impl InnerSession {
         domain: Option<&str>,
         auth_level: u32,
     ) -> Result<Self> {
-        let port = dcom::resolve_wmi_port(host)?;
-        let codec: Arc<dyn ndr::NdrCodec + Send + Sync> = Arc::new(ndr::StubNdrCodec);
-        let transport: Arc<Mutex<Box<dyn transport::RpcTransport + Send>>> =
-            Arc::new(Mutex::new(Box::new(transport::StubTransport)));
         let username = username.filter(|s| !s.is_empty()).map(|s| s.to_string());
         let password = password.filter(|s| !s.is_empty()).map(|s| s.to_string());
         let domain_owned = domain.unwrap_or("").to_string();
 
-        let mut credentials = None;
-        if let (Some(user), Some(pass)) = (username.clone(), password.clone()) {
-            let creds = auth::Credentials {
-                username: user,
-                password: pass,
-                domain: domain_owned.clone(),
-                workstation: host.to_string(),
+        let base_creds =
+            if let (Some(ref user), Some(ref pass)) = (username.as_ref(), password.as_ref()) {
+                Some(auth::Credentials {
+                    username: user.to_string(),
+                    password: pass.to_string(),
+                    domain: domain_owned.clone(),
+                    workstation: host.to_string(),
+                })
+            } else {
+                None
             };
-            credentials = Some(creds);
-        }
+
+        let port = dcom::resolve_wmi_port(host, base_creds.as_ref())
+            .map_err(|err| WmiClientError::Invalid(format!("Port resolution failed: {err}")))?;
+        let codec: Arc<dyn ndr::NdrCodec + Send + Sync> = Arc::new(ndr::StubNdrCodec);
+
+        let transport: Arc<Mutex<Box<dyn transport::RpcTransport + Send>>> =
+            if std::env::var("LINUX_WMI_SKIP_EPM").as_deref() == Ok("1") {
+                Arc::new(Mutex::new(Box::new(transport::StubTransport)))
+            } else if let (Some(ref user), Some(ref pass)) = (username.as_ref(), password.as_ref())
+            {
+                let config = transport::RealTransportConfig {
+                    host: host.to_string(),
+                    username: Some(user.to_string()),
+                    password: Some(pass.to_string()),
+                    domain: Some(domain_owned.clone()),
+                };
+                match transport::RealRpcTransport::connect(config) {
+                    Ok(real_transport) => Arc::new(Mutex::new(
+                        Box::new(real_transport) as Box<dyn transport::RpcTransport + Send>
+                    )),
+                    Err(err) => {
+                        eprintln!("Failed to create real transport: {err}, falling back to stub");
+                        Arc::new(Mutex::new(Box::new(transport::StubTransport)))
+                    }
+                }
+            } else {
+                Arc::new(Mutex::new(Box::new(transport::StubTransport)))
+            };
+
+        let credentials = base_creds.clone();
 
         Ok(Self {
             _host: host.to_string(),
@@ -486,6 +521,14 @@ pub unsafe extern "C" fn wmi_free_err(ptr: *mut c_char) {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::Once;
+
+    fn enable_epm_stub() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            std::env::set_var("LINUX_WMI_SKIP_EPM", "1");
+        });
+    }
 
     #[test]
     fn set_error_writes_message() {
@@ -549,6 +592,7 @@ mod tests {
 
     #[test]
     fn inner_session_new_extracts_credentials() {
+        enable_epm_stub();
         let session =
             InnerSession::new("host", Some("user"), Some("pass"), Some("domain"), 0).unwrap();
         assert!(session.credentials.is_some());
@@ -559,6 +603,7 @@ mod tests {
 
     #[test]
     fn inner_session_query_and_method_success() {
+        enable_epm_stub();
         let mut session = InnerSession::new("host", None, None, None, 0).unwrap();
         session.open_namespace("CimV2").unwrap();
 
@@ -573,6 +618,7 @@ mod tests {
 
     #[test]
     fn inner_session_exec_query_error_propagates() {
+        enable_epm_stub();
         let mut session = InnerSession::new("host", None, None, None, 0).unwrap();
         session.open_namespace("CimV2").unwrap();
         let err = session

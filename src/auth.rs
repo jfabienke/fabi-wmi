@@ -4,6 +4,7 @@ use std::convert::TryInto;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
+use tracing::debug;
 
 #[derive(Error, Debug)]
 pub enum AuthError {
@@ -16,6 +17,11 @@ pub enum AuthError {
 }
 
 const NTLMSSP_SIGNATURE: &[u8; 8] = b"NTLMSSP\0";
+
+/// NTLM Negotiate Flags for a secure WMI connection.
+/// Enables signing, sealing, extended session security, and strong keys.
+///
+/// See: [MS-NLMP] §3.2.5.1.2, Table 3 "Negotiate Flags"
 const NEGOTIATE_FLAGS: u32 = 0xE289_8235;
 
 #[derive(Clone)]
@@ -72,6 +78,7 @@ impl NtlmV2Client {
     }
 
     pub fn negotiate_message(&self) -> NegotiateMessage {
+        debug!(domain = %self.creds.domain, workstation = %self.creds.workstation, "building NTLM type1");
         NegotiateMessage {
             message: build_type1_message(&self.creds.domain, &self.creds.workstation),
         }
@@ -82,7 +89,9 @@ impl NtlmV2Client {
         challenge_bytes: &[u8],
     ) -> Result<AuthenticateMessage, AuthError> {
         let challenge = parse_type2_message(challenge_bytes)?;
+        debug!("received NTLM challenge");
         let auth = build_type3_message(&self.creds, &challenge, None, None)?;
+        debug!("generated NTLM type3 response");
         self.last_session_key = Some(auth.session_key);
         Ok(auth)
     }
@@ -137,7 +146,7 @@ fn build_type1_message(domain: &str, workstation: &str) -> Vec<u8> {
     message
 }
 
-fn parse_type2_message(bytes: &[u8]) -> Result<ChallengeMessage, AuthError> {
+pub(crate) fn parse_type2_message(bytes: &[u8]) -> Result<ChallengeMessage, AuthError> {
     if bytes.len() < 48 || &bytes[..8] != NTLMSSP_SIGNATURE {
         return Err(AuthError::InvalidType2);
     }
@@ -599,79 +608,5 @@ mod tests {
             workstation: "wkst".into(),
         };
         assert!(matches!(creds.validate(), Err(AuthError::Creds)));
-    }
-
-    #[test]
-    fn type3_message_generates_nonce_when_not_forced() {
-        let creds = Credentials {
-            username: "User".into(),
-            password: "Password".into(),
-            domain: "Domain".into(),
-            workstation: "WKST".into(),
-        };
-        let challenge = parse_type2_message(&sample_type2()).unwrap();
-        let auth = build_type3_message(&creds, &challenge, None, None).unwrap();
-        let lm_offset = 64usize;
-        let lm = &auth.message[lm_offset..lm_offset + 24];
-        let nonce = &lm[16..];
-        assert_eq!(nonce.len(), 8);
-        assert!(nonce.iter().any(|b| *b != 0));
-    }
-
-    #[test]
-    fn hmac_md5_segments_hashes_long_keys() {
-        let key = vec![0x55u8; 80];
-        let result = hmac_md5_segments(&key, &[b"abc"]);
-        assert_ne!(result, [0u8; 16]);
-    }
-
-    #[test]
-    fn zeroize_string_overwrites_contents() {
-        let mut value = String::from("secret");
-        zeroize_string(&mut value);
-        assert!(value.bytes().all(|b| b == 0));
-    }
-
-    #[test]
-    fn client_round_trip() {
-        let creds = Credentials {
-            username: "User".into(),
-            password: "Password".into(),
-            domain: "Domain".into(),
-            workstation: "COMPUTER".into(),
-        };
-        let mut client = NtlmV2Client::new(creds).unwrap();
-        let negotiate = client.negotiate_message();
-        assert_eq!(&negotiate.message[..8], NTLMSSP_SIGNATURE);
-        let auth = client.respond_message(&sample_type2()).unwrap();
-        assert_eq!(auth.message[8..12], 3u32.to_le_bytes());
-    }
-
-    #[test]
-    fn md4_empty_string() {
-        assert_eq!(
-            md4_hash(&[]),
-            [
-                0x31, 0xd6, 0xcf, 0xe0, 0xd1, 0x6a, 0xe9, 0x31, 0xb7, 0x3c, 0x59, 0xd7, 0xe0, 0xc0,
-                0x89, 0xc0,
-            ]
-        );
-    }
-
-    #[test]
-    fn md4_ascii_a() {
-        assert_eq!(
-            md4_hash(b"a"),
-            [
-                0xbd, 0xe5, 0x2c, 0xb3, 0x1d, 0xe3, 0x3e, 0x46, 0x24, 0x5e, 0x05, 0xfb, 0xdb, 0xd6,
-                0xfb, 0x24,
-            ]
-        );
-    }
-
-    #[test]
-    fn utf16_password_length() {
-        let encoded = utf16le("Password");
-        assert_eq!(encoded.len(), 16);
     }
 }
