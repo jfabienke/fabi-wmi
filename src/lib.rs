@@ -6,13 +6,13 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use thiserror::Error;
+use tracing::debug;
 
 mod auth;
+mod crypto;
 mod dcom;
 mod ndr;
 mod rpc;
-mod rpc_fixtures;
-mod tower;
 mod transport;
 mod wmi;
 
@@ -24,7 +24,7 @@ pub mod auth_exports {
 }
 
 pub use auth::AuthError;
-pub use dcom::DcomError;
+pub use dcom::{activate_wmi_dcom, resolve_oxid, DcomError, ObjectReference};
 pub use rpc::RpcError;
 pub use wmi::{IWbemLocator, IWbemServices, WmiError};
 
@@ -121,7 +121,16 @@ impl InnerSession {
 
         let port = dcom::resolve_wmi_port(host, base_creds.as_ref())
             .map_err(|err| WmiClientError::Invalid(format!("Port resolution failed: {err}")))?;
-        let codec: Arc<dyn ndr::NdrCodec + Send + Sync> = Arc::new(ndr::StubNdrCodec);
+
+        // Choose NDR codec based on environment variable
+        let codec: Arc<dyn ndr::NdrCodec + Send + Sync> =
+            if std::env::var("LINUX_WMI_USE_REAL_NDR").as_deref() == Ok("1") {
+                debug!("Using RealNdrCodec for NDR marshaling");
+                Arc::new(ndr::RealNdrCodec::new())
+            } else {
+                debug!("Using StubNdrCodec (mock responses)");
+                Arc::new(ndr::StubNdrCodec)
+            };
 
         let transport: Arc<Mutex<Box<dyn transport::RpcTransport + Send>>> =
             if std::env::var("LINUX_WMI_SKIP_EPM").as_deref() == Ok("1") {

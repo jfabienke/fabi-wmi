@@ -1,0 +1,113 @@
+warning: unused imports: `Bstr`, `ConformantArray`, `HResultError`, `HResult`, `SafeArray`, `VarType`, and `Variant`
+  --> src/ndr.rs:12:17
+   |
+12 | pub use types::{Bstr, ConformantArray, HResult, HResultError, SafeArray, VarType, Variant};
+   |                 ^^^^  ^^^^^^^^^^^^^^^  ^^^^^^^  ^^^^^^^^^^^^  ^^^^^^^^^  ^^^^^^^  ^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: function `derive_sealing_key` is never used
+  --> src/crypto.rs:80:8
+   |
+80 | pub fn derive_sealing_key(session_key: &[u8], _client_to_server: bool) -> Vec<u8> {
+   |        ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: methods `is_success` and `code` are never used
+  --> src/ndr/types.rs:63:12
+   |
+43 | impl HResultError {
+   | ----------------- methods in this implementation
+...
+63 |     pub fn is_success(&self) -> bool {
+   |            ^^^^^^^^^^
+...
+68 |     pub fn code(&self) -> HResult {
+   |            ^^^^
+
+warning: associated items `new`, `encode`, and `decode` are never used
+   --> src/ndr/types.rs:142:12
+    |
+141 | impl Bstr {
+    | --------- associated items in this implementation
+142 |     pub fn new(s: &str) -> Self {
+    |            ^^^
+...
+149 |     pub fn encode(&self) -> Vec<u8> {
+    |            ^^^^^^
+...
+171 |     pub fn decode(input: &[u8]) -> IResult<&[u8], Bstr> {
+    |            ^^^^^^
+
+warning: associated items `to_json_value`, `var_type`, `encode`, and `decode` are never used
+   --> src/ndr/types.rs:222:12
+    |
+220 | impl Variant {
+    | ------------ associated items in this implementation
+221 |     /// Convert VARIANT to serde_json::Value for JSON output
+222 |     pub fn to_json_value(&self) -> serde_json::Value {
+    |            ^^^^^^^^^^^^^
+...
+245 |     pub fn var_type(&self) -> VarType {
+    |            ^^^^^^^^
+...
+263 |     pub fn encode(&self) -> Vec<u8> {
+    |            ^^^^^^
+...
+329 |     pub fn decode(input: &[u8]) -> IResult<&[u8], Variant> {
+    |            ^^^^^^
+
+warning: associated function `new` is never used
+   --> src/ndr/types.rs:419:12
+    |
+418 | impl<T> ConformantArray<T> {
+    | -------------------------- associated function in this implementation
+419 |     pub fn new(elements: Vec<T>) -> Self {
+    |            ^^^
+
+warning: associated items `encode` and `decode` are never used
+   --> src/ndr/types.rs:426:12
+    |
+424 | impl ConformantArray<Variant> {
+    | ----------------------------- associated items in this implementation
+425 |     /// Encode conformant array of VARIANTs
+426 |     pub fn encode(&self) -> Vec<u8> {
+    |            ^^^^^^
+...
+444 |     pub fn decode(input: &[u8]) -> IResult<&[u8], ConformantArray<Variant>> {
+    |            ^^^^^^
+
+warning: method `encode` is never used
+   --> src/ndr/types.rs:490:12
+    |
+489 | impl SafeArray {
+    | -------------- method in this implementation
+490 |     pub fn encode(&self) -> Vec<u8> {
+    |            ^^^^^^
+
+warning: `linux-wmi` (lib) generated 8 warnings (run `cargo fix --lib -p linux-wmi` to apply 1 suggestion)
+   Compiling linux-wmi v0.1.0 (/Users/jvindahl/Development/linux-wmi)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.40s
+     Running `target/debug/examples/test_connect 192.0.2.10 --user wmi-test --pass 'P@ssw0rd123' --domain '' --query 'SELECT * FROM Win32_ComputerSystem'`
+{"timestamp":"2025-09-18T11:22:24.608726Z","level":"INFO","fields":{"message":"Using DCOM activation for WMI port resolution"},"target":"linux_wmi::dcom","span":{"name":"activate_wmi_dcom"},"spans":[{"name":"resolve_wmi_port"},{"name":"activate_wmi_dcom"}]}
+{"timestamp":"2025-09-18T11:22:24.609899Z","level":"DEBUG","fields":{"message":"building NTLM type1","domain":"","workstation":"192.0.2.10"},"target":"linux_wmi::auth","span":{"name":"activate_wmi_dcom"},"spans":[{"name":"resolve_wmi_port"},{"name":"activate_wmi_dcom"}]}
+{"timestamp":"2025-09-18T11:22:24.609966Z","level":"DEBUG","fields":{"message":"Sending SCM bind PDU","len":146,"hex":"05000b03100000009200420001000000b810b81000000000010000000100a001000000000000c00000000000004600000000045d888aeb1cc9119fe808002b1048600200000000000a060200000000004e544c4d5353500001000000358289e200000000280000001a001a002800000000000000000000003100390038002e00350031002e003100300030002e0031003900"},"target":"linux_wmi::dcom","span":{"name":"activate_wmi_dcom"},"spans":[{"name":"resolve_wmi_port"},{"name":"activate_wmi_dcom"}]}
+{"timestamp":"2025-09-18T11:22:24.612882Z","level":"DEBUG","fields":{"message":"SCM bind_ack raw","len":24,"hex":"05000d031000000018000000010000000000010500000000"},"target":"linux_wmi::dcom","span":{"name":"activate_wmi_dcom"},"spans":[{"name":"resolve_wmi_port"},{"name":"activate_wmi_dcom"}]}
+{"timestamp":"2025-09-18T11:22:24.61292Z","level":"DEBUG","fields":{"message":"SCM bind_ack parse failure","err":"Failure(\"Unexpected PDU type in bind_ack\")"},"target":"linux_wmi::dcom","span":{"name":"activate_wmi_dcom"},"spans":[{"name":"resolve_wmi_port"},{"name":"activate_wmi_dcom"}]}
+{"timestamp":"2025-09-18T11:22:24.612994Z","level":"WARN","fields":{"message":"DCOM activation failed; falling back to port 135","err":"Protocol"},"target":"linux_wmi::dcom","span":{"name":"resolve_wmi_port"},"spans":[{"name":"resolve_wmi_port"}]}
+{"timestamp":"2025-09-18T11:22:24.613022Z","level":"DEBUG","fields":{"message":"Using StubNdrCodec (mock responses)"},"target":"linux_wmi"}
+{"timestamp":"2025-09-18T11:22:24.613051Z","level":"INFO","fields":{"message":"Using DCOM activation for WMI port resolution"},"target":"linux_wmi::dcom","span":{"name":"activate_wmi_dcom"},"spans":[{"host":"192.0.2.10","name":"connect"},{"name":"resolve_wmi_port"},{"name":"activate_wmi_dcom"}]}
+{"timestamp":"2025-09-18T11:22:24.61575Z","level":"DEBUG","fields":{"message":"building NTLM type1","domain":"","workstation":"192.0.2.10"},"target":"linux_wmi::auth","span":{"name":"activate_wmi_dcom"},"spans":[{"host":"192.0.2.10","name":"connect"},{"name":"resolve_wmi_port"},{"name":"activate_wmi_dcom"}]}
+{"timestamp":"2025-09-18T11:22:24.615869Z","level":"DEBUG","fields":{"message":"Sending SCM bind PDU","len":146,"hex":"05000b03100000009200420001000000b810b81000000000010000000100a001000000000000c00000000000004600000000045d888aeb1cc9119fe808002b1048600200000000000a060200000000004e544c4d5353500001000000358289e200000000280000001a001a002800000000000000000000003100390038002e00350031002e003100300030002e0031003900"},"target":"linux_wmi::dcom","span":{"name":"activate_wmi_dcom"},"spans":[{"host":"192.0.2.10","name":"connect"},{"name":"resolve_wmi_port"},{"name":"activate_wmi_dcom"}]}
+{"timestamp":"2025-09-18T11:22:24.618571Z","level":"DEBUG","fields":{"message":"SCM bind_ack raw","len":24,"hex":"05000d031000000018000000010000000000010500000000"},"target":"linux_wmi::dcom","span":{"name":"activate_wmi_dcom"},"spans":[{"host":"192.0.2.10","name":"connect"},{"name":"resolve_wmi_port"},{"name":"activate_wmi_dcom"}]}
+{"timestamp":"2025-09-18T11:22:24.618611Z","level":"DEBUG","fields":{"message":"SCM bind_ack parse failure","err":"Failure(\"Unexpected PDU type in bind_ack\")"},"target":"linux_wmi::dcom","span":{"name":"activate_wmi_dcom"},"spans":[{"host":"192.0.2.10","name":"connect"},{"name":"resolve_wmi_port"},{"name":"activate_wmi_dcom"}]}
+{"timestamp":"2025-09-18T11:22:24.618719Z","level":"WARN","fields":{"message":"DCOM activation failed; falling back to port 135","err":"Protocol"},"target":"linux_wmi::dcom","span":{"name":"resolve_wmi_port"},"spans":[{"host":"192.0.2.10","name":"connect"},{"name":"resolve_wmi_port"}]}
+{"timestamp":"2025-09-18T11:22:24.618778Z","level":"DEBUG","fields":{"message":"connecting to RPC endpoint","port":135},"target":"linux_wmi::transport","span":{"host":"192.0.2.10","name":"connect"},"spans":[{"host":"192.0.2.10","name":"connect"}]}
+{"timestamp":"2025-09-18T11:22:24.620561Z","level":"DEBUG","fields":{"message":"building NTLM type1","domain":"","workstation":"192.0.2.10"},"target":"linux_wmi::auth","span":{"host":"192.0.2.10","name":"connect"},"spans":[{"host":"192.0.2.10","name":"connect"}]}
+{"timestamp":"2025-09-18T11:22:24.620603Z","level":"DEBUG","fields":{"message":"sending bind request","pdu_len":148,"auth_len":66},"target":"linux_wmi::transport","span":{"host":"192.0.2.10","name":"connect"},"spans":[{"host":"192.0.2.10","name":"connect"}]}
+{"timestamp":"2025-09-18T11:22:34.621332Z","level":"ERROR","fields":{"message":"failed to read RPC PDU header","err":"Os { code: 35, kind: WouldBlock, message: \"Resource temporarily unavailable\" }"},"target":"linux_wmi::transport","span":{"host":"192.0.2.10","name":"connect"},"spans":[{"host":"192.0.2.10","name":"connect"}]}
+Failed to create real transport: transport failure: Resource temporarily unavailable (os error 35), falling back to stub
+ConnectServer to host 192.0.2.10 namespace root\CimV2
+Connected to 192.0.2.10 as wmi-test (domain: <local>)
+Query result: [{"Domain":"WORKGROUP","Manufacturer":"StubVendor","Model":"StubModel","Name":"STUB-PC","NumberOfProcessors":1,"TotalPhysicalMemory":8589934592}]

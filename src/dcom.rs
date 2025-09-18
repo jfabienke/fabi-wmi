@@ -9,7 +9,7 @@ use nom::{
     IResult,
 };
 use thiserror::Error;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 use crate::auth::{AuthProvider, Credentials, NtlmV2Client};
 use crate::transport::RealRpcTransport;
@@ -41,75 +41,14 @@ pub enum DcomError {
     Recv,
     #[error("Protocol error")]
     Protocol,
+    #[error("Access denied (0x80070005)")]
+    AccessDenied,
+    #[error("RPC server unavailable (0x800706BA)")]
+    ServerUnavailable,
+    #[error("Remote procedure call failed (0x800706BE)")]
+    RemoteProcedureCallFailed,
 }
 
-#[allow(dead_code)]
-fn parse_epm_bind_ack(pdu: &[u8]) -> Result<u16, DcomError> {
-    // Simple parser for EPM bind_ack to get context_id
-    if pdu.len() < 26 {
-        error!("EPM bind_ack too short: {}", pdu.len());
-        return Err(DcomError::Tower);
-    }
-
-    let ptype = pdu[2];
-    if ptype != 0x0C {
-        error!("Expected bind_ack (0x0C), got 0x{:02x}", ptype);
-        debug!("PDU hex: {}", hex::encode(pdu));
-        return Err(DcomError::Tower);
-    }
-
-    // Skip to presentation results
-    let mut cursor = Cursor::new(pdu);
-    cursor.set_position(16); // Skip RPC header
-
-    let max_xmit = cursor
-        .read_u16::<LittleEndian>()
-        .map_err(|_| DcomError::Tower)?;
-    let max_recv = cursor
-        .read_u16::<LittleEndian>()
-        .map_err(|_| DcomError::Tower)?;
-    debug!("max_xmit={}, max_recv={}", max_xmit, max_recv);
-
-    let _assoc_group = cursor
-        .read_u32::<LittleEndian>()
-        .map_err(|_| DcomError::Tower)?;
-    let sec_addr_len = cursor
-        .read_u16::<LittleEndian>()
-        .map_err(|_| DcomError::Tower)? as usize;
-    debug!("sec_addr_len={}", sec_addr_len);
-
-    // Skip secondary address
-    if sec_addr_len > 0 {
-        cursor.set_position(cursor.position() + sec_addr_len as u64);
-    }
-
-    // Align to 4 bytes
-    let pos = cursor.position();
-    let padding = (4 - (pos % 4)) % 4;
-    cursor.set_position(pos + padding);
-    debug!("After padding, pos={}", cursor.position());
-
-    let num_results = cursor.read_u8().map_err(|_| DcomError::Tower)?;
-    debug!("num_results={}", num_results);
-    if num_results == 0 {
-        error!("No presentation contexts in bind_ack");
-        return Err(DcomError::Tower);
-    }
-
-    cursor.set_position(cursor.position() + 3); // Skip reserved bytes
-
-    let result = cursor
-        .read_u16::<LittleEndian>()
-        .map_err(|_| DcomError::Tower)?;
-    debug!("presentation result={}", result);
-    if result != 0 {
-        error!("EPM bind rejected: result={}", result);
-        return Err(DcomError::Tower);
-    }
-
-    // Context ID is what we requested (0)
-    Ok(0)
-}
 
 #[instrument(level = "debug", skip_all, fields(host))]
 pub fn resolve_wmi_port(host: &str, creds: Option<&Credentials>) -> Result<u16, DcomError> {
@@ -122,7 +61,7 @@ pub fn resolve_wmi_port(host: &str, creds: Option<&Credentials>) -> Result<u16, 
 
     if let Some(creds) = creds {
         match activate_wmi_dcom(host, creds) {
-            Ok(port) => return Ok(port),
+            Ok((port, _oxid)) => return Ok(port),
             Err(err) => warn!(?err, "DCOM activation failed; falling back to port 135"),
         }
     } else {
@@ -134,16 +73,16 @@ pub fn resolve_wmi_port(host: &str, creds: Option<&Credentials>) -> Result<u16, 
 
 /// Resolve OXID to get object reference using IObjectExporter
 #[instrument(level = "debug", skip_all, fields(host, port))]
-fn resolve_oxid(
+pub fn resolve_oxid(
     host: &str,
     port: u16,
-    oxid: &[u8; 8],
     creds: &Credentials,
+    oxid: &[u8; 8],
 ) -> Result<ObjectReference, DcomError> {
     debug!("Resolving OXID {} on port {}", hex::encode(oxid), port);
 
     // Connect to dynamic port
-    let addr = format!("{}:{}", host, port);
+    let addr = format!("{host}:{port}");
     let mut stream = TcpStream::connect_timeout(
         &addr
             .to_socket_addrs()
@@ -231,10 +170,18 @@ fn parse_resolve_oxid_response(pdu: &[u8], oxid: &[u8; 8]) -> Result<ObjectRefer
 
     let ptype = pdu[2];
     if ptype == 0x03 {
-        // fault
+        // RPC fault
         if pdu.len() >= 28 {
             let status = u32::from_le_bytes([pdu[24], pdu[25], pdu[26], pdu[27]]);
             error!("ResolveOxid fault: 0x{:08x}", status);
+
+            // Map common HRESULT errors
+            match status {
+                0x80070005 => return Err(DcomError::AccessDenied),
+                0x800706BA => return Err(DcomError::ServerUnavailable),
+                0x800706BE => return Err(DcomError::RemoteProcedureCallFailed),
+                _ => return Err(DcomError::Fault { status, reason: 0 }),
+            }
         }
         return Err(DcomError::Protocol);
     }
@@ -243,28 +190,82 @@ fn parse_resolve_oxid_response(pdu: &[u8], oxid: &[u8; 8]) -> Result<ObjectRefer
         return Err(DcomError::Protocol);
     }
 
-    // Skip to stub data
-    let _stub_data = &pdu[24..];
+    // Skip to stub data (after RPC header)
+    let stub_data = &pdu[24..];
+    let mut cursor = Cursor::new(stub_data);
 
-    // Parse ORPCTHAT and response
-    // For now, return a stub ObjectReference
-    // TODO: Properly parse the response structure
+    // Parse ORPCTHAT header
+    let _flags = cursor.read_u32::<LittleEndian>().map_err(|_| DcomError::Protocol)?;
+
+    // Parse HRESULT
+    let hresult = cursor.read_u32::<LittleEndian>().map_err(|_| DcomError::Protocol)?;
+    if hresult != 0 {
+        error!("ResolveOxid failed with HRESULT: 0x{:08x}", hresult);
+        match hresult {
+            0x80070005 => return Err(DcomError::AccessDenied),
+            0x800706BA => return Err(DcomError::ServerUnavailable),
+            _ => return Err(DcomError::Fault { status: hresult, reason: 0 }),
+        }
+    }
+
+    // Parse ppRemUnknown (pointer to IRemUnknown interface)
+    let rem_unknown_ptr = cursor.read_u32::<LittleEndian>().map_err(|_| DcomError::Protocol)?;
+
+    let ipid = if rem_unknown_ptr != 0 {
+        // Parse IPID (16 bytes)
+        let mut ipid = [0u8; 16];
+        cursor.read_exact(&mut ipid).map_err(|_| DcomError::Protocol)?;
+        trace!("Extracted IPID: {:?}", hex::encode(ipid));
+        ipid
+    } else {
+        trace!("No IPID in RemUnknown pointer");
+        [0u8; 16]
+    };
+
+    // Parse standard flags
+    let std_flags = cursor.read_u32::<LittleEndian>().map_err(|_| DcomError::Protocol)?;
+
+    // Parse public references
+    let public_refs = cursor.read_u32::<LittleEndian>().map_err(|_| DcomError::Protocol)?;
+
+    // Parse OID (8 bytes)
+    let mut oid = [0u8; 8];
+    cursor.read_exact(&mut oid).map_err(|_| DcomError::Protocol)?;
+
+    // Parse pAuthnHint
+    let _authn_hint = cursor.read_u32::<LittleEndian>().map_err(|_| DcomError::Protocol)?;
+
+    // Parse pServerVersion pointer
+    let server_version_ptr = cursor.read_u32::<LittleEndian>().map_err(|_| DcomError::Protocol)?;
+    if server_version_ptr != 0 {
+        // Skip server version if present
+        let _ = cursor.read_u32::<LittleEndian>(); // major.minor version
+    }
+
+    debug!(
+        "ResolveOxid succeeded: IPID={:?}, OID={:?}, refs={}",
+        hex::encode(ipid),
+        hex::encode(oid),
+        public_refs
+    );
+
     Ok(ObjectReference {
-        ipid: [0u8; 16],     // Will be parsed from response
-        std_flags: 0x00000001,
-        public_refs: 5,
+        ipid,
+        std_flags,
+        public_refs,
         oxid: *oxid,
-        oid: [0u8; 8],       // Will be parsed from response
+        oid,
     })
 }
 
 /// Activate WMI via DCOM (IRemoteSCMActivator::RemoteActivation)
+/// Returns (port, OXID) tuple
 #[instrument(level = "debug", skip_all, fields(host))]
-fn activate_wmi_dcom(host: &str, creds: &Credentials) -> Result<u16, DcomError> {
+pub fn activate_wmi_dcom(host: &str, creds: &Credentials) -> Result<(u16, [u8; 8]), DcomError> {
     info!("Using DCOM activation for WMI port resolution");
 
     // Connect to SCM on port 135
-    let addr = format!("{}:135", host);
+    let addr = format!("{host}:135");
     let mut stream = TcpStream::connect_timeout(
         &addr
             .to_socket_addrs()
@@ -336,23 +337,24 @@ fn activate_wmi_dcom(host: &str, creds: &Credentials) -> Result<u16, DcomError> 
 
     let resp_pdu = read_rpc_pdu(&mut stream)?;
     let (port, oxid) = parse_remote_activation_response(&resp_pdu)?;
-    info!("DCOM activation successful, WMI port={}, OXID={}", port, hex::encode(&oxid));
+    info!("DCOM activation successful, WMI port={}, OXID={}", port, hex::encode(oxid));
 
-    // Resolve the OXID to get the full object reference
-    match resolve_oxid(host, port, &oxid, creds) {
+    // Optionally resolve the OXID to get the full object reference
+    // For now, just log the attempt and return port and OXID
+    match resolve_oxid(host, port, creds, &oxid) {
         Ok(obj_ref) => {
             info!("OXID resolved successfully: {:?}", obj_ref);
-            Ok(port)
         }
         Err(e) => {
-            warn!("OXID resolution failed: {:?}, continuing with port only", e);
-            Ok(port)
+            warn!("OXID resolution failed: {:?}, continuing with port and OXID only", e);
         }
     }
+
+    Ok((port, oxid))
 }
 
 const AUTH_TYPE_NTLM: u8 = 0x0A;
-const AUTH_LEVEL_CONNECT: u8 = 0x02;
+const AUTH_LEVEL_PRIVACY: u8 = 0x06;  // Packet Privacy for encrypted communication
 const MAX_XMIT_RECV: u16 = 0x10B8;
 
 fn build_scm_bind_pdu(call_id: u32, abstract_syntax: &[u8; 16], negotiate: &[u8]) -> Vec<u8> {
@@ -374,18 +376,18 @@ fn build_scm_bind_pdu(call_id: u32, abstract_syntax: &[u8; 16], negotiate: &[u8]
     let auth_len = if negotiate.is_empty() {
         0
     } else {
+        // Pad body to 4-byte alignment before auth trailer
         let pad = (4 - (body.len() % 4)) % 4;
-        for _ in 0..pad {
-            body.push(0);
-        }
+        body.extend(std::iter::repeat_n(0u8, pad));
+
+        // Auth trailer header
         body.push(AUTH_TYPE_NTLM);
-        body.push(AUTH_LEVEL_CONNECT);
-        body.push(pad as u8);
-        body.push(0);
-        body.write_u32::<LittleEndian>(0).unwrap();
-        for _ in 0..pad {
-            body.push(0);
-        }
+        body.push(AUTH_LEVEL_PRIVACY);
+        body.push(pad as u8);  // pad_len field records the padding already applied
+        body.push(0);  // reserved
+        body.write_u32::<LittleEndian>(0).unwrap();  // auth_context_id
+
+        // No second padding - extend NTLM blob directly
         body.extend_from_slice(negotiate);
         negotiate.len() as u16
     };
@@ -426,19 +428,18 @@ fn build_scm_alter_context_pdu(
     body.extend_from_slice(&hex_literal::hex!("045d888aeb1cc9119fe808002b104860"));
     body.write_u32::<LittleEndian>(2).unwrap();
 
+    // Pad body to 4-byte alignment before auth trailer
     let pad = (4 - (body.len() % 4)) % 4;
-    for _ in 0..pad {
-        body.push(0);
-    }
+    body.extend(std::iter::repeat_n(0u8, pad));
 
+    // Auth trailer header
     body.push(AUTH_TYPE_NTLM);
-    body.push(AUTH_LEVEL_CONNECT);
-    body.push(pad as u8);
-    body.push(0);
-    body.write_u32::<LittleEndian>(0).unwrap();
-    for _ in 0..pad {
-        body.push(0);
-    }
+    body.push(AUTH_LEVEL_PRIVACY);
+    body.push(pad as u8);  // pad_len field records the padding already applied
+    body.push(0);  // reserved
+    body.write_u32::<LittleEndian>(0).unwrap();  // auth_context_id
+
+    // No second padding - extend NTLM blob directly
     body.extend_from_slice(authenticate);
 
     let frag_len = (16 + body.len()) as u16;
@@ -457,7 +458,7 @@ fn build_scm_alter_context_pdu(
     pdu
 }
 
-/// Build RemoteActivation request stub
+/// Build RemoteActivation request stub with proper NDR encoding
 fn build_remote_activation_stub(clsid: &[u8; 16], iid: &[u8; 16]) -> Result<Vec<u8>, DcomError> {
     let mut stub = Vec::new();
 
@@ -484,15 +485,35 @@ fn build_remote_activation_stub(clsid: &[u8; 16], iid: &[u8; 16]) -> Result<Vec<
         .map_err(|_| DcomError::Protocol)?; // Mode
     stub.write_u32::<LittleEndian>(1)
         .map_err(|_| DcomError::Protocol)?; // Interfaces count
-    stub.write_u32::<LittleEndian>(0x00020000)
-        .map_err(|_| DcomError::Protocol)?; // IID array pointer
+
+    // IID array pointer (non-null unique pointer)
+    stub.write_u32::<LittleEndian>(0x00000001)
+        .map_err(|_| DcomError::Protocol)?; // pointer referent
+
+    // Conformant array of IIDs
     stub.write_u32::<LittleEndian>(1)
-        .map_err(|_| DcomError::Protocol)?; // array size
-    stub.extend_from_slice(iid);
+        .map_err(|_| DcomError::Protocol)?; // max_count
+    stub.write_u32::<LittleEndian>(0)
+        .map_err(|_| DcomError::Protocol)?; // offset
+    stub.write_u32::<LittleEndian>(1)
+        .map_err(|_| DcomError::Protocol)?; // actual_count
+    stub.extend_from_slice(iid); // IID data
+
+    // cRequestedProtseqs
     stub.write_u16::<LittleEndian>(1)
-        .map_err(|_| DcomError::Protocol)?; // cRequestedProtseqs
-    stub.write_u32::<LittleEndian>(0x00020004)
-        .map_err(|_| DcomError::Protocol)?; // protseq array pointer
+        .map_err(|_| DcomError::Protocol)?; // requesting 1 protocol
+
+    // Protocol sequence array pointer (non-null unique pointer)
+    stub.write_u32::<LittleEndian>(0x00000002)
+        .map_err(|_| DcomError::Protocol)?; // pointer referent
+
+    // Conformant array of protocol sequences
+    stub.write_u32::<LittleEndian>(1)
+        .map_err(|_| DcomError::Protocol)?; // max_count
+    stub.write_u32::<LittleEndian>(0)
+        .map_err(|_| DcomError::Protocol)?; // offset
+    stub.write_u32::<LittleEndian>(1)
+        .map_err(|_| DcomError::Protocol)?; // actual_count
     stub.write_u16::<LittleEndian>(0x07)
         .map_err(|_| DcomError::Protocol)?; // ncacn_ip_tcp
 
@@ -587,7 +608,7 @@ fn parse_remote_activation_response(pdu: &[u8]) -> Result<(u16, [u8; 8]), DcomEr
     // Use nom to parse the response, now also extracting OXID
     match parse_activation_response(stub_data) {
         Ok((_, (port, oxid))) => {
-            debug!("Extracted WMI port={} and OXID={:?}", port, hex::encode(&oxid));
+            debug!("Extracted WMI port={} and OXID={:?}", port, hex::encode(oxid));
             Ok((port, oxid))
         }
         Err(_) => {
@@ -667,7 +688,7 @@ fn parse_dualstringarray_port(input: &[u8]) -> IResult<&[u8], u16> {
     parse_dualstringarray_port_inner(input)
 }
 
-/// Inner function to parse DUALSTRINGARRAY for port
+/// Inner function to parse DUALSTRINGARRAY for port (UTF-16 strings)
 fn parse_dualstringarray_port_inner(input: &[u8]) -> IResult<&[u8], u16> {
     // Skip pServerVersion pointer
     let (input, server_version_ptr) = le_u32(input)?;
@@ -678,327 +699,68 @@ fn parse_dualstringarray_port_inner(input: &[u8]) -> IResult<&[u8], u16> {
         input
     };
 
-    // Parse DUALSTRINGARRAY
+    // Parse DUALSTRINGARRAY header
     let (input, string_binding_size) = le_u16(input)?;
     let (input, _security_binding_size) = le_u16(input)?;
 
-    // Parse string bindings to find TCP port
+    // Parse string bindings (UTF-16LE)
     let (input, bindings) = take(string_binding_size * 2)(input)?;
 
-    // Look for TCP tower (0x07) followed by port
+    // Convert UTF-16LE to string
+    let utf16_units: Vec<u16> = bindings
+        .chunks_exact(2)
+        .map(|ch| u16::from_le_bytes([ch[0], ch[1]]))
+        .collect();
+    let bindings_str = String::from_utf16_lossy(&utf16_units);
+
+    // Split on null terminator to get individual bindings
+    let binding_strings: Vec<&str> = bindings_str.split('\0').filter(|s| !s.is_empty()).collect();
+
+    // Find TCP binding (starts with "ncacn_ip_tcp:")
+    for binding in &binding_strings {
+        if binding.starts_with("ncacn_ip_tcp:") {
+            // Extract port from [port] at end of binding string
+            if let Some(start) = binding.rfind('[') {
+                if let Some(end) = binding[start + 1..].find(']') {
+                    let port_str = &binding[start + 1..start + 1 + end];
+                    if let Ok(port) = port_str.parse::<u16>() {
+                        // Accept any non-zero port for testing (5000 is not in ephemeral range)
+                        if port > 0 {
+                            return Ok((input, port));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // If no TCP binding found with bracket notation, try tower format fallback
+    // Some implementations use binary tower format
     let mut cursor = std::io::Cursor::new(bindings);
     while cursor.position() < bindings.len() as u64 - 2 {
         let tower_id = cursor.read_u16::<LittleEndian>().unwrap_or(0);
         if tower_id == 0x07 {
-            // TCP
+            // TCP tower ID
             // Skip IP components and read port
-            cursor.set_position(cursor.position() + 10); // Skip to port position
-            if cursor.position() < bindings.len() as u64 - 2 {
+            let current_pos = cursor.position();
+            if current_pos + 10 < bindings.len() as u64 {
+                cursor.set_position(current_pos + 10);
                 let port = cursor.read_u16::<LittleEndian>().unwrap_or(0);
-                if port > 0 && port < 65535 {
+                // Accept any valid port > 1024 for compatibility
+                if port > 1024 {
                     return Ok((input, port));
                 }
             }
         }
     }
 
-    // Fallback: scan for port-like values in dynamic range
-    for i in (0..bindings.len().saturating_sub(2)).step_by(2) {
-        let port = u16::from_le_bytes([bindings[i], bindings[i + 1]]);
-        if port >= 49152 {
-            return Ok((input, port));
-        }
-    }
-
-    Ok((input, 135)) // Default fallback
+    Ok((input, 135)) // Default fallback to port 135
 }
 
 #[allow(dead_code)]
-pub(crate) fn parse_epm_response(pdu: &[u8]) -> Result<u16, DcomError> {
-    if pdu.len() < 24 {
-        error!(len = pdu.len(), "EPM reply truncated");
-        return Err(DcomError::Tower);
-    }
-
-    let ptype = pdu[2];
-    if ptype == 0x03 {
-        if pdu.len() < 28 {
-            error!(len = pdu.len(), "RPC fault truncated");
-            return Err(DcomError::Tower);
-        }
-        let status_offset = 24;
-        let status = u32::from_le_bytes([
-            pdu[status_offset],
-            pdu[status_offset + 1],
-            pdu[status_offset + 2],
-            pdu[status_offset + 3],
-        ]);
-        let reason = if pdu.len() >= status_offset + 8 {
-            u32::from_le_bytes([
-                pdu[status_offset + 4],
-                pdu[status_offset + 5],
-                pdu[status_offset + 6],
-                pdu[status_offset + 7],
-            ])
-        } else {
-            0
-        };
-        error!(
-            status = format!("0x{status:08x}"),
-            reason = format!("0x{reason:08x}"),
-            "endpoint mapper fault"
-        );
-        return Err(DcomError::Fault { status, reason });
-    }
-
-    if ptype == 0x0D {
-        error!("Received alter_ack (0x0D) instead of EPM response - likely protocol mismatch");
-        return Err(DcomError::Tower);
-    }
-
-    if ptype != 0x02 {
-        error!(
-            ptype = format!("0x{ptype:02x}"),
-            "unexpected RPC PDU type in EPM response"
-        );
-        return Err(DcomError::Tower);
-    }
-
-    let parsed = extract_tower_sections(pdu);
-    match parsed {
-        Ok((tower, searchable)) => match parse_epm_tower(tower) {
-            Ok(Some(port)) => Ok(port),
-            Ok(None) => {
-                warn!("no explicit TCP floor; scanning payload for fallback port");
-                scan_for_tcp_floor(searchable).ok_or(DcomError::Port)
-            }
-            Err(err) => {
-                if let Some(port) = scan_for_tcp_floor(searchable) {
-                    warn!("tower parse failed; using heuristic port");
-                    Ok(port)
-                } else {
-                    Err(err)
-                }
-            }
-        },
-        Err(err) => {
-            if let Some(port) = scan_for_tcp_floor(pdu) {
-                warn!("failed to extract tower; using heuristic port");
-                Ok(port)
-            } else {
-                Err(err)
-            }
-        }
-    }
-}
-
-#[allow(dead_code)]
-fn extract_tower_sections<'a>(pdu: &'a [u8]) -> Result<(&'a [u8], &'a [u8]), DcomError> {
-    let frag_len = u16::from_le_bytes([pdu[8], pdu[9]]) as usize;
-    let auth_len = u16::from_le_bytes([pdu[10], pdu[11]]) as usize;
-    if frag_len > pdu.len() {
-        error!(frag_len, total = pdu.len(), "invalid fragment length");
-        return Err(DcomError::Tower);
-    }
-
-    let stub_start = 24;
-    if stub_start > frag_len || frag_len < auth_len + stub_start {
-        error!(frag_len, auth_len, "malformed EPM reply");
-        return Err(DcomError::Tower);
-    }
-    let stub_end = frag_len - auth_len;
-    if stub_end > pdu.len() {
-        error!(stub_end, total = pdu.len(), "EPM reply overruns buffer");
-        return Err(DcomError::Tower);
-    }
-
-    let stub = &pdu[stub_start..stub_end];
-    if stub.len() < 16 {
-        error!(len = stub.len(), "tower pointer truncated");
-        return Err(DcomError::Tower);
-    }
-
-    let tower_length = u32::from_le_bytes([stub[4], stub[5], stub[6], stub[7]]) as usize;
-    let referent = u32::from_le_bytes([stub[8], stub[9], stub[10], stub[11]]);
-    if referent == 0 {
-        error!("tower pointer is null");
-        return Err(DcomError::Tower);
-    }
-    let max_count = u32::from_le_bytes([stub[12], stub[13], stub[14], stub[15]]) as usize;
-    if tower_length == 0 {
-        error!("tower length is zero");
-        return Err(DcomError::Tower);
-    }
-    if tower_length > stub.len().saturating_sub(16) {
-        error!(
-            tower_length,
-            available = stub.len().saturating_sub(16),
-            "tower payload truncated"
-        );
-        return Err(DcomError::Tower);
-    }
-    if max_count < tower_length {
-        error!(tower_length, max_count, "invalid tower length metadata");
-        return Err(DcomError::Tower);
-    }
-    if max_count > stub.len().saturating_sub(16) {
-        error!(
-            max_count,
-            available = stub.len().saturating_sub(16),
-            "tower payload truncated"
-        );
-        return Err(DcomError::Tower);
-    }
-
-    let data_start = 16;
-    let tower = &stub[data_start..data_start + tower_length];
-    let searchable = &stub[data_start..data_start + max_count];
-    Ok((tower, searchable))
-}
-
-#[allow(dead_code)]
-fn parse_epm_tower(tower: &[u8]) -> Result<Option<u16>, DcomError> {
-    if tower.len() < 2 {
-        error!(len = tower.len(), "tower payload truncated");
-        return Err(DcomError::Tower);
-    }
-
-    let mut cursor = Cursor::new(tower);
-    let floor_count = cursor.read_u16::<LittleEndian>().map_err(|err| {
-        error!(?err, "failed to read EPM tower header");
-        DcomError::Tower
-    })? as usize;
-    debug!(floor_count, "parsing EPM floors");
-
-    for _ in 0..floor_count {
-        let lhs_len = cursor.read_u16::<LittleEndian>().map_err(|err| {
-            error!(?err, "missing floor protocol length");
-            DcomError::Tower
-        })? as usize;
-        let mut lhs = vec![0u8; lhs_len];
-        cursor.read_exact(&mut lhs).map_err(|err| {
-            error!(?err, "incomplete floor protocol data");
-            DcomError::Tower
-        })?;
-
-        let rhs_len = cursor.read_u16::<LittleEndian>().map_err(|err| {
-            error!(?err, "missing floor address length");
-            DcomError::Tower
-        })? as usize;
-        let mut rhs = vec![0u8; rhs_len];
-        cursor.read_exact(&mut rhs).map_err(|err| {
-            error!(?err, "incomplete floor address data");
-            DcomError::Tower
-        })?;
-
-        if let Some(port) = extract_port_from_floor(&lhs, &rhs) {
-            return Ok(Some(port));
-        }
-    }
-
-    Ok(None)
-}
-
-#[allow(dead_code)]
-fn extract_port_from_floor(lhs: &[u8], rhs: &[u8]) -> Option<u16> {
-    if lhs.first().copied() != Some(0x07) {
-        return None;
-    }
-    if rhs.len() < 2 {
-        return None;
-    }
-    Some(u16::from_le_bytes([rhs[0], rhs[1]]))
-}
-
-#[allow(dead_code)]
-fn scan_for_tcp_floor(pdu: &[u8]) -> Option<u16> {
-    for i in 0..pdu.len().saturating_sub(7) {
-        if pdu[i] == 0x07 && i + 6 < pdu.len() {
-            return Some(u16::from_le_bytes([pdu[i + 5], pdu[i + 6]]));
-        }
-    }
-    None
-}
-
-#[allow(dead_code)]
-fn read_pdu(stream: &mut TcpStream) -> Result<Vec<u8>, DcomError> {
-    let mut header = [0u8; 16];
-    stream.read_exact(&mut header).map_err(|err| {
-        error!(?err, "failed to read EPM header");
-        DcomError::Connect
-    })?;
-    let frag_len = u16::from_le_bytes([header[8], header[9]]) as usize;
-    let mut buffer = Vec::with_capacity(frag_len);
-    buffer.extend_from_slice(&header);
-    let mut rest = vec![0u8; frag_len.saturating_sub(16)];
-    stream.read_exact(&mut rest).map_err(|err| {
-        error!(?err, "failed to read EPM payload");
-        DcomError::Connect
-    })?;
-    buffer.extend_from_slice(&rest);
-    Ok(buffer)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_epm_response_returns_port_from_tower() {
-        let tower = crate::tower::sample_epm_response_stub();
-        let mut stub = Vec::new();
-        stub.extend_from_slice(&0u32.to_le_bytes());
-        stub.extend_from_slice(&(tower.len() as u32).to_le_bytes());
-        stub.extend_from_slice(&1u32.to_le_bytes());
-        stub.extend_from_slice(&(tower.len() as u32).to_le_bytes());
-        stub.extend_from_slice(tower);
-        let pad = (4 - (stub.len() % 4)) % 4;
-        stub.extend(std::iter::repeat(0u8).take(pad));
-
-        let frag_len = (16 + 8 + stub.len()) as u16;
-        let mut pdu = Vec::new();
-        pdu.extend_from_slice(&[5, 0, 0x02, 0x03]);
-        pdu.extend_from_slice(&[0x10, 0x00, 0x00, 0x00]);
-        pdu.extend_from_slice(&frag_len.to_le_bytes());
-        pdu.extend_from_slice(&0u16.to_le_bytes());
-        pdu.extend_from_slice(&1u32.to_le_bytes());
-        pdu.extend_from_slice(&(stub.len() as u32).to_le_bytes());
-        pdu.extend_from_slice(&0u16.to_le_bytes());
-        pdu.push(0);
-        pdu.push(0);
-        pdu.extend_from_slice(&stub);
-        let port = parse_epm_response(&pdu).unwrap();
-        assert_eq!(port, 0xc002);
-    }
-
-    #[test]
-    fn parse_epm_response_reports_fault_status() {
-        let pdu = hex_literal::hex!(
-            "05 00 03 03 10 00 00 00 20 00 00 00 01 00 00 00"
-            "00 00 00 00 00 00 00 00 04 05 01 00 00 00 00 00"
-        );
-        let err = parse_epm_response(&pdu).unwrap_err();
-        match err {
-            DcomError::Fault { status, reason } => {
-                assert_eq!(status, 0x00010504);
-                assert_eq!(reason, 0);
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_epm_response_handles_alter_ack() {
-        let pdu = hex_literal::hex!(
-            "05 00 0d 03 10 00 00 00 18 00 00 00 01 00 00 00"
-            "04 00 01 05 00 00 00 00"
-        );
-        let err = parse_epm_response(&pdu).unwrap_err();
-        match err {
-            DcomError::Tower => (),
-            other => panic!("expected Tower error for alter_ack, got: {other:?}"),
-        }
-    }
 
     #[test]
     fn test_oxid_extraction_from_activation_response() {
@@ -1062,5 +824,176 @@ mod tests {
         let (_, (flags, _causality_id, extensions)) = result2.unwrap();
         assert_eq!(flags, 0x01);
         assert_eq!(extensions.len(), 0);
+    }
+
+    #[test]
+    fn test_auth_level_privacy_in_bind_pdu() {
+        // Test that bind PDU uses privacy auth level
+        let negotiate = vec![0x4E, 0x54, 0x4C, 0x4D]; // "NTLM"
+        let pdu = build_scm_bind_pdu(
+            1,
+            &[0x99, 0xFC, 0xFE, 0xC4, 0x52, 0x60, 0x10, 0x1B,
+              0xBB, 0xCB, 0x00, 0xAA, 0x00, 0x21, 0x34, 0x7A],
+            &negotiate
+        );
+
+        // Find auth header in PDU
+        // Auth trailer comes after the main body, before the auth blob
+        // Look for AUTH_TYPE_NTLM (0x0A) followed by AUTH_LEVEL_PRIVACY (0x06)
+        let mut found_auth_level = false;
+        for i in 0..pdu.len()-1 {
+            if pdu[i] == AUTH_TYPE_NTLM && i+1 < pdu.len() {
+                assert_eq!(pdu[i+1], AUTH_LEVEL_PRIVACY, "Auth level should be PRIVACY (0x06)");
+                found_auth_level = true;
+                break;
+            }
+        }
+        assert!(found_auth_level, "Should find auth level in bind PDU");
+    }
+
+    #[test]
+    fn test_auth_level_privacy_in_alter_context_pdu() {
+        // Test that alter context PDU uses privacy auth level
+        let authenticate = vec![0x4E, 0x54, 0x4C, 0x4D]; // "NTLM"
+        let pdu = build_scm_alter_context_pdu(
+            2,  // call_id
+            0,  // context_id
+            &[0x99, 0xFC, 0xFE, 0xC4, 0x52, 0x60, 0x10, 0x1B,
+              0xBB, 0xCB, 0x00, 0xAA, 0x00, 0x21, 0x34, 0x7A],
+            &authenticate
+        );
+
+        // Find auth header in PDU
+        let mut found_auth_level = false;
+        for i in 0..pdu.len()-1 {
+            if pdu[i] == AUTH_TYPE_NTLM && i+1 < pdu.len() {
+                assert_eq!(pdu[i+1], AUTH_LEVEL_PRIVACY, "Auth level should be PRIVACY (0x06)");
+                found_auth_level = true;
+                break;
+            }
+        }
+        assert!(found_auth_level, "Should find auth level in alter context PDU");
+    }
+
+    #[test]
+    fn test_remote_activation_stub_ndr_encoding() {
+        // Test that RemoteActivation stub uses proper NDR conformant arrays
+        let clsid = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+                     0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00];
+        let iid = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                   0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46];  // IID_IUnknown
+        let stub = build_remote_activation_stub(&clsid, &iid).unwrap();
+
+        // ORPCTHIS is: version(4) + flags(4) + reserved1(4) + causality(16) + extensions(4) = 32 bytes
+        let offset = 32;
+
+        // The CLSID starts after ORPCTHIS
+        assert!(stub.len() >= offset + 16, "Stub should contain CLSID");
+        let stub_clsid = &stub[offset..offset+16];
+        assert_eq!(stub_clsid, &clsid, "CLSID should match");
+
+        // Then pwszObjectName pointer (null)
+        let string_ptr = u32::from_le_bytes([stub[offset+16], stub[offset+17], stub[offset+18], stub[offset+19]]);
+        assert_eq!(string_ptr, 0, "String pointer should be null for default activation");
+
+        // Then pObjectStorage pointer (null)
+        let storage_ptr = u32::from_le_bytes([stub[offset+20], stub[offset+21], stub[offset+22], stub[offset+23]]);
+        assert_eq!(storage_ptr, 0, "Storage pointer should be null");
+
+        // Then ClientImpLevel
+        let imp_level = u32::from_le_bytes([stub[offset+24], stub[offset+25], stub[offset+26], stub[offset+27]]);
+        assert_eq!(imp_level, 2, "Impersonation level should be IDENTIFY (2)");
+
+        // Then Mode
+        let mode = u32::from_le_bytes([stub[offset+28], stub[offset+29], stub[offset+30], stub[offset+31]]);
+        assert_eq!(mode, 0, "Mode should be 0");
+
+        // Then Interfaces count
+        let req_count = u32::from_le_bytes([stub[offset+32], stub[offset+33], stub[offset+34], stub[offset+35]]);
+        assert_eq!(req_count, 1, "Should request 1 interface");
+
+        // Then IID array pointer (non-null unique pointer)
+        let iid_ptr = u32::from_le_bytes([stub[offset+36], stub[offset+37], stub[offset+38], stub[offset+39]]);
+        assert_ne!(iid_ptr, 0, "IID array pointer should be non-null");
+
+        // Then conformant array header for IIDs
+        let iid_array_offset = offset + 40;
+        if stub.len() > iid_array_offset + 12 {
+            // Should have max_count = 1
+            let max_count = u32::from_le_bytes([
+                stub[iid_array_offset], stub[iid_array_offset+1],
+                stub[iid_array_offset+2], stub[iid_array_offset+3]
+            ]);
+            assert_eq!(max_count, 1, "IID array max_count should be 1");
+
+            // Offset should be 0
+            let arr_offset = u32::from_le_bytes([
+                stub[iid_array_offset+4], stub[iid_array_offset+5],
+                stub[iid_array_offset+6], stub[iid_array_offset+7]
+            ]);
+            assert_eq!(arr_offset, 0, "IID array offset should be 0");
+
+            // Actual count should be 1
+            let actual = u32::from_le_bytes([
+                stub[iid_array_offset+8], stub[iid_array_offset+9],
+                stub[iid_array_offset+10], stub[iid_array_offset+11]
+            ]);
+            assert_eq!(actual, 1, "IID array actual_count should be 1");
+
+            // Then the IID itself
+            let stub_iid = &stub[iid_array_offset+12..iid_array_offset+28];
+            assert_eq!(stub_iid, &iid, "IID should match");
+        }
+    }
+
+    #[test]
+    fn test_dualstringarray_utf16_parsing() {
+        // Test that DUALSTRINGARRAY is parsed as UTF-16LE strings
+        // Build a complete RemoteActivation response stub
+        let mut stub = Vec::new();
+
+        // ORPCTHAT header (no extensions)
+        stub.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]); // flags (no extensions)
+
+        // HRESULT (success)
+        stub.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+
+        // OXID (8 bytes) - test pattern
+        stub.extend_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
+
+        // pOxidBindings pointer (non-null to indicate DUALSTRINGARRAY follows)
+        stub.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]);
+
+        // ipidRemUnknown (16 bytes)
+        stub.extend_from_slice(&[0x00; 16]);
+
+        // dwAuthnHint
+        stub.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+
+        // pServerVersion pointer (null)
+        stub.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+
+        // Now the actual DUALSTRINGARRAY
+        // Create a DUALSTRINGARRAY with UTF-16LE "ncacn_ip_tcp:192.168.1.1[5000]"
+        let binding = "ncacn_ip_tcp:192.168.1.1[5000]";
+        let utf16: Vec<u16> = binding.encode_utf16().collect();
+
+        // DUALSTRINGARRAY header
+        // Size is in 16-bit words, not bytes. Need 2 extra words for double null termination
+        stub.extend_from_slice(&((utf16.len() + 2) as u16).to_le_bytes()); // string binding size in words
+        stub.extend_from_slice(&[0x00, 0x00]); // security binding size
+
+        // UTF-16LE string binding
+        for unit in &utf16 {
+            stub.extend_from_slice(&unit.to_le_bytes());
+        }
+        stub.extend_from_slice(&[0x00, 0x00]); // null terminator for this binding
+        stub.extend_from_slice(&[0x00, 0x00]); // end of all string bindings (double null)
+
+        // Parse it
+        let result = parse_dualstringarray_port(&stub);
+        assert!(result.is_ok(), "Should parse DUALSTRINGARRAY successfully");
+        let (_, port) = result.unwrap();
+        assert_eq!(port, 5000, "Should extract port 5000 from UTF-16 string");
     }
 }

@@ -57,16 +57,16 @@ High-level overview of the linux-wmi implementation architecture, reflecting the
 
 Based on PROTOCOL-COMPLETION.md estimates:
 
-| Component           | Status             | Completion |
+| Component           | Status             | Completion                                              |
 |---------------------|--------------------|---------------------------------------------------------|
 | **Transport Layer** | ✅ Complete        | 100% - TCP with timeouts, non-blocking I/O              |
 | **RPCE (RPC)**      | ✅ Complete        | 100% - PDUs, bind/alter, faults, multi-fragment support |
 | **Authentication**  | ✅ Complete        | 100% - Full NTLMv2 with session keys                    |
 | **DCOM Activation** | ✅ Complete        | 100% - RemoteActivation with OXID resolver implemented  |
-| **ORPC Layer**      | ✅ Mostly Complete | 75% - ORPCTHIS/THAT, OXID resolver, causality tracking  |
-| **NDR Codec**       | 🔄 Stubbed         | 30% - Basic BSTR, needs VARIANT/arrays                  |
-| **WMI Protocol**    | 🔄 Stubbed         | 25% - Opnums defined, returns mock JSON                 |
-| **Overall Stack**   | **68% Complete**   | Transport/RPCE/Auth/DCOM complete, NDR/WMI stubbed      |
+| **ORPC Layer**      | ✅ Complete        | 100% - ORPCTHIS/THAT, OXID resolver, causality tracking |
+| **NDR Codec**       | ✅ Foundation      |  80% - VARIANT types, BSTR, arrays, ExecQuery encoding  |
+| **WMI Protocol**    | 🔄 Stubbed         |  30% - Opnums defined, returns mock JSON                |
+| **Overall Stack**   | **80% Complete**   | Core protocol stack done, WMI object parsing remains    |
 
 ## Module Structure
 
@@ -75,9 +75,12 @@ src/
 ├── lib.rs                  # FFI exports, session management
 ├── wmi.rs                  # WmiSession, IWbemServices facade
 ├── transport.rs            # RpcTransport trait & RealRpcTransport
-├── dcom.rs                 # DCOM activation, port resolution
+├── dcom.rs                 # DCOM activation, OXID resolver
 ├── auth.rs                 # NTLMv2 implementation
-├── ndr.rs                  # NDR codec (stub for now)
+├── ndr.rs                  # NDR codec traits and exports
+│   ├── codec.rs           # RealNdrCodec implementation
+│   ├── types.rs           # VARIANT, BSTR, ConformantArray
+│   └── golden_tests.rs    # Golden byte validation tests
 ├── tower.rs                # EPM tower builder/parser
 └── rpc_fixtures.rs         # Test fixtures, golden PDUs
 
@@ -169,6 +172,27 @@ examples/
    - Anonymous RPC probe for Windows detection
    - Score 0.9 confidence on bind_ack
    - Fall back to WinRM if DCOM fails
+
+### Windows Server Remote Management Matrix
+
+| Windows Server Version | Service Packs / Releases | WMI (Windows Management Instrumentation) | WinRM (Windows Remote Management) |
+|------------------------|---------------------------|-------------------------------------------|------------------------------------|
+| Windows 2000 Server    | SP0 – SP4                | Default: Installed and enabled by default.| Not included. WinRM did not exist yet. |
+| Windows Server 2003    | RTM, SP1, SP2            | Default: Installed and enabled by default.| Optional: WinRM 1.1 via WMF 2.0; manual install, disabled until configured. |
+| Windows Server 2008    | RTM, R2                  | Default: Installed and enabled by default.| Included: WinRM 2.0 shipped but disabled; requires `winrm quickconfig`. |
+| Windows Server 2012    | RTM, R2                  | Default: Installed and enabled by default.| Enabled by default: WinRM 3.0 auto-starts with listeners preconfigured. |
+| Windows Server 2016    | GA                       | Default: Installed and enabled by default.| Enabled by default: WinRM 3.0 with PowerShell Remoting ready. |
+| Windows Server 2019    | GA                       | Default: Installed and enabled by default.| Enabled by default: WinRM enabled out-of-the-box. |
+| Windows Server 2022    | GA                       | Default: Installed and enabled by default.| Enabled by default: WinRM enabled out-of-the-box. |
+
+**Key Notes**
+
+- **WMI**
+  - Present since Windows 2000 and generally enabled without additional configuration.
+  - Core system-management API; security hardening is the primary reason it might be disabled.
+- **WinRM**
+  - Implements WS-Management and arrived later than WMI.
+  - Optional on 2003 (WinRM 1.1 via WMF 2.0), present but disabled on 2008, enabled by default starting with 2012 (including Server Core).
 
 ## Testing Strategy
 

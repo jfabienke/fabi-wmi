@@ -18,11 +18,11 @@ fn main() {
     match activate_wmi(&host, &user, &pass, &domain) {
         Ok((port, oxid)) => {
             println!("✅ DCOM Activation Success!");
-            println!("   Dynamic Port: {}", port);
-            println!("   OXID: {}", oxid);
+            println!("   Dynamic Port: {port}");
+            println!("   OXID: {oxid}");
         }
         Err(e) => {
-            eprintln!("❌ DCOM Activation Failed: {}", e);
+            eprintln!("❌ DCOM Activation Failed: {e}");
             std::process::exit(1);
         }
     }
@@ -122,8 +122,7 @@ fn activate_wmi(
                     "Note: This is often due to DCOM permissions. Try with Administrator account."
                 );
                 return Err(format!(
-                    "Alter context fault: status=0x{:08x}, reason=0x{:08x}",
-                    status, reason
+                    "Alter context fault: status=0x{status:08x}, reason=0x{reason:08x}"
                 )
                 .into());
             }
@@ -318,7 +317,7 @@ fn parse_scm_bind_ack(pdu: &[u8]) -> Result<u16, Box<dyn std::error::Error>> {
 
     let ptype = pdu[2];
     if ptype != 0x0C {
-        return Err(format!("Expected bind_ack (0x0C), got 0x{:02x}", ptype).into());
+        return Err(format!("Expected bind_ack (0x0C), got 0x{ptype:02x}").into());
     }
 
     // Skip to presentation context results
@@ -359,7 +358,7 @@ fn parse_scm_bind_ack_with_auth(pdu: &[u8]) -> Result<(u16, Vec<u8>), Box<dyn st
 
     let ptype = pdu[2];
     if ptype != 0x0C {
-        return Err(format!("Expected bind_ack (0x0C), got 0x{:02x}", ptype).into());
+        return Err(format!("Expected bind_ack (0x0C), got 0x{ptype:02x}").into());
     }
 
     let auth_len = u16::from_le_bytes([pdu[10], pdu[11]]) as usize;
@@ -452,13 +451,13 @@ fn parse_remote_activation(pdu: &[u8]) -> Result<(u16, String), Box<dyn std::err
         // Fault response
         if pdu.len() >= 28 {
             let status = u32::from_le_bytes([pdu[24], pdu[25], pdu[26], pdu[27]]);
-            return Err(format!("RPC fault: 0x{:08x}", status).into());
+            return Err(format!("RPC fault: 0x{status:08x}").into());
         }
         return Err("RPC fault (status unknown)".into());
     }
 
     if ptype != 0x02 {
-        return Err(format!("Expected response (0x02), got 0x{:02x}", ptype).into());
+        return Err(format!("Expected response (0x02), got 0x{ptype:02x}").into());
     }
 
     // Skip RPC header (24 bytes) to get to ORPCTHAT + stub
@@ -483,12 +482,12 @@ fn parse_remote_activation(pdu: &[u8]) -> Result<(u16, String), Box<dyn std::err
     // HRESULT
     let hresult = cursor.read_u32::<LittleEndian>()?;
     if hresult != 0 {
-        return Err(format!("RemoteActivation failed: HRESULT=0x{:08x}", hresult).into());
+        return Err(format!("RemoteActivation failed: HRESULT=0x{hresult:08x}").into());
     }
 
     // OXID (8 bytes)
     let oxid = cursor.read_u64::<LittleEndian>()?;
-    let oxid_str = format!("{:016X}", oxid);
+    let oxid_str = format!("{oxid:016X}");
     debug!("OXID: {}", oxid_str);
 
     // Skip pOxidBindings pointer
@@ -601,7 +600,7 @@ fn read_pdu(stream: &mut TcpStream) -> Result<Vec<u8>, Box<dyn std::error::Error
 
     let frag_len = u16::from_le_bytes([header[8], header[9]]) as usize;
     if frag_len < 16 {
-        return Err(format!("Invalid fragment length: {}", frag_len).into());
+        return Err(format!("Invalid fragment length: {frag_len}").into());
     }
 
     let mut pdu = vec![0u8; frag_len];

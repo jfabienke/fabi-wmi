@@ -20,6 +20,7 @@ name = "wmi_probe"
 path = "examples/wmi_probe.rs"
 
 [dependencies]
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 libc = "0.2"
 uuid = { version = "1.10", features = ["v4", "serde"] }
@@ -33,3 +34,4 @@ hex = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "time"] }
 nom = "7.1"
+rc4 = "0.1"

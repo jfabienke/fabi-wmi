@@ -1,6 +1,5 @@
 use crate::auth::{AuthProvider, Credentials, NtlmV2Client};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use serde_json;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::io::{Cursor, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -77,10 +76,219 @@ pub struct RealRpcTransport {
     auth_level: u8,
     max_xmit: u16,
     max_recv: u16,
+    ipid: Option<[u8; 16]>,  // Interface pointer ID from OXID resolution
+    object_ref: Option<crate::dcom::ObjectReference>,  // Full object reference
+    seqno: u32,  // Sequence number for signing/sealing
 }
 
 #[allow(dead_code)]
 impl RealRpcTransport {
+    /// Set the IPID from OXID resolution for object calls
+    pub fn set_ipid(&mut self, ipid: [u8; 16]) {
+        self.ipid = Some(ipid);
+    }
+
+    /// Set the full object reference from OXID resolution
+    pub fn set_object_reference(&mut self, obj_ref: crate::dcom::ObjectReference) {
+        self.ipid = Some(obj_ref.ipid);
+        self.object_ref = Some(obj_ref);
+    }
+
+    /// Helper for auth pad (8 bytes: 4-byte confounder random, 4-byte seqno)
+    fn build_auth_pad(&self, seqno: u32) -> [u8; 8] {
+        let mut pad = [0u8; 8];
+        // Use a simple pseudo-random for confounder (in production use rand crate)
+        let confounder = (seqno.wrapping_mul(0x343FD)).wrapping_add(0x269EC3);
+        pad[0..4].copy_from_slice(&confounder.to_le_bytes());
+        pad[4..].copy_from_slice(&seqno.to_le_bytes());
+        pad
+    }
+
+    /// Sign a PDU with HMAC-MD5 using the session key (MS-RPCE §3.3.3)
+    fn sign_pdu(&mut self, pdu: &mut Vec<u8>) -> Result<(), TransportError> {
+        if self.session_key.is_empty() {
+            return Err(TransportError::Failure("No session key for signing".into()));
+        }
+
+        let seqno = self.seqno;
+        self.seqno = self.seqno.wrapping_add(1);
+
+        // Build sign data: auth_pad + pdu
+        let auth_pad = self.build_auth_pad(seqno);
+        let mut sign_data = auth_pad.to_vec();
+        sign_data.extend_from_slice(pdu);
+
+        // Compute HMAC-MD5 signature
+        let signature = crate::crypto::hmac_md5_sign(&self.session_key, &sign_data);
+
+        // Append auth trailer with signature
+        // Auth type (1 byte) + Auth level (1 byte) + Pad len (1 byte) + Reserved (1 byte)
+        pdu.push(0x0A);  // AUTH_TYPE_NTLM
+        pdu.push(self.auth_level);
+        pdu.push(0);  // pad_len
+        pdu.push(0);  // reserved
+
+        // Auth context ID (4 bytes)
+        pdu.extend_from_slice(&self.context_id.to_le_bytes());
+        pdu.extend_from_slice(&[0, 0]);  // pad to 4 bytes
+
+        // Signature (16 bytes)
+        pdu.extend_from_slice(&signature);
+
+        // Update auth_len in header (offset 10-11)
+        let auth_len = 24u16;  // auth header (8) + signature (16)
+        pdu[10..12].copy_from_slice(&auth_len.to_le_bytes());
+
+        // Update frag_len in header (offset 8-9)
+        let frag_len = pdu.len() as u16;
+        pdu[8..10].copy_from_slice(&frag_len.to_le_bytes());
+
+        Ok(())
+    }
+
+    /// Seal (encrypt) a PDU with RC4 using the session key (MS-RPCE §3.3.4)
+    fn seal_pdu(&mut self, pdu: &mut Vec<u8>) -> Result<(), TransportError> {
+        if self.session_key.is_empty() {
+            return Err(TransportError::Failure("No session key for sealing".into()));
+        }
+
+        if self.auth_level != 6 {
+            return self.sign_pdu(pdu); // Just sign if not privacy level
+        }
+
+        let seqno = self.seqno;
+        self.seqno = self.seqno.wrapping_add(1);
+
+        // Derive RC4 key: MD5(session_key || seqno)
+        let mut seal_key_data = self.session_key.clone();
+        seal_key_data.extend_from_slice(&seqno.to_le_bytes());
+        let rc4_key_hash = md5::compute(&seal_key_data);
+
+        // For privacy level, encrypt the stub data (everything after RPC header)
+        // RPC header is 16 bytes, request header is 8 bytes
+        if pdu.len() > 24 {
+            let stub_start = 24;
+            // Use the first 16 bytes of the MD5 hash as the RC4 key
+            crate::crypto::rc4_encrypt(&rc4_key_hash.0, &mut pdu[stub_start..]);
+        }
+
+        // Build sign data with encrypted content
+        let auth_pad = self.build_auth_pad(seqno);
+        let mut sign_data = auth_pad.to_vec();
+        sign_data.extend_from_slice(pdu);
+
+        // Compute HMAC-MD5 signature over encrypted data
+        let signature = crate::crypto::hmac_md5_sign(&self.session_key, &sign_data);
+
+        // Append auth trailer
+        pdu.push(0x0A);  // AUTH_TYPE_NTLM
+        pdu.push(self.auth_level);
+        pdu.push(0);  // pad_len
+        pdu.push(0);  // reserved
+        pdu.extend_from_slice(&self.context_id.to_le_bytes());
+        pdu.extend_from_slice(&[0, 0]);
+        pdu.extend_from_slice(&signature);
+
+        // Update headers
+        let auth_len = 24u16;
+        pdu[10..12].copy_from_slice(&auth_len.to_le_bytes());
+        let frag_len = pdu.len() as u16;
+        pdu[8..10].copy_from_slice(&frag_len.to_le_bytes());
+
+        Ok(())
+    }
+
+    /// Verify and optionally decrypt a response PDU (MS-RPCE §3.3.4)
+    fn unseal_response_pdu(&mut self, pdu: &mut Vec<u8>) -> Result<(), TransportError> {
+        if pdu.len() < 16 {
+            return Err(TransportError::Failure("PDU too short for unsealing".into()));
+        }
+
+        // Check auth_len to see if there's an auth trailer
+        let original_auth_len = u16::from_le_bytes([pdu[10], pdu[11]]) as usize;
+        if original_auth_len == 0 {
+            return Ok(()); // No auth trailer, nothing to do
+        }
+
+        if self.auth_level != 6 {
+            // Just verify signature, no decryption needed
+            if original_auth_len >= 24 && pdu.len() >= original_auth_len {
+                let pdu_len = pdu.len() - original_auth_len;
+                let signature_start = pdu_len + 8;  // Skip auth header
+
+                if signature_start + 16 <= pdu.len() {
+                    let mut expected_signature = [0u8; 16];
+                    expected_signature.copy_from_slice(&pdu[signature_start..signature_start + 16]);
+
+                    // Use last seqno (we incremented it after use)
+                    let seqno = self.seqno.wrapping_sub(1);
+                    let auth_pad = self.build_auth_pad(seqno);
+                    let mut sign_data = auth_pad.to_vec();
+                    sign_data.extend_from_slice(&pdu[..pdu_len]);
+
+                    if !crate::crypto::hmac_md5_verify(&self.session_key, &sign_data, &expected_signature) {
+                        return Err(TransportError::Failure("Signature verification failed".into()));
+                    }
+
+                    // Remove auth trailer
+                    pdu.truncate(pdu_len);
+
+                    // Update PDU header: auth_len=0, frag_len=new length
+                    pdu[10..12].copy_from_slice(&[0, 0]);  // auth_len = 0
+                    let new_frag_len = pdu.len() as u16;
+                    pdu[8..10].copy_from_slice(&new_frag_len.to_le_bytes());
+                }
+            }
+            return Ok(());
+        }
+
+        // Privacy level: decrypt then verify
+        if original_auth_len >= 24 && pdu.len() >= original_auth_len {
+            let pdu_len = pdu.len() - original_auth_len;
+            let signature_start = pdu_len + 8;
+
+            if signature_start + 16 <= pdu.len() {
+                let mut expected_signature = [0u8; 16];
+                expected_signature.copy_from_slice(&pdu[signature_start..signature_start + 16]);
+
+                // Decrypt stub data first
+                if pdu_len > 24 {
+                    let seqno = self.seqno.wrapping_sub(1);
+
+                    // Derive RC4 key: MD5(session_key || seqno)
+                    let mut seal_key_data = self.session_key.clone();
+                    seal_key_data.extend_from_slice(&seqno.to_le_bytes());
+                    let rc4_key_hash = md5::compute(&seal_key_data);
+
+                    // Decrypt stub data
+                    let stub_start = 24;
+                    let stub_end = pdu_len;
+                    crate::crypto::rc4_decrypt(&rc4_key_hash.0, &mut pdu[stub_start..stub_end]);
+                }
+
+                // Verify signature on decrypted data
+                let seqno = self.seqno.wrapping_sub(1);
+                let auth_pad = self.build_auth_pad(seqno);
+                let mut sign_data = auth_pad.to_vec();
+                sign_data.extend_from_slice(&pdu[..pdu_len]);
+
+                if !crate::crypto::hmac_md5_verify(&self.session_key, &sign_data, &expected_signature) {
+                    return Err(TransportError::Failure("Signature verification failed after decryption".into()));
+                }
+
+                // Remove auth trailer
+                pdu.truncate(pdu_len);
+
+                // Update PDU header: auth_len=0, frag_len=new length
+                pdu[10..12].copy_from_slice(&[0, 0]);  // auth_len = 0
+                let new_frag_len = pdu.len() as u16;
+                pdu[8..10].copy_from_slice(&new_frag_len.to_le_bytes());
+            }
+        }
+
+        Ok(())
+    }
+
     /// Creates a new transport after resolving the dynamic endpoint via EPM and performing the
     /// NTLM authenticated bind.  The detailed network logic will be filled in during the
     /// subsequent iterations of Step 1.
@@ -172,6 +380,9 @@ impl RealRpcTransport {
             auth_level: 6, // Packet Privacy
             max_xmit,
             max_recv,
+            ipid: None,  // Will be set after OXID resolution
+            object_ref: None,  // Will be set after OXID resolution
+            seqno: 0,  // Initialize sequence number for signing/sealing
         })
     }
 
@@ -198,18 +409,14 @@ impl RealRpcTransport {
         body.write_u32::<LittleEndian>(2).unwrap(); // version 2.0
 
         let pad = (4 - (body.len() % 4)) % 4;
-        for _ in 0..pad {
-            body.push(0);
-        }
+        body.extend(std::iter::repeat_n(0u8, pad));
 
         body.push(AUTH_TYPE_NTLM);
         body.push(AUTH_LEVEL_PRIVACY);
         body.push(pad as u8);
         body.push(0);
         body.write_u32::<LittleEndian>(0).unwrap(); // auth context id
-        for _ in 0..pad {
-            body.push(0);
-        }
+        body.extend(std::iter::repeat_n(0u8, pad));
         body.extend_from_slice(ntlm);
 
         let frag_len = (16 + body.len()) as u16;
@@ -249,18 +456,14 @@ impl RealRpcTransport {
         body.write_u32::<LittleEndian>(2).unwrap();
 
         let pad = (4 - (body.len() % 4)) % 4;
-        for _ in 0..pad {
-            body.push(0);
-        }
+        body.extend(std::iter::repeat_n(0u8, pad));
 
         body.push(AUTH_TYPE_NTLM);
         body.push(AUTH_LEVEL_PRIVACY);
         body.push(pad as u8);
         body.push(0);
         body.write_u32::<LittleEndian>(0).unwrap();
-        for _ in 0..pad {
-            body.push(0);
-        }
+        body.extend(std::iter::repeat_n(0u8, pad));
         body.extend_from_slice(ntlm);
 
         let frag_len = (16 + body.len()) as u16;
@@ -284,9 +487,16 @@ impl RealRpcTransport {
         let _version = cursor.read_u8()?;
         let _minor = cursor.read_u8()?;
         let ptype = cursor.read_u8()?;
+        if ptype == 0x0D {
+            // bind_nak - server rejected our bind request
+            // This can happen when auth is required or protocol mismatch
+            return Err(TransportError::Failure(
+                "Bind rejected (bind_nak) - server requires different auth or protocol".into(),
+            ));
+        }
         if ptype != 0x0C {
             return Err(TransportError::Failure(
-                "Unexpected PDU type in bind_ack".into(),
+                format!("Unexpected PDU type in bind_ack: 0x{ptype:02x}"),
             ));
         }
         cursor.read_u8()?; // flags
@@ -547,7 +757,7 @@ impl RealRpcTransport {
         })?;
 
         let flags = header[3];
-        let mut frag_len = u16::from_le_bytes([header[8], header[9]]) as usize;
+        let frag_len = u16::from_le_bytes([header[8], header[9]]) as usize;
         if frag_len < 16 {
             return Err(TransportError::Failure(format!(
                 "invalid RPC fragment length {frag_len}"
@@ -597,14 +807,10 @@ impl RealRpcTransport {
             return Ok(buffer);
         }
 
-        // Multi-fragment response, need to reassemble
         debug!(flags, frag_len, "reading multi-fragment RPC PDU");
         let mut fragments = vec![buffer];
-        let mut total_stub_len = if frag_len > 24 { frag_len - 24 } else { 0 }; // Header (16) + auth (8) = 24
 
-        // Read remaining fragments
         loop {
-            // Read next fragment header
             let mut frag_header = [0u8; 16];
             stream.read_exact(&mut frag_header).map_err(|err| {
                 error!(?err, "failed to read fragment header");
@@ -612,29 +818,25 @@ impl RealRpcTransport {
             })?;
 
             let frag_flags = frag_header[3];
-            frag_len = u16::from_le_bytes([frag_header[8], frag_header[9]]) as usize;
-
-            if frag_len < 16 {
+            let fragment_len = u16::from_le_bytes([frag_header[8], frag_header[9]]) as usize;
+            if fragment_len < 16 {
                 return Err(TransportError::Failure(format!(
-                    "invalid fragment length {frag_len}"
+                    "invalid fragment length {fragment_len}"
                 )));
             }
 
-            // Read the rest of the fragment
-            let mut frag_buffer = vec![0u8; frag_len];
-            frag_buffer[..16].copy_from_slice(&frag_header);
+            let mut frag = vec![0u8; fragment_len];
+            frag[..16].copy_from_slice(&frag_header);
 
             offset = 16;
-            while offset < frag_len {
-                match stream.read(&mut frag_buffer[offset..]) {
+            while offset < fragment_len {
+                match stream.read(&mut frag[offset..]) {
                     Ok(0) => {
                         return Err(TransportError::Failure(
                             "connection closed while reading fragment".into(),
                         ));
                     }
-                    Ok(n) => {
-                        offset += n;
-                    }
+                    Ok(n) => offset += n,
                     Err(err)
                         if err.kind() == std::io::ErrorKind::WouldBlock
                             || err.kind() == std::io::ErrorKind::TimedOut =>
@@ -644,7 +846,6 @@ impl RealRpcTransport {
                             return Err(TransportError::Failure("RPC fragment timed out".into()));
                         }
                         std::thread::sleep(std::time::Duration::from_millis(25));
-                        continue;
                     }
                     Err(err) => {
                         error!(?err, "failed to read fragment body");
@@ -653,49 +854,57 @@ impl RealRpcTransport {
                 }
             }
 
-            fragments.push(frag_buffer);
-            total_stub_len += if frag_len > 24 { frag_len - 24 } else { 0 };
+            fragments.push(frag);
 
-            // Check if this is the last fragment
             if (frag_flags & PFC_LAST_FRAG) != 0 {
-                debug!(
-                    fragment_count = fragments.len(),
-                    total_stub_len,
-                    "reassembling fragmented RPC response"
-                );
                 break;
             }
 
-            // Safety check: prevent infinite loops
-            if fragments.len() > 1000 {
-                return Err(TransportError::Failure(
-                    "too many RPC fragments (>1000)".into(),
-                ));
+            if fragments.len() > 1024 {
+                return Err(TransportError::Failure("too many RPC fragments".into()));
             }
         }
 
-        // Reassemble the PDU from fragments
-        // Keep the header from the first fragment, concatenate stub data from all
-        let mut reassembled = fragments[0][..24].to_vec(); // Header + response header
+        let first_fragment = &fragments[0];
+        let mut header = first_fragment[..16].to_vec();
+        let response_header = first_fragment[16..24].to_vec();
+        let mut stub = Vec::new();
+        let mut trailer = Vec::new();
 
-        for fragment in &fragments {
-            // Skip the header (16 bytes) and response header (8 bytes) for each fragment
-            // Just append the stub data
-            if fragment.len() > 24 {
-                reassembled.extend_from_slice(&fragment[24..]);
+        for (idx, fragment) in fragments.iter().enumerate() {
+            let frag_len = u16::from_le_bytes([fragment[8], fragment[9]]) as usize;
+            let auth_len = u16::from_le_bytes([fragment[10], fragment[11]]) as usize;
+
+            let stub_start = 24;
+            let stub_end = if auth_len > 0 {
+                frag_len.saturating_sub(auth_len)
+            } else {
+                frag_len
+            };
+
+            if stub_end < stub_start || stub_end > fragment.len() {
+                return Err(TransportError::Failure("invalid fragment stub bounds".into()));
+            }
+
+            stub.extend_from_slice(&fragment[stub_start..stub_end]);
+
+            if idx == fragments.len() - 1 && auth_len > 0 {
+                trailer.extend_from_slice(&fragment[stub_end..frag_len]);
             }
         }
 
-        // Update the fragment length in the reassembled PDU header to reflect total size
-        let total_len = reassembled.len();
-        reassembled[8] = (total_len & 0xFF) as u8;
-        reassembled[9] = ((total_len >> 8) & 0xFF) as u8;
+        header[3] |= PFC_LAST_FRAG;
+        let total_len = 16 + response_header.len() + stub.len() + trailer.len();
+        header[8..10].copy_from_slice(&(total_len as u16).to_le_bytes());
+        header[10..12].copy_from_slice(&(trailer.len() as u16).to_le_bytes());
 
-        // Set the flags to indicate this is now a complete PDU
-        reassembled[3] = 0x03; // PFC_FIRST_FRAG | PFC_LAST_FRAG
+        let mut reassembled = header;
+        reassembled.extend_from_slice(&response_header);
+        reassembled.extend_from_slice(&stub);
+        reassembled.extend_from_slice(&trailer);
 
         debug!(
-            total_len,
+            total_len = reassembled.len(),
             fragment_count = fragments.len(),
             "successfully reassembled fragmented RPC PDU"
         );
@@ -714,18 +923,41 @@ impl RpcTransport for RealRpcTransport {
             return Self::stub_exec_query(payload);
         }
 
-        let request_pdu = Self::build_request_pdu(self.call_id, self.context_id, opnum, payload);
+        // Build request PDU with ORPCTHIS if we have IPID (for object calls)
+        let mut request_pdu = if self.ipid.is_some() {
+            // TODO: Build PDU with ORPCTHIS header for object calls
+            Self::build_request_pdu(self.call_id, self.context_id, opnum, payload)
+        } else {
+            Self::build_request_pdu(self.call_id, self.context_id, opnum, payload)
+        };
+
+        // Apply signing/sealing based on auth level
+        if self.auth_level == 6 {  // PRIVACY level
+            self.seal_pdu(&mut request_pdu)?;
+        } else if self.auth_level >= 4 {  // INTEGRITY or higher
+            self.sign_pdu(&mut request_pdu)?;
+        }
+
         self.call_id += 1;
 
         debug!(
             opnum,
             call_id = self.call_id - 1,
             payload_len = payload.len(),
+            auth_level = self.auth_level,
             "sending RPC request"
         );
 
         self.stream.write_all(&request_pdu)?;
-        let response = Self::read_pdu(&mut self.stream)?;
+
+        // Read and process response
+        let mut response = Self::read_pdu(&mut self.stream)?;
+
+        // Unseal/verify response if authenticated
+        if self.auth_level > 0 {
+            self.unseal_response_pdu(&mut response)?;
+        }
+
         let stub_data = Self::parse_response_pdu(&response)?;
 
         debug!(opnum, stub_len = stub_data.len(), "received RPC response");
@@ -746,10 +978,10 @@ impl RealRpcTransport {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dcom::{self, DcomError};
     use crate::ndr::NdrCodec;
     use byteorder::{LittleEndian, ReadBytesExt};
     use hex_literal::hex;
@@ -758,14 +990,14 @@ mod tests {
 
     #[test]
     fn stub_transport_invoke_returns_empty() {
-        let mut transport = StubTransport::default();
+        let mut transport = StubTransport;
         let result = transport.invoke(9, &[]).unwrap();
         assert!(result.is_empty());
     }
 
     #[test]
     fn real_transport_stub_exec_query_emits_json() {
-        let codec = crate::ndr::StubNdrCodec::default();
+        let codec = crate::ndr::StubNdrCodec;
         let payload = codec
             .encode_exec_query("WQL", "SELECT * FROM Win32_ComputerSystem")
             .expect("encode");
@@ -773,47 +1005,6 @@ mod tests {
         let values: Vec<Value> = serde_json::from_slice(&response).expect("json parse");
         assert_eq!(values.len(), 1);
         assert_eq!(values[0]["Name"], "STUB-PC");
-    }
-
-    #[test]
-    fn epm_request_pdu_matches_expected_layout() {
-        let tower = crate::tower::build_wmi_tower();
-        let pdu = crate::rpc_fixtures::epm_request_pdu(42, &tower);
-
-        assert_eq!(pdu[0], 5, "RPC version");
-        assert_eq!(pdu[1], 0, "RPC minor version");
-        assert_eq!(pdu[2], 0x00, "PDU type: request");
-        assert_eq!(pdu[3], 0x03, "Flags should indicate first|last frag");
-        assert_eq!(
-            &pdu[4..8],
-            &[0x10, 0x00, 0x00, 0x00],
-            "little-endian data rep"
-        );
-
-        let frag_len = u16::from_le_bytes([pdu[8], pdu[9]]) as usize;
-        assert_eq!(frag_len, pdu.len());
-        let auth_len = u16::from_le_bytes([pdu[10], pdu[11]]);
-        assert_eq!(auth_len, 0, "EPM request should not include auth data");
-
-        let call_id = u32::from_le_bytes([pdu[12], pdu[13], pdu[14], pdu[15]]);
-        assert_eq!(call_id, 42);
-
-        let context_id = u16::from_le_bytes([pdu[20], pdu[21]]);
-        let opnum = u16::from_le_bytes([pdu[22], pdu[23]]);
-        assert_eq!(context_id, 0);
-        assert_eq!(opnum, 3);
-
-        // PDU should now be dynamically sized based on tower
-        assert!(pdu.len() > 24, "PDU should have header + stub");
-        assert!(pdu.len() < 200, "PDU shouldn't be too large");
-    }
-
-    #[test]
-    fn parse_epm_response_extracts_tcp_port() {
-        let tower = crate::tower::sample_epm_response_stub();
-        let pdu = build_epm_response_pdu(tower);
-        let port = dcom::parse_epm_response(&pdu).unwrap();
-        assert_eq!(port, 0xc002);
     }
 
     #[test]
@@ -1019,14 +1210,6 @@ mod tests {
             }
             other => panic!("expected bind rejection, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn parse_epm_response_errors_when_missing_tcp_floor() {
-        let tower = &[0u8, 0u8];
-        let pdu = build_epm_response_pdu(tower);
-        let err = dcom::parse_epm_response(&pdu).unwrap_err();
-        assert!(matches!(err, DcomError::Port | DcomError::Tower));
     }
 
     #[test]
@@ -1306,7 +1489,7 @@ mod tests {
 
         // Verify the large stub data was correctly reassembled
         for i in 0..5000 {
-            assert_eq!(result[24 + i], (i & 0xFF) as u8, "Mismatch at byte {}", i);
+            assert_eq!(result[24 + i], (i & 0xFF) as u8, "Mismatch at byte {i}");
         }
     }
 
@@ -1374,30 +1557,4 @@ mod tests {
         assert_eq!(&result[32..40], &[0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10]);
         assert_eq!(&result[40..48], &[0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18]);
     }
-}
-
-#[cfg(test)]
-fn build_epm_response_pdu(tower: &[u8]) -> Vec<u8> {
-    let mut stub = Vec::new();
-    stub.extend_from_slice(&0u32.to_le_bytes());
-    stub.extend_from_slice(&(tower.len() as u32).to_le_bytes());
-    stub.extend_from_slice(&1u32.to_le_bytes());
-    stub.extend_from_slice(&(tower.len() as u32).to_le_bytes());
-    stub.extend_from_slice(tower);
-    let pad = (4 - (stub.len() % 4)) % 4;
-    stub.extend(std::iter::repeat(0u8).take(pad));
-
-    let frag_len = (16 + 8 + stub.len()) as u16;
-    let mut pdu = Vec::new();
-    pdu.extend_from_slice(&[5, 0, 0x02, 0x03]);
-    pdu.extend_from_slice(&[0x10, 0x00, 0x00, 0x00]);
-    pdu.extend_from_slice(&frag_len.to_le_bytes());
-    pdu.extend_from_slice(&0u16.to_le_bytes());
-    pdu.extend_from_slice(&1u32.to_le_bytes());
-    pdu.extend_from_slice(&(stub.len() as u32).to_le_bytes());
-    pdu.extend_from_slice(&0u16.to_le_bytes());
-    pdu.push(0);
-    pdu.push(0);
-    pdu.extend_from_slice(&stub);
-    pdu
 }

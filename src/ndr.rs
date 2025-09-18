@@ -1,6 +1,14 @@
+pub mod codec;
+pub mod types;
+
+#[cfg(test)]
+mod golden_tests;
+
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use serde_json::{json, Value};
 use thiserror::Error;
+
+pub use codec::RealNdrCodec;
 
 /// Errors produced by the NDR codec while encoding or decoding payloads.
 #[derive(Debug, Error)]
@@ -9,6 +17,10 @@ pub enum NdrError {
     Encode,
     #[error("decoding not implemented")]
     Decode,
+    #[error("invalid conformance: max_count ({max}) < actual_count ({actual})")]
+    InvalidConformance { max: u32, actual: u32 },
+    #[error("array size exceeds limit: {size} bytes (max: {max})")]
+    ArrayTooLarge { size: usize, max: usize },
 }
 
 /// Abstraction over the NDR encoder/decoder used for RPC payloads.
@@ -162,7 +174,7 @@ mod tests {
 
     #[test]
     fn encode_exec_query_emits_bstrs() {
-        let codec = StubNdrCodec::default();
+        let codec = StubNdrCodec;
         let payload = codec
             .encode_exec_query("WQL", "SELECT * FROM Win32_ComputerSystem")
             .expect("encode");
@@ -175,7 +187,7 @@ mod tests {
 
     #[test]
     fn stub_results_for_known_query_matches_decode() {
-        let codec = StubNdrCodec::default();
+        let codec = StubNdrCodec;
         let query = "SELECT * FROM Win32_ComputerSystem";
         let payload = codec.encode_exec_query("WQL", query).expect("encode");
         let results = codec

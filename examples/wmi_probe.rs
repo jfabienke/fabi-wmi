@@ -14,15 +14,15 @@ fn main() {
     match probe_wmi_anonymous(&host) {
         Ok(is_windows) => {
             if is_windows {
-                println!("✅ Windows WMI/RPC detected on {}", host);
+                println!("✅ Windows WMI/RPC detected on {host}");
                 std::process::exit(0);
             } else {
-                println!("❌ No Windows WMI/RPC detected on {}", host);
+                println!("❌ No Windows WMI/RPC detected on {host}");
                 std::process::exit(1);
             }
         }
         Err(e) => {
-            eprintln!("❌ Probe failed: {}", e);
+            eprintln!("❌ Probe failed: {e}");
             std::process::exit(2);
         }
     }
@@ -33,7 +33,7 @@ fn probe_wmi_anonymous(host: &str) -> Result<bool, Box<dyn std::error::Error>> {
 
     // Try to connect to port 135 (RPC/DCOM)
     let stream_result =
-        TcpStream::connect_timeout(&format!("{}:135", host).parse()?, Duration::from_secs(5));
+        TcpStream::connect_timeout(&format!("{host}:135").parse()?, Duration::from_secs(5));
 
     let mut stream = match stream_result {
         Ok(s) => s,
@@ -52,7 +52,7 @@ fn probe_wmi_anonymous(host: &str) -> Result<bool, Box<dyn std::error::Error>> {
     let bind_pdu = build_anonymous_bind(1, &scm_uuid);
     debug!("Sending anonymous bind, pdu_len={}", bind_pdu.len());
 
-    if let Err(_) = stream.write_all(&bind_pdu) {
+    if stream.write_all(&bind_pdu).is_err() {
         debug!("Failed to send bind");
         return Ok(false);
     }

@@ -121,7 +121,7 @@ impl Config {
         if args.len() < 2 {
             return Err(format!(
                 "Usage: {} <host> [--user <user>] [--pass <pass>] [--domain <domain>] [--query <wql>] [--timeout <ms>]",
-                args.get(0).map(String::as_str).unwrap_or("test_connect")
+                args.first().map(String::as_str).unwrap_or("test_connect")
             ));
         }
 
