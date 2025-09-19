@@ -566,4 +566,154 @@ mod tests {
         let hresult = RealNdrCodec::decode_hresult(&data, 8).unwrap();
         assert_eq!(hresult, 0x00000000); // S_OK
     }
+
+    // Additional tests for better coverage
+
+    #[test]
+    fn test_decode_exec_query_with_error_hresult() {
+        let codec = RealNdrCodec::new();
+        // ORPCTHAT header + error HRESULT
+        let data = vec![
+            0x00, 0x00, 0x00, 0x00, // flags
+            0x00, 0x00, 0x00, 0x00, // no extensions
+            0x05, 0x00, 0x00, 0x80, // HRESULT with error bit set (0x80000005)
+        ];
+
+        let result = codec.decode_exec_query("root\\CimV2", "SELECT *", &data);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), NdrError::Decode));
+    }
+
+    #[test]
+    fn test_decode_exec_query_with_short_data() {
+        let codec = RealNdrCodec::new();
+        let data = vec![0x00; 4]; // Too short for ORPCTHAT
+
+        let result = codec.decode_exec_query("root\\CimV2", "SELECT *", &data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_encode_bstr_field() {
+        let mut buf = Vec::new();
+        RealNdrCodec::encode_bstr_field(&mut buf, 0x00020000, "test");
+
+        // Should have referent ID, then conformant string
+        assert!(buf.len() > 8);
+        assert_eq!(&buf[0..4], &[0x00, 0x00, 0x02, 0x00]); // referent ID
+    }
+
+    #[test]
+    fn test_encode_bstr_field_with_empty_string() {
+        let mut buf = Vec::new();
+        RealNdrCodec::encode_bstr_field(&mut buf, 0x00020001, "");
+
+        // Empty string should still be encoded
+        assert!(buf.len() >= 16); // referent + conformant array header
+    }
+
+    #[test]
+    fn test_encode_orpcthis() {
+        let mut buf = Vec::new();
+        RealNdrCodec::encode_orpcthis(&mut buf);
+
+        assert_eq!(buf.len(), 40); // Fixed size ORPCTHIS
+        assert_eq!(&buf[0..4], &[0x01, 0x00, 0x00, 0x00]); // version
+    }
+
+    #[test]
+    fn test_parse_orpcthat_with_extensions() {
+        // ORPCTHAT with extension pointer
+        let data = vec![
+            0x00, 0x00, 0x00, 0x00, // flags
+            0x14, 0x00, 0x00, 0x00, // extension pointer (points to offset 20)
+            0x00, 0x00, 0x00, 0x00, // Padding
+            0x00, 0x00, 0x00, 0x00, // Padding
+            0x00, 0x00, 0x00, 0x00, // Padding
+            0x08, 0x00, 0x00, 0x00, // Extension size (8 bytes)
+            0x01, 0x02, 0x03, 0x04, // Extension data
+            0x05, 0x06, 0x07, 0x08,
+        ];
+
+        let offset = RealNdrCodec::parse_orpcthat(&data).unwrap();
+        assert!(offset > 8); // Should be past the extension
+    }
+
+    #[test]
+    fn test_parse_orpcthat_invalid_extension() {
+        // Extension pointer beyond data
+        let data = vec![
+            0x00, 0x00, 0x00, 0x00, // flags
+            0xFF, 0xFF, 0x00, 0x00, // Invalid extension pointer
+        ];
+
+        let result = RealNdrCodec::parse_orpcthat(&data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decode_hresult_with_insufficient_data() {
+        let data = vec![0x00, 0x00]; // Too short
+
+        let result = RealNdrCodec::decode_hresult(&data, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decode_hresult_with_error() {
+        let data = vec![
+            0x05, 0x00, 0x00, 0x80, // E_ACCESSDENIED (0x80000005)
+        ];
+
+        let hresult = RealNdrCodec::decode_hresult(&data, 0).unwrap();
+        assert_eq!(hresult, 0x80000005);
+        assert!(hresult & 0x80000000 != 0); // Error bit is set
+    }
+
+    #[test]
+    fn test_encode_exec_method() {
+        let codec = RealNdrCodec::new();
+        let params = serde_json::json!({
+            "CommandLine": "notepad.exe"
+        });
+
+        let result = codec.encode_exec_method("Win32_Process", "Create", &params);
+        assert!(result.is_ok());
+
+        let encoded = result.unwrap();
+        assert!(encoded.len() >= 40); // At least ORPCTHIS header
+    }
+
+    #[test]
+    fn test_decode_exec_method_not_implemented() {
+        let codec = RealNdrCodec::new();
+        let data = vec![0; 100];
+
+        let result = codec.decode_exec_method("Win32_Process", "Create", &data);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), NdrError::Decode));
+    }
+
+    #[test]
+    fn test_decode_stub_response_unknown_class() {
+        let codec = RealNdrCodec::new();
+        let result = codec.decode_stub_response("SELECT * FROM UnknownClass");
+
+        // Unknown class returns error
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), NdrError::Decode));
+    }
+
+    #[test]
+    fn test_conformant_string_with_unicode() {
+        let mut buf = Vec::new();
+        RealNdrCodec::encode_conformant_string(&mut buf, "测试");
+
+        // Unicode string should be encoded properly
+        assert!(buf.len() > 12); // Header + UTF-16 content
+
+        // Check max count includes null terminator
+        let max_count = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        assert_eq!(max_count, 3); // 2 chars + null
+    }
 }
