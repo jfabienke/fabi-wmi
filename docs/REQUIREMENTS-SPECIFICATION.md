@@ -35,13 +35,13 @@ This document provides a comprehensive specification for the WMI Query Provider 
 
 ### Required Namespaces
 
-| Namespace | Purpose | Authentication Level |
-|-----------|---------|---------------------|
-| `root\CimV2` | Core Windows management data | Default |
-| `root\StandardCimv2` | Network connections (Windows 8/2012+) | Default |
-| `root\Microsoft\Windows\Storage` | Storage management (Windows 8/2012+) | Default |
-| `root\WebAdministration` | IIS configuration | PacketPrivacy |
-| `Root\MSCluster` | Failover clustering | PacketPrivacy |
+| Namespace                        | Purpose                               | Authentication Level |
+|----------------------------------|---------------------------------------|----------------------|
+| `root\CimV2`                     | Core Windows management data          | Default              |
+| `root\StandardCimv2`             | Network connections (Windows 8/2012+) | Default              |
+| `root\Microsoft\Windows\Storage` | Storage management (Windows 8/2012+)  | Default              |
+| `root\WebAdministration`         | IIS configuration                     | PacketPrivacy        |
+| `Root\MSCluster`                 | Failover clustering                   | PacketPrivacy        |
 
 ### Namespace Availability by OS Version
 
@@ -174,27 +174,27 @@ SELECT * FROM Win32_QuickFixEngineering
 
 #### Win32_Processor Schema
 
-| Property                  | Type   | Description              |
-|---------------------------|--------|--------------------------|
-| Name                      | string | Processor name/model     |
-| Manufacturer              | string | CPU manufacturer         |
-| LoadPercentage            | ushort | Current CPU load (0-100) |
-| NumberOfCores             | uint   | Physical core count      |
-| NumberOfLogicalProcessors | uint   | Logical processor count  |
+| Property                  | Type    | Description                |
+|---------------------------|---------|----------------------------|
+| Name                      | string  | Processor name/model       |
+| Manufacturer              | string  | CPU manufacturer           |
+| LoadPercentage            | ushort  | Current CPU load (0-100)   |
+| NumberOfCores             | uint    | Physical core count        |
+| NumberOfLogicalProcessors | uint    | Logical processor count    |
 
 #### Win32_OperatingSystem Schema
 
-| Property                | Type     | Description                |
-|-------------------------|----------|----------------------------|
-| Caption                 | string   | OS display name            |
-| Version                 | string   | OS version number          |
-| BuildNumber             | string   | OS build number            |
-| OSArchitecture          | string   | 32-bit or 64-bit           |
-| LastBootUpTime          | DateTime | System boot time           |
-| FreePhysicalMemory      | ulong    | Free memory in KB          |
-| TotalVisibleMemorySize  | ulong    | Total memory in KB         |
-| ServicePackMajorVersion | ushort   | Service pack major version |
-| ServicePackMinorVersion | ushort   | Service pack minor version |
+| Property                 | Type     | Description                |
+|--------------------------|----------|----------------------------|
+| Caption                  | string   | OS display name            |
+| Version                  | string   | OS version number          |
+| BuildNumber              | string   | OS build number            |
+| OSArchitecture           | string   | 32-bit or 64-bit           |
+| LastBootUpTime           | DateTime | System boot time           |
+| FreePhysicalMemory       | ulong    | Free memory in KB          |
+| TotalVisibleMemorySize   | ulong    | Total memory in KB         |
+| ServicePackMajorVersion  | ushort   | Service pack major version |
+| ServicePackMinorVersion  | ushort   | Service pack minor version |
 
 ### Computed Properties
 

@@ -14,7 +14,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
         eprintln!("Usage: {} <host> <username> <password> [domain]", args[0]);
-        eprintln!("Example: {} 192.168.1.100 Administrator Password123 WORKGROUP", args[0]);
+        eprintln!(
+            "Example: {} 192.168.1.100 Administrator Password123 WORKGROUP",
+            args[0]
+        );
         return Ok(());
     }
 

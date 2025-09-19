@@ -8,6 +8,7 @@ use std::ptr;
 
 fn new_session() -> (*mut WmiSession, Vec<CString>) {
     std::env::set_var("LINUX_WMI_SKIP_EPM", "1");
+    std::env::set_var("LINUX_WMI_USE_STUB", "1");
     let host = CString::new("localhost").unwrap();
     let mut session_ptr: *mut WmiSession = ptr::null_mut();
     let mut err_ptr: *mut c_char = ptr::null_mut();

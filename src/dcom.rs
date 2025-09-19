@@ -18,11 +18,11 @@ use crate::transport::RealRpcTransport;
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ObjectReference {
-    pub ipid: [u8; 16],         // Interface Pointer ID
-    pub std_flags: u32,          // Standard flags
-    pub public_refs: u32,        // Public reference count
-    pub oxid: [u8; 8],          // Object Exporter ID
-    pub oid: [u8; 8],           // Object ID
+    pub ipid: [u8; 16],   // Interface Pointer ID
+    pub std_flags: u32,   // Standard flags
+    pub public_refs: u32, // Public reference count
+    pub oxid: [u8; 8],    // Object Exporter ID
+    pub oid: [u8; 8],     // Object ID
 }
 
 #[derive(Error, Debug)]
@@ -48,7 +48,6 @@ pub enum DcomError {
     #[error("Remote procedure call failed (0x800706BE)")]
     RemoteProcedureCallFailed,
 }
-
 
 #[instrument(level = "debug", skip_all, fields(host))]
 pub fn resolve_wmi_port(host: &str, creds: Option<&Credentials>) -> Result<u16, DcomError> {
@@ -104,7 +103,8 @@ pub fn resolve_oxid(
         .map_err(|_| DcomError::Connect)?;
 
     // IObjectExporter UUID
-    let object_exporter_uuid: [u8; 16] = hex_literal::hex!("c4 fe 9f 99 60 52 1b 10 bb cb 00 aa 00 21 34 7a");
+    let object_exporter_uuid: [u8; 16] =
+        hex_literal::hex!("c4 fe 9f 99 60 52 1b 10 bb cb 00 aa 00 21 34 7a");
     let mut auth_client = NtlmV2Client::new(creds.clone()).map_err(|_| DcomError::Protocol)?;
 
     // Bind to IObjectExporter with NTLM auth
@@ -113,14 +113,15 @@ pub fn resolve_oxid(
     stream.write_all(&bind_pdu).map_err(|_| DcomError::Send)?;
 
     let bind_ack = read_rpc_pdu(&mut stream)?;
-    let (context_id, type2_blob, _, _) = RealRpcTransport::parse_bind_ack(&bind_ack)
-        .map_err(|_| DcomError::Protocol)?;
+    let (context_id, type2_blob, _, _) =
+        RealRpcTransport::parse_bind_ack(&bind_ack).map_err(|_| DcomError::Protocol)?;
 
     // Complete auth with alter_context
     let authenticate = auth_client
         .respond_message(&type2_blob)
         .map_err(|_| DcomError::Protocol)?;
-    let alter_pdu = build_scm_alter_context_pdu(2, context_id, &object_exporter_uuid, &authenticate.message);
+    let alter_pdu =
+        build_scm_alter_context_pdu(2, context_id, &object_exporter_uuid, &authenticate.message);
     stream.write_all(&alter_pdu).map_err(|_| DcomError::Send)?;
 
     let alter_ack = read_rpc_pdu(&mut stream)?;
@@ -195,26 +196,39 @@ fn parse_resolve_oxid_response(pdu: &[u8], oxid: &[u8; 8]) -> Result<ObjectRefer
     let mut cursor = Cursor::new(stub_data);
 
     // Parse ORPCTHAT header
-    let _flags = cursor.read_u32::<LittleEndian>().map_err(|_| DcomError::Protocol)?;
+    let _flags = cursor
+        .read_u32::<LittleEndian>()
+        .map_err(|_| DcomError::Protocol)?;
 
     // Parse HRESULT
-    let hresult = cursor.read_u32::<LittleEndian>().map_err(|_| DcomError::Protocol)?;
+    let hresult = cursor
+        .read_u32::<LittleEndian>()
+        .map_err(|_| DcomError::Protocol)?;
     if hresult != 0 {
         error!("ResolveOxid failed with HRESULT: 0x{:08x}", hresult);
         match hresult {
             0x80070005 => return Err(DcomError::AccessDenied),
             0x800706BA => return Err(DcomError::ServerUnavailable),
-            _ => return Err(DcomError::Fault { status: hresult, reason: 0 }),
+            _ => {
+                return Err(DcomError::Fault {
+                    status: hresult,
+                    reason: 0,
+                })
+            }
         }
     }
 
     // Parse ppRemUnknown (pointer to IRemUnknown interface)
-    let rem_unknown_ptr = cursor.read_u32::<LittleEndian>().map_err(|_| DcomError::Protocol)?;
+    let rem_unknown_ptr = cursor
+        .read_u32::<LittleEndian>()
+        .map_err(|_| DcomError::Protocol)?;
 
     let ipid = if rem_unknown_ptr != 0 {
         // Parse IPID (16 bytes)
         let mut ipid = [0u8; 16];
-        cursor.read_exact(&mut ipid).map_err(|_| DcomError::Protocol)?;
+        cursor
+            .read_exact(&mut ipid)
+            .map_err(|_| DcomError::Protocol)?;
         trace!("Extracted IPID: {:?}", hex::encode(ipid));
         ipid
     } else {
@@ -223,20 +237,30 @@ fn parse_resolve_oxid_response(pdu: &[u8], oxid: &[u8; 8]) -> Result<ObjectRefer
     };
 
     // Parse standard flags
-    let std_flags = cursor.read_u32::<LittleEndian>().map_err(|_| DcomError::Protocol)?;
+    let std_flags = cursor
+        .read_u32::<LittleEndian>()
+        .map_err(|_| DcomError::Protocol)?;
 
     // Parse public references
-    let public_refs = cursor.read_u32::<LittleEndian>().map_err(|_| DcomError::Protocol)?;
+    let public_refs = cursor
+        .read_u32::<LittleEndian>()
+        .map_err(|_| DcomError::Protocol)?;
 
     // Parse OID (8 bytes)
     let mut oid = [0u8; 8];
-    cursor.read_exact(&mut oid).map_err(|_| DcomError::Protocol)?;
+    cursor
+        .read_exact(&mut oid)
+        .map_err(|_| DcomError::Protocol)?;
 
     // Parse pAuthnHint
-    let _authn_hint = cursor.read_u32::<LittleEndian>().map_err(|_| DcomError::Protocol)?;
+    let _authn_hint = cursor
+        .read_u32::<LittleEndian>()
+        .map_err(|_| DcomError::Protocol)?;
 
     // Parse pServerVersion pointer
-    let server_version_ptr = cursor.read_u32::<LittleEndian>().map_err(|_| DcomError::Protocol)?;
+    let server_version_ptr = cursor
+        .read_u32::<LittleEndian>()
+        .map_err(|_| DcomError::Protocol)?;
     if server_version_ptr != 0 {
         // Skip server version if present
         let _ = cursor.read_u32::<LittleEndian>(); // major.minor version
@@ -337,7 +361,11 @@ pub fn activate_wmi_dcom(host: &str, creds: &Credentials) -> Result<(u16, [u8; 8
 
     let resp_pdu = read_rpc_pdu(&mut stream)?;
     let (port, oxid) = parse_remote_activation_response(&resp_pdu)?;
-    info!("DCOM activation successful, WMI port={}, OXID={}", port, hex::encode(oxid));
+    info!(
+        "DCOM activation successful, WMI port={}, OXID={}",
+        port,
+        hex::encode(oxid)
+    );
 
     // Optionally resolve the OXID to get the full object reference
     // For now, just log the attempt and return port and OXID
@@ -346,7 +374,10 @@ pub fn activate_wmi_dcom(host: &str, creds: &Credentials) -> Result<(u16, [u8; 8
             info!("OXID resolved successfully: {:?}", obj_ref);
         }
         Err(e) => {
-            warn!("OXID resolution failed: {:?}, continuing with port and OXID only", e);
+            warn!(
+                "OXID resolution failed: {:?}, continuing with port and OXID only",
+                e
+            );
         }
     }
 
@@ -354,7 +385,7 @@ pub fn activate_wmi_dcom(host: &str, creds: &Credentials) -> Result<(u16, [u8; 8
 }
 
 const AUTH_TYPE_NTLM: u8 = 0x0A;
-const AUTH_LEVEL_PRIVACY: u8 = 0x06;  // Packet Privacy for encrypted communication
+const AUTH_LEVEL_PRIVACY: u8 = 0x06; // Packet Privacy for encrypted communication
 const MAX_XMIT_RECV: u16 = 0x10B8;
 
 fn build_scm_bind_pdu(call_id: u32, abstract_syntax: &[u8; 16], negotiate: &[u8]) -> Vec<u8> {
@@ -383,9 +414,9 @@ fn build_scm_bind_pdu(call_id: u32, abstract_syntax: &[u8; 16], negotiate: &[u8]
         // Auth trailer header
         body.push(AUTH_TYPE_NTLM);
         body.push(AUTH_LEVEL_PRIVACY);
-        body.push(pad as u8);  // pad_len field records the padding already applied
-        body.push(0);  // reserved
-        body.write_u32::<LittleEndian>(0).unwrap();  // auth_context_id
+        body.push(pad as u8); // pad_len field records the padding already applied
+        body.push(0); // reserved
+        body.write_u32::<LittleEndian>(0).unwrap(); // auth_context_id
 
         // No second padding - extend NTLM blob directly
         body.extend_from_slice(negotiate);
@@ -435,9 +466,9 @@ fn build_scm_alter_context_pdu(
     // Auth trailer header
     body.push(AUTH_TYPE_NTLM);
     body.push(AUTH_LEVEL_PRIVACY);
-    body.push(pad as u8);  // pad_len field records the padding already applied
-    body.push(0);  // reserved
-    body.write_u32::<LittleEndian>(0).unwrap();  // auth_context_id
+    body.push(pad as u8); // pad_len field records the padding already applied
+    body.push(0); // reserved
+    body.write_u32::<LittleEndian>(0).unwrap(); // auth_context_id
 
     // No second padding - extend NTLM blob directly
     body.extend_from_slice(authenticate);
@@ -608,7 +639,11 @@ fn parse_remote_activation_response(pdu: &[u8]) -> Result<(u16, [u8; 8]), DcomEr
     // Use nom to parse the response, now also extracting OXID
     match parse_activation_response(stub_data) {
         Ok((_, (port, oxid))) => {
-            debug!("Extracted WMI port={} and OXID={:?}", port, hex::encode(oxid));
+            debug!(
+                "Extracted WMI port={} and OXID={:?}",
+                port,
+                hex::encode(oxid)
+            );
             Ok((port, oxid))
         }
         Err(_) => {
@@ -634,7 +669,7 @@ fn parse_orpcthat(input: &[u8]) -> IResult<&[u8], (u32, u32, Vec<u8>)> {
     };
 
     // Extract causality ID from flags (context field)
-    let causality_id = flags >> 16;  // Upper 16 bits often used for context
+    let causality_id = flags >> 16; // Upper 16 bits often used for context
 
     Ok((input, (flags, causality_id, extensions)))
 }
@@ -783,7 +818,7 @@ mod tests {
         // Minimal DUALSTRINGARRAY with proper format
         stub.extend_from_slice(&[0x08, 0x00]); // string_binding_size (8 words = 16 bytes)
         stub.extend_from_slice(&[0x00, 0x00]); // security_binding_size
-        // String bindings (16 bytes)
+                                               // String bindings (16 bytes)
         stub.extend_from_slice(&[0x07, 0x00]); // TCP tower ID
         stub.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // IP part 1
         stub.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // IP part 2
@@ -832,18 +867,24 @@ mod tests {
         let negotiate = vec![0x4E, 0x54, 0x4C, 0x4D]; // "NTLM"
         let pdu = build_scm_bind_pdu(
             1,
-            &[0x99, 0xFC, 0xFE, 0xC4, 0x52, 0x60, 0x10, 0x1B,
-              0xBB, 0xCB, 0x00, 0xAA, 0x00, 0x21, 0x34, 0x7A],
-            &negotiate
+            &[
+                0x99, 0xFC, 0xFE, 0xC4, 0x52, 0x60, 0x10, 0x1B, 0xBB, 0xCB, 0x00, 0xAA, 0x00, 0x21,
+                0x34, 0x7A,
+            ],
+            &negotiate,
         );
 
         // Find auth header in PDU
         // Auth trailer comes after the main body, before the auth blob
         // Look for AUTH_TYPE_NTLM (0x0A) followed by AUTH_LEVEL_PRIVACY (0x06)
         let mut found_auth_level = false;
-        for i in 0..pdu.len()-1 {
-            if pdu[i] == AUTH_TYPE_NTLM && i+1 < pdu.len() {
-                assert_eq!(pdu[i+1], AUTH_LEVEL_PRIVACY, "Auth level should be PRIVACY (0x06)");
+        for i in 0..pdu.len() - 1 {
+            if pdu[i] == AUTH_TYPE_NTLM && i + 1 < pdu.len() {
+                assert_eq!(
+                    pdu[i + 1],
+                    AUTH_LEVEL_PRIVACY,
+                    "Auth level should be PRIVACY (0x06)"
+                );
                 found_auth_level = true;
                 break;
             }
@@ -856,32 +897,45 @@ mod tests {
         // Test that alter context PDU uses privacy auth level
         let authenticate = vec![0x4E, 0x54, 0x4C, 0x4D]; // "NTLM"
         let pdu = build_scm_alter_context_pdu(
-            2,  // call_id
-            0,  // context_id
-            &[0x99, 0xFC, 0xFE, 0xC4, 0x52, 0x60, 0x10, 0x1B,
-              0xBB, 0xCB, 0x00, 0xAA, 0x00, 0x21, 0x34, 0x7A],
-            &authenticate
+            2, // call_id
+            0, // context_id
+            &[
+                0x99, 0xFC, 0xFE, 0xC4, 0x52, 0x60, 0x10, 0x1B, 0xBB, 0xCB, 0x00, 0xAA, 0x00, 0x21,
+                0x34, 0x7A,
+            ],
+            &authenticate,
         );
 
         // Find auth header in PDU
         let mut found_auth_level = false;
-        for i in 0..pdu.len()-1 {
-            if pdu[i] == AUTH_TYPE_NTLM && i+1 < pdu.len() {
-                assert_eq!(pdu[i+1], AUTH_LEVEL_PRIVACY, "Auth level should be PRIVACY (0x06)");
+        for i in 0..pdu.len() - 1 {
+            if pdu[i] == AUTH_TYPE_NTLM && i + 1 < pdu.len() {
+                assert_eq!(
+                    pdu[i + 1],
+                    AUTH_LEVEL_PRIVACY,
+                    "Auth level should be PRIVACY (0x06)"
+                );
                 found_auth_level = true;
                 break;
             }
         }
-        assert!(found_auth_level, "Should find auth level in alter context PDU");
+        assert!(
+            found_auth_level,
+            "Should find auth level in alter context PDU"
+        );
     }
 
     #[test]
     fn test_remote_activation_stub_ndr_encoding() {
         // Test that RemoteActivation stub uses proper NDR conformant arrays
-        let clsid = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
-                     0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00];
-        let iid = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                   0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46];  // IID_IUnknown
+        let clsid = [
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE,
+            0xFF, 0x00,
+        ];
+        let iid = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x46,
+        ]; // IID_IUnknown
         let stub = build_remote_activation_stub(&clsid, &iid).unwrap();
 
         // ORPCTHIS is: version(4) + flags(4) + reserved1(4) + causality(16) + extensions(4) = 32 bytes
@@ -889,31 +943,64 @@ mod tests {
 
         // The CLSID starts after ORPCTHIS
         assert!(stub.len() >= offset + 16, "Stub should contain CLSID");
-        let stub_clsid = &stub[offset..offset+16];
+        let stub_clsid = &stub[offset..offset + 16];
         assert_eq!(stub_clsid, &clsid, "CLSID should match");
 
         // Then pwszObjectName pointer (null)
-        let string_ptr = u32::from_le_bytes([stub[offset+16], stub[offset+17], stub[offset+18], stub[offset+19]]);
-        assert_eq!(string_ptr, 0, "String pointer should be null for default activation");
+        let string_ptr = u32::from_le_bytes([
+            stub[offset + 16],
+            stub[offset + 17],
+            stub[offset + 18],
+            stub[offset + 19],
+        ]);
+        assert_eq!(
+            string_ptr, 0,
+            "String pointer should be null for default activation"
+        );
 
         // Then pObjectStorage pointer (null)
-        let storage_ptr = u32::from_le_bytes([stub[offset+20], stub[offset+21], stub[offset+22], stub[offset+23]]);
+        let storage_ptr = u32::from_le_bytes([
+            stub[offset + 20],
+            stub[offset + 21],
+            stub[offset + 22],
+            stub[offset + 23],
+        ]);
         assert_eq!(storage_ptr, 0, "Storage pointer should be null");
 
         // Then ClientImpLevel
-        let imp_level = u32::from_le_bytes([stub[offset+24], stub[offset+25], stub[offset+26], stub[offset+27]]);
+        let imp_level = u32::from_le_bytes([
+            stub[offset + 24],
+            stub[offset + 25],
+            stub[offset + 26],
+            stub[offset + 27],
+        ]);
         assert_eq!(imp_level, 2, "Impersonation level should be IDENTIFY (2)");
 
         // Then Mode
-        let mode = u32::from_le_bytes([stub[offset+28], stub[offset+29], stub[offset+30], stub[offset+31]]);
+        let mode = u32::from_le_bytes([
+            stub[offset + 28],
+            stub[offset + 29],
+            stub[offset + 30],
+            stub[offset + 31],
+        ]);
         assert_eq!(mode, 0, "Mode should be 0");
 
         // Then Interfaces count
-        let req_count = u32::from_le_bytes([stub[offset+32], stub[offset+33], stub[offset+34], stub[offset+35]]);
+        let req_count = u32::from_le_bytes([
+            stub[offset + 32],
+            stub[offset + 33],
+            stub[offset + 34],
+            stub[offset + 35],
+        ]);
         assert_eq!(req_count, 1, "Should request 1 interface");
 
         // Then IID array pointer (non-null unique pointer)
-        let iid_ptr = u32::from_le_bytes([stub[offset+36], stub[offset+37], stub[offset+38], stub[offset+39]]);
+        let iid_ptr = u32::from_le_bytes([
+            stub[offset + 36],
+            stub[offset + 37],
+            stub[offset + 38],
+            stub[offset + 39],
+        ]);
         assert_ne!(iid_ptr, 0, "IID array pointer should be non-null");
 
         // Then conformant array header for IIDs
@@ -921,27 +1008,33 @@ mod tests {
         if stub.len() > iid_array_offset + 12 {
             // Should have max_count = 1
             let max_count = u32::from_le_bytes([
-                stub[iid_array_offset], stub[iid_array_offset+1],
-                stub[iid_array_offset+2], stub[iid_array_offset+3]
+                stub[iid_array_offset],
+                stub[iid_array_offset + 1],
+                stub[iid_array_offset + 2],
+                stub[iid_array_offset + 3],
             ]);
             assert_eq!(max_count, 1, "IID array max_count should be 1");
 
             // Offset should be 0
             let arr_offset = u32::from_le_bytes([
-                stub[iid_array_offset+4], stub[iid_array_offset+5],
-                stub[iid_array_offset+6], stub[iid_array_offset+7]
+                stub[iid_array_offset + 4],
+                stub[iid_array_offset + 5],
+                stub[iid_array_offset + 6],
+                stub[iid_array_offset + 7],
             ]);
             assert_eq!(arr_offset, 0, "IID array offset should be 0");
 
             // Actual count should be 1
             let actual = u32::from_le_bytes([
-                stub[iid_array_offset+8], stub[iid_array_offset+9],
-                stub[iid_array_offset+10], stub[iid_array_offset+11]
+                stub[iid_array_offset + 8],
+                stub[iid_array_offset + 9],
+                stub[iid_array_offset + 10],
+                stub[iid_array_offset + 11],
             ]);
             assert_eq!(actual, 1, "IID array actual_count should be 1");
 
             // Then the IID itself
-            let stub_iid = &stub[iid_array_offset+12..iid_array_offset+28];
+            let stub_iid = &stub[iid_array_offset + 12..iid_array_offset + 28];
             assert_eq!(stub_iid, &iid, "IID should match");
         }
     }

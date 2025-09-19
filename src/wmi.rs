@@ -34,6 +34,7 @@ pub struct IWbemServices {
 }
 
 impl IWbemLocator {
+    #[doc(hidden)]
     pub fn new(host: &str) -> Self {
         Self {
             host: host.to_string(),
@@ -57,25 +58,70 @@ impl IWbemLocator {
     pub fn connect_server(
         &self,
         namespace: &str,
-        _username: Option<&str>,
-        _password: Option<&str>,
-        _domain: Option<&str>,
+        username: Option<&str>,
+        password: Option<&str>,
+        domain: Option<&str>,
     ) -> Result<IWbemServices, WmiError> {
-        // Stub: assume the namespace exists once the network stack is wired up.
-        let normalized = if namespace.starts_with("root\\") {
-            namespace.to_string()
+        // Use real DCOM activation when credentials are provided
+        if let (Some(user), Some(pass)) = (username, password) {
+            let config = crate::transport::RealTransportConfig {
+                host: self.host.clone(),
+                username: Some(user.to_string()),
+                password: Some(pass.to_string()),
+                domain: domain.map(|s| s.to_string()),
+                read_timeout: None,
+                write_timeout: None,
+            };
+
+            // Validate configuration
+            config.validate().map_err(|_| WmiError::Connect)?;
+
+            let creds = crate::auth::Credentials {
+                username: user.to_string(),
+                password: pass.to_string(),
+                domain: domain.unwrap_or("").to_string(),
+                workstation: self.host.clone(),
+            };
+
+            // Perform DCOM activation to get port and OXID
+            let (port, oxid) = crate::dcom::activate_wmi_dcom(&self.host, &creds)
+                .map_err(|_| WmiError::Connect)?;
+
+            // Create real transport with OXID
+            let transport =
+                crate::transport::RealRpcTransport::connect_with_oxid(config, port, oxid)
+                    .map_err(|_| WmiError::Connect)?;
+
+            let normalized = if namespace.starts_with("root\\") {
+                namespace.to_string()
+            } else {
+                format!("root\\{namespace}")
+            };
+
+            Ok(IWbemServices {
+                namespace: normalized,
+                codec: Arc::clone(&self.codec),
+                transport: Arc::new(Mutex::new(
+                    Box::new(transport) as Box<dyn RpcTransport + Send>
+                )),
+            })
         } else {
-            format!("root\\{namespace}")
-        };
-        println!(
-            "ConnectServer to host {} namespace {}",
-            self.host, normalized
-        );
-        Ok(IWbemServices {
-            namespace: normalized,
-            codec: Arc::clone(&self.codec),
-            transport: Arc::clone(&self.transport),
-        })
+            // Fall back to stub transport if no credentials
+            let normalized = if namespace.starts_with("root\\") {
+                namespace.to_string()
+            } else {
+                format!("root\\{namespace}")
+            };
+            println!(
+                "ConnectServer to host {} namespace {} (using stub transport)",
+                self.host, normalized
+            );
+            Ok(IWbemServices {
+                namespace: normalized,
+                codec: Arc::clone(&self.codec),
+                transport: Arc::clone(&self.transport),
+            })
+        }
     }
 }
 

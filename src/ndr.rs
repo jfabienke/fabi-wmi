@@ -10,6 +10,11 @@ use thiserror::Error;
 
 pub use codec::RealNdrCodec;
 
+#[cfg(feature = "async")]
+use std::sync::Arc;
+#[cfg(feature = "async")]
+use tokio::task::spawn_blocking;
+
 /// Errors produced by the NDR codec while encoding or decoding payloads.
 #[derive(Debug, Error)]
 pub enum NdrError {
@@ -53,6 +58,49 @@ pub trait NdrCodec: Send + Sync {
 #[derive(Default)]
 pub struct StubNdrCodec;
 
+#[cfg(feature = "async")]
+#[derive(Clone)]
+pub struct AsyncNdrCodec {
+    inner: Arc<dyn NdrCodec + Send + Sync>,
+}
+
+#[cfg(feature = "async")]
+impl AsyncNdrCodec {
+    pub fn new(inner: Arc<dyn NdrCodec + Send + Sync>) -> Self {
+        Self { inner }
+    }
+
+    pub async fn encode_exec_query(
+        &self,
+        language: &str,
+        query: &str,
+    ) -> Result<Vec<u8>, NdrError> {
+        let language_owned = language.to_owned();
+        let query_owned = query.to_owned();
+        let inner = Arc::clone(&self.inner);
+
+        spawn_blocking(move || inner.encode_exec_query(&language_owned, &query_owned))
+            .await
+            .map_err(|_| NdrError::Encode)?
+    }
+
+    pub async fn decode_exec_query(
+        &self,
+        namespace: &str,
+        query: &str,
+        data: &[u8],
+    ) -> Result<Vec<Value>, NdrError> {
+        let namespace_owned = namespace.to_owned();
+        let query_owned = query.to_owned();
+        let payload = data.to_vec();
+        let inner = Arc::clone(&self.inner);
+
+        spawn_blocking(move || inner.decode_exec_query(&namespace_owned, &query_owned, &payload))
+            .await
+            .map_err(|_| NdrError::Decode)?
+    }
+}
+
 pub(crate) fn write_bstr(buf: &mut Vec<u8>, value: &str) {
     let utf16: Vec<u16> = value.encode_utf16().collect();
     buf.write_u32::<LittleEndian>(utf16.len() as u32)
@@ -65,6 +113,7 @@ pub(crate) fn write_bstr(buf: &mut Vec<u8>, value: &str) {
         .expect("write bstr terminator");
 }
 
+#[allow(dead_code)]
 pub(crate) fn read_bstr(cursor: &mut std::io::Cursor<&[u8]>) -> Option<String> {
     let len = cursor.read_u32::<LittleEndian>().ok()? as usize;
     let mut data = Vec::with_capacity(len);

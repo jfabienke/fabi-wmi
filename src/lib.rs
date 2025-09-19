@@ -12,9 +12,11 @@ mod auth;
 mod crypto;
 mod dcom;
 mod ndr;
+#[cfg(feature = "async")]
+mod pool;
 mod rpc;
-mod transport;
-mod wmi;
+mod transport; // Used internally by dcom and lib
+mod wmi; // Re-exported types below
 
 // Export auth module for examples
 pub mod auth_exports {
@@ -25,6 +27,11 @@ pub mod auth_exports {
 
 pub use auth::AuthError;
 pub use dcom::{activate_wmi_dcom, resolve_oxid, DcomError, ObjectReference};
+#[cfg(feature = "async")]
+pub use pool::{
+    AsyncTransportManager, PoolAcquireError, PoolBuildError, PooledTransport, WmiConnectionPool,
+    WmiConnectionPoolBuilder,
+};
 pub use rpc::RpcError;
 pub use wmi::{IWbemLocator, IWbemServices, WmiError};
 
@@ -59,10 +66,8 @@ pub struct InnerSession {
     locator: wmi::IWbemLocator,
     services: Option<wmi::IWbemServices>,
     credentials: Option<auth::Credentials>,
-    #[allow(dead_code)]
-    codec: Arc<dyn ndr::NdrCodec + Send + Sync>,
-    #[allow(dead_code)]
-    transport: Arc<Mutex<Box<dyn transport::RpcTransport + Send>>>,
+    _codec: Arc<dyn ndr::NdrCodec + Send + Sync>,
+    _transport: Arc<Mutex<Box<dyn transport::RpcTransport + Send>>>,
     _auth_level: u32,
 }
 
@@ -122,41 +127,60 @@ impl InnerSession {
         let port = dcom::resolve_wmi_port(host, base_creds.as_ref())
             .map_err(|err| WmiClientError::Invalid(format!("Port resolution failed: {err}")))?;
 
-        // Choose NDR codec based on environment variable
-        let codec: Arc<dyn ndr::NdrCodec + Send + Sync> =
-            if std::env::var("LINUX_WMI_USE_REAL_NDR").as_deref() == Ok("1") {
-                debug!("Using RealNdrCodec for NDR marshaling");
-                Arc::new(ndr::RealNdrCodec::new())
-            } else {
-                debug!("Using StubNdrCodec (mock responses)");
-                Arc::new(ndr::StubNdrCodec)
-            };
+        // Allow stub transport only when explicitly enabled via environment variable
+        // This is for testing purposes only
+        let use_stub = std::env::var("LINUX_WMI_USE_STUB").as_deref() == Ok("1");
 
-        let transport: Arc<Mutex<Box<dyn transport::RpcTransport + Send>>> =
-            if std::env::var("LINUX_WMI_SKIP_EPM").as_deref() == Ok("1") {
-                Arc::new(Mutex::new(Box::new(transport::StubTransport)))
-            } else if let (Some(ref user), Some(ref pass)) = (username.as_ref(), password.as_ref())
-            {
-                let config = transport::RealTransportConfig {
-                    host: host.to_string(),
-                    username: Some(user.to_string()),
-                    password: Some(pass.to_string()),
-                    domain: Some(domain_owned.clone()),
-                };
-                match transport::RealRpcTransport::connect(config) {
-                    Ok(real_transport) => Arc::new(Mutex::new(
-                        Box::new(real_transport) as Box<dyn transport::RpcTransport + Send>
-                    )),
-                    Err(err) => {
-                        eprintln!("Failed to create real transport: {err}, falling back to stub");
-                        Arc::new(Mutex::new(Box::new(transport::StubTransport)))
-                    }
+        // Choose NDR codec based on environment variable
+        // Use stub codec in test mode with stub transport, otherwise use real codec
+        let codec: Arc<dyn ndr::NdrCodec + Send + Sync> = if use_stub {
+            debug!("Using StubNdrCodec for test mode");
+            Arc::new(ndr::StubNdrCodec)
+        } else {
+            debug!("Using RealNdrCodec for NDR marshaling");
+            Arc::new(ndr::RealNdrCodec::new())
+        };
+
+        let (user, pass) = match (username.as_ref(), password.as_ref()) {
+            (Some(u), Some(p)) => (u.to_string(), p.to_string()),
+            _ if use_stub => ("stub".to_string(), "stub".to_string()),
+            _ => {
+                return Err(WmiClientError::Invalid(
+                    "Username and password are required for WMI connections".to_string()
+                ));
+            }
+        };
+
+        let config = transport::RealTransportConfig {
+            host: host.to_string(),
+            username: Some(user),
+            password: Some(pass),
+            domain: Some(domain_owned.clone()),
+            read_timeout: None,
+            write_timeout: None,
+        };
+
+        let transport: Arc<Mutex<Box<dyn transport::RpcTransport + Send>>> = if use_stub {
+            Arc::new(Mutex::new(Box::new(transport::StubTransport)))
+        } else {
+            match transport::RealRpcTransport::connect(config) {
+                Ok(real_transport) => Arc::new(Mutex::new(
+                    Box::new(real_transport) as Box<dyn transport::RpcTransport + Send>
+                )),
+                Err(err) => {
+                    return Err(WmiClientError::Invalid(format!(
+                        "Failed to establish transport connection: {err}"
+                    )));
                 }
-            } else {
-                Arc::new(Mutex::new(Box::new(transport::StubTransport)))
-            };
+            }
+        };
 
         let credentials = base_creds.clone();
+
+        debug!(
+            "Session created: host={}, port={}, auth_level={}",
+            host, port, auth_level
+        );
 
         Ok(Self {
             _host: host.to_string(),
@@ -164,8 +188,8 @@ impl InnerSession {
             locator: wmi::IWbemLocator::with_components(host, codec.clone(), transport.clone()),
             services: None,
             credentials,
-            codec,
-            transport,
+            _codec: codec,
+            _transport: transport,
             _auth_level: auth_level,
         })
     }
@@ -536,6 +560,7 @@ mod tests {
         static INIT: Once = Once::new();
         INIT.call_once(|| {
             std::env::set_var("LINUX_WMI_SKIP_EPM", "1");
+            std::env::set_var("LINUX_WMI_USE_STUB", "1");
         });
     }
 

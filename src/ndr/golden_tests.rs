@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::ndr::codec::RealNdrCodec;
-    use crate::ndr::types::{Bstr, Variant, ConformantArray};
+    use crate::ndr::types::{Bstr, ConformantArray, Variant};
     use crate::ndr::NdrCodec;
     use hex_literal::hex;
 
@@ -73,25 +73,32 @@ mod tests {
         // Extensions pointer (null)
         assert_eq!(&encoded[32..36], &[0x00, 0x00, 0x00, 0x00]);
 
-        // After ORPCTHIS (40 bytes), we have the first BSTR pointer
-        assert_eq!(&encoded[40..44], &[0x00, 0x00, 0x02, 0x00]);
+        // First BSTR pointer and conformant header for "WQL"
+        assert_eq!(&encoded[40..44], &[0x00, 0x00, 0x02, 0x00]); // referent
+        assert_eq!(&encoded[44..48], &[0x04, 0x00, 0x00, 0x00]); // max_count (chars incl. null)
+        assert_eq!(&encoded[48..52], &[0x00, 0x00, 0x00, 0x00]); // offset
+        assert_eq!(&encoded[52..56], &[0x04, 0x00, 0x00, 0x00]); // actual_count
 
-        // BSTR for "WQL" starts at offset 44
-        assert_eq!(&encoded[44..48], &[0x06, 0x00, 0x00, 0x00]);
+        // "WQL" in UTF-16LE (with null terminator)
+        assert_eq!(&encoded[56..58], &[0x57, 0x00]); // 'W'
+        assert_eq!(&encoded[58..60], &[0x51, 0x00]); // 'Q'
+        assert_eq!(&encoded[60..62], &[0x4C, 0x00]); // 'L'
+        assert_eq!(&encoded[62..64], &[0x00, 0x00]); // null terminator
 
-        // "WQL" in UTF-16LE
-        assert_eq!(&encoded[48..50], &[0x57, 0x00]); // 'W'
-        assert_eq!(&encoded[50..52], &[0x51, 0x00]); // 'Q'
-        assert_eq!(&encoded[52..54], &[0x4C, 0x00]); // 'L'
-        assert_eq!(&encoded[54..56], &[0x00, 0x00]); // null terminator
+        // Second BSTR pointer and header for the query string
+        assert_eq!(&encoded[64..68], &[0x01, 0x00, 0x02, 0x00]); // referent
+        assert_eq!(&encoded[68..72], &[0x1C, 0x00, 0x00, 0x00]); // max_count (28 chars incl. null)
+        assert_eq!(&encoded[72..76], &[0x00, 0x00, 0x00, 0x00]); // offset
+        assert_eq!(&encoded[76..80], &[0x1C, 0x00, 0x00, 0x00]); // actual_count
+
+        // Query string "SELECT * FROM Win32_Process" begins immediately after header
+        assert_eq!(&encoded[80..82], &[0x53, 0x00]); // 'S'
+        assert_eq!(&encoded[82..84], &[0x45, 0x00]); // 'E'
     }
 
     #[test]
     fn test_conformant_array_encoding_golden() {
-        let array = ConformantArray::new(vec![
-            Variant::I4(1),
-            Variant::I4(2),
-        ]);
+        let array = ConformantArray::new(vec![Variant::I4(1), Variant::I4(2)]);
         let encoded = array.encode();
 
         // Conformance header

@@ -98,7 +98,9 @@ impl std::fmt::Display for HResultError {
             HResultError::InvalidClass => write!(f, "The specified class does not exist"),
             HResultError::InvalidParameter => write!(f, "One or more parameters are invalid"),
             HResultError::CallCancelled => write!(f, "The operation was cancelled"),
-            HResultError::TransportFailure => write!(f, "The transport or network connection failed"),
+            HResultError::TransportFailure => {
+                write!(f, "The transport or network connection failed")
+            }
             HResultError::Unknown(code) => write!(f, "Unknown HRESULT error: 0x{code:08X}"),
         }
     }
@@ -116,22 +118,22 @@ impl From<HResult> for HResultError {
 pub enum VarType {
     Empty = 0x0000,
     Null = 0x0001,
-    I2 = 0x0002,     // 16-bit signed int
-    I4 = 0x0003,     // 32-bit signed int
-    R4 = 0x0004,     // 32-bit float
-    R8 = 0x0005,     // 64-bit double
-    Date = 0x0007,   // OLE Automation date (f64)
-    Bstr = 0x0008,   // BSTR string
-    Bool = 0x000B,   // VARIANT_BOOL
-    I1 = 0x0010,     // 8-bit signed int
-    UI1 = 0x0011,    // 8-bit unsigned int
-    UI2 = 0x0012,    // 16-bit unsigned int
-    UI4 = 0x0013,    // 32-bit unsigned int
-    I8 = 0x0014,     // 64-bit signed int
-    UI8 = 0x0015,    // 64-bit unsigned int
-    Record = 0x0024, // User-defined type
+    I2 = 0x0002,       // 16-bit signed int
+    I4 = 0x0003,       // 32-bit signed int
+    R4 = 0x0004,       // 32-bit float
+    R8 = 0x0005,       // 64-bit double
+    Date = 0x0007,     // OLE Automation date (f64)
+    Bstr = 0x0008,     // BSTR string
+    Bool = 0x000B,     // VARIANT_BOOL
+    I1 = 0x0010,       // 8-bit signed int
+    UI1 = 0x0011,      // 8-bit unsigned int
+    UI2 = 0x0012,      // 16-bit unsigned int
+    UI4 = 0x0013,      // 32-bit unsigned int
+    I8 = 0x0014,       // 64-bit signed int
+    UI8 = 0x0015,      // 64-bit unsigned int
+    Record = 0x0024,   // User-defined type
     FileTime = 0x0040, // Windows FILETIME (u64)
-    Array = 0x2000,  // VT_ARRAY flag
+    Array = 0x2000,    // VT_ARRAY flag
 }
 
 /// BSTR (Basic String) per MS-OAUT §2.2.23
@@ -165,8 +167,7 @@ impl Bstr {
         }
 
         // Write null terminator
-        buf.write_u16::<LittleEndian>(0)
-            .expect("write bstr null");
+        buf.write_u16::<LittleEndian>(0).expect("write bstr null");
 
         buf
     }
@@ -203,7 +204,7 @@ pub enum Variant {
     #[serde(rename = "i4")]
     I4(i32),
     #[serde(rename = "r8")]
-    R8(f64),  // 64-bit double
+    R8(f64), // 64-bit double
     #[serde(rename = "date")]
     Date(f64), // OLE date (days since 1899-12-30)
     #[serde(rename = "bstr")]
@@ -239,9 +240,8 @@ impl Variant {
             Variant::UI8(n) => serde_json::json!(n),
             Variant::FileTime(ft) => serde_json::json!(ft), // Could convert to ISO8601
             Variant::Array(arr) => {
-                let values: Vec<serde_json::Value> = arr.elements.iter()
-                    .map(|v| v.to_json_value())
-                    .collect();
+                let values: Vec<serde_json::Value> =
+                    arr.elements.iter().map(|v| v.to_json_value()).collect();
                 serde_json::json!(values)
             }
         }
@@ -304,7 +304,8 @@ impl Variant {
                 buf.write_i64::<LittleEndian>(*val).expect("write i8");
             }
             Variant::UI8(val) | Variant::FileTime(val) => {
-                buf.write_u64::<LittleEndian>(*val).expect("write ui8/filetime");
+                buf.write_u64::<LittleEndian>(*val)
+                    .expect("write ui8/filetime");
             }
             Variant::Bstr(_bstr) => {
                 // For BSTR in VARIANT, store pointer reference (will be marshaled separately)
@@ -439,9 +440,11 @@ impl ConformantArray<Variant> {
 
         // Write conformance info
         let count = self.elements.len() as u32;
-        buf.write_u32::<LittleEndian>(count).expect("write max_count");
+        buf.write_u32::<LittleEndian>(count)
+            .expect("write max_count");
         buf.write_u32::<LittleEndian>(0).expect("write offset");
-        buf.write_u32::<LittleEndian>(count).expect("write actual_count");
+        buf.write_u32::<LittleEndian>(count)
+            .expect("write actual_count");
 
         // Write elements
         for element in &self.elements {
@@ -504,12 +507,16 @@ impl SafeArray {
         let mut buf = Vec::new();
 
         // Simplified SAFEARRAY encoding
-        buf.write_u16::<LittleEndian>(self.dimensions).expect("write dims");
-        buf.write_u16::<LittleEndian>(self.features).expect("write features");
-        buf.write_u32::<LittleEndian>(self.element_size).expect("write elem_size");
+        buf.write_u16::<LittleEndian>(self.dimensions)
+            .expect("write dims");
+        buf.write_u16::<LittleEndian>(self.features)
+            .expect("write features");
+        buf.write_u32::<LittleEndian>(self.element_size)
+            .expect("write elem_size");
 
         // Write bounds (simplified for 1D)
-        buf.write_u32::<LittleEndian>(self.elements.len() as u32).expect("write count");
+        buf.write_u32::<LittleEndian>(self.elements.len() as u32)
+            .expect("write count");
         buf.write_u32::<LittleEndian>(0).expect("write lbound");
 
         // Write elements
@@ -534,7 +541,10 @@ mod tests {
 
         let variant = Variant::Bstr(Bstr::new("test"));
         let json_value = serde_json::to_value(&variant).unwrap();
-        assert_eq!(json_value, json!({"type": "bstr", "value": {"value": "test"}}));
+        assert_eq!(
+            json_value,
+            json!({"type": "bstr", "value": {"value": "test"}})
+        );
     }
 
     #[test]
@@ -649,11 +659,7 @@ mod tests {
 
     #[test]
     fn test_conformant_array_encoding() {
-        let array = ConformantArray::new(vec![
-            Variant::I4(1),
-            Variant::I4(2),
-            Variant::I4(3),
-        ]);
+        let array = ConformantArray::new(vec![Variant::I4(1), Variant::I4(2), Variant::I4(3)]);
 
         let encoded = array.encode();
 

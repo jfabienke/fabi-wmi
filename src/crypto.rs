@@ -1,4 +1,4 @@
-use rc4::{StreamCipher, KeyInit};
+use rc4::{KeyInit, StreamCipher};
 
 /// Compute HMAC-MD5 signature for RPC PDU authentication
 ///
@@ -61,8 +61,7 @@ pub fn rc4_encrypt(session_key: &[u8], data: &mut [u8]) {
     use rc4::consts::U16;
     type Rc4_128 = rc4::Rc4<U16>;
 
-    let mut cipher = Rc4_128::new_from_slice(session_key)
-        .expect("RC4 accepts 16-byte keys");
+    let mut cipher = Rc4_128::new_from_slice(session_key).expect("RC4 accepts 16-byte keys");
     cipher.apply_keystream(data);
 }
 

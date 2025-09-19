@@ -2,7 +2,7 @@
 
 High-level overview of the linux-wmi implementation architecture, reflecting the current state (Phases 1-2 complete) and design decisions made during development.
 
-## Current Architecture (v0.1.0)
+## Architecture Diagram
 
 ```
       ╔═══════════════════════════════════════════╗
@@ -36,7 +36,7 @@ High-level overview of the linux-wmi implementation architecture, reflecting the
            ┌─────────────────────────────┐ ┌─────────────────────┐
            │   DCOM Activation (dcom.rs) │ │  Port Resolution    │
            │ ─────────────────────────── │ │ ─────────────────── │
-           │ • IRemoteSCMActivator bind  │ │ • EPM (fails) ❌     │
+           │ • IRemoteSCMActivator bind  │ │ • EPM deprecated    │
            │ • RemoteActivation opnum=4  │ │ • DCOM fallback ✅  │
            │ • DUALSTRINGARRAY parse     │ │ • ENV skip ✅       │
            │ • Extract dynamic port      │ └─────────────────────┘
@@ -57,16 +57,22 @@ High-level overview of the linux-wmi implementation architecture, reflecting the
 
 Based on PROTOCOL-COMPLETION.md estimates:
 
-| Component           | Status             | Completion                                              |
-|---------------------|--------------------|---------------------------------------------------------|
-| **Transport Layer** | ✅ Complete        | 100% - TCP with timeouts, non-blocking I/O              |
-| **RPCE (RPC)**      | ✅ Complete        | 100% - PDUs, bind/alter, faults, multi-fragment support |
-| **Authentication**  | ✅ Complete        | 100% - Full NTLMv2 with session keys                    |
-| **DCOM Activation** | ✅ Complete        | 100% - RemoteActivation with OXID resolver implemented  |
-| **ORPC Layer**      | ✅ Complete        | 100% - ORPCTHIS/THAT, OXID resolver, causality tracking |
-| **NDR Codec**       | ✅ Foundation      |  80% - VARIANT types, BSTR, arrays, ExecQuery encoding  |
-| **WMI Protocol**    | 🔄 Stubbed         |  30% - Opnums defined, returns mock JSON                |
-| **Overall Stack**   | **80% Complete**   | Core protocol stack done, WMI object parsing remains    |
+| Component           | Status             | Completion                                                                |
+|---------------------|--------------------|---------------------------------------------------------------------------|
+| **Transport Layer** | ✅ Mostly Complete |  90% - Stable synchronous TCP stack; async/pooling planned                |
+| **RPCE (RPC)**      | ✅ Mostly Complete |  90% - Bind/alter/fragments solid, needs broader live validation          |
+| **Authentication**  | ✅ Mostly Complete |  90% - NTLMv2 + signing/sealing; further hardening tracked                |
+| **DCOM Activation** | ✅ Mostly Complete |  85% - RemoteActivation working; additional error paths untested          |
+| **ORPC Layer**      | ⚠️ Partial         |  70% - ORPCTHIS/THAT & OXID implemented, enumerator usage pending         |
+| **NDR Codec**       | ⚠️ Foundation      |  60% - Core types encoded, response decoding still stub-backed            |
+| **WMI Protocol**    | ⚠️ Stubbed         |  40% - Live ExecQuery falls back to canned JSON pending enumerator decode |
+| **Overall Stack**   | **65% Complete**   | Authenticated transport in place; real result parsing & async outstanding |
+
+### Current Limitations
+
+- `IWbemServices::exec_query` still returns stubbed JSON when the server supplies an enumerator pointer; full parsing of `IEnumWbemClassObject` responses is tracked for Phase 5.
+- Live verification has been limited to smoke tests; extended soak testing and failure-mode handling are part of the upcoming async/pooling work.
+- The synchronous API remains the default; async transport and connection pooling will ship behind a feature flag once Phase 5 lands.
 
 ## Module Structure
 
@@ -175,15 +181,15 @@ examples/
 
 ### Windows Server Remote Management Matrix
 
-| Windows Server Version | Service Packs / Releases | WMI (Windows Management Instrumentation) | WinRM (Windows Remote Management) |
-|------------------------|---------------------------|-------------------------------------------|------------------------------------|
-| Windows 2000 Server    | SP0 – SP4                | Default: Installed and enabled by default.| Not included. WinRM did not exist yet. |
-| Windows Server 2003    | RTM, SP1, SP2            | Default: Installed and enabled by default.| Optional: WinRM 1.1 via WMF 2.0; manual install, disabled until configured. |
-| Windows Server 2008    | RTM, R2                  | Default: Installed and enabled by default.| Included: WinRM 2.0 shipped but disabled; requires `winrm quickconfig`. |
-| Windows Server 2012    | RTM, R2                  | Default: Installed and enabled by default.| Enabled by default: WinRM 3.0 auto-starts with listeners preconfigured. |
-| Windows Server 2016    | GA                       | Default: Installed and enabled by default.| Enabled by default: WinRM 3.0 with PowerShell Remoting ready. |
-| Windows Server 2019    | GA                       | Default: Installed and enabled by default.| Enabled by default: WinRM enabled out-of-the-box. |
-| Windows Server 2022    | GA                       | Default: Installed and enabled by default.| Enabled by default: WinRM enabled out-of-the-box. |
+| Windows Server Version | Service Packs / Releases | WMI (Windows Management Instrumentation)   | WinRM (Windows Remote Management)                                           |
+|------------------------|--------------------------|--------------------------------------------|-----------------------------------------------------------------------------|
+| Windows 2000 Server    | SP0 – SP4                | Default: Installed and enabled by default. | Not included. WinRM did not exist yet.                                      |
+| Windows Server 2003    | RTM, SP1, SP2            | Default: Installed and enabled by default. | Optional: WinRM 1.1 via WMF 2.0; manual install, disabled until configured. |
+| Windows Server 2008    | RTM, R2                  | Default: Installed and enabled by default. | Included: WinRM 2.0 shipped but disabled; requires `winrm quickconfig`.     |
+| Windows Server 2012    | RTM, R2                  | Default: Installed and enabled by default. | Enabled by default: WinRM 3.0 auto-starts with listeners preconfigured.     |
+| Windows Server 2016    | GA                       | Default: Installed and enabled by default. | Enabled by default: WinRM 3.0 with PowerShell Remoting ready.               |
+| Windows Server 2019    | GA                       | Default: Installed and enabled by default. | Enabled by default: WinRM enabled out-of-the-box.                           |
+| Windows Server 2022    | GA                       | Default: Installed and enabled by default. | Enabled by default: WinRM enabled out-of-the-box.                           |
 
 **Key Notes**
 

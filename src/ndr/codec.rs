@@ -1,7 +1,7 @@
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use serde_json::{json, Value};
 use std::io::Cursor;
-use tracing::{instrument, trace};
+use tracing::{instrument, trace, warn};
 
 use super::{NdrCodec, NdrError};
 
@@ -20,13 +20,21 @@ impl RealNdrCodec {
             return;
         }
 
-        let chars: Vec<u16> = value.encode_utf16().collect();
-        let byte_len = (chars.len() * 2) as u32;
-        buf.write_u32::<LittleEndian>(byte_len).unwrap();
+        let mut chars: Vec<u16> = value.encode_utf16().collect();
+        chars.push(0); // terminator
+        let count = chars.len() as u32;
+
+        buf.write_u32::<LittleEndian>(count).unwrap(); // max_count
+        buf.write_u32::<LittleEndian>(0).unwrap(); // offset
+        buf.write_u32::<LittleEndian>(count).unwrap(); // actual_count
+
         for ch in &chars {
             buf.write_u16::<LittleEndian>(*ch).unwrap();
         }
-        buf.write_u16::<LittleEndian>(0).unwrap();
+
+        if (chars.len() * 2) % 4 != 0 {
+            buf.extend_from_slice(&[0u8; 2]);
+        }
 
         while buf.len() % 4 != 0 {
             buf.push(0);
@@ -43,7 +51,9 @@ impl RealNdrCodec {
         let mut cursor = Cursor::new(data);
 
         // Read VT type (first 2 bytes)
-        let vt_type = cursor.read_u16::<LittleEndian>().map_err(|_| NdrError::Decode)?;
+        let vt_type = cursor
+            .read_u16::<LittleEndian>()
+            .map_err(|_| NdrError::Decode)?;
 
         // Skip reserved bytes (6 bytes)
         cursor.set_position(8);
@@ -54,37 +64,51 @@ impl RealNdrCodec {
             0x0001 => json!(null), // VT_NULL
             0x0003 => {
                 // VT_I4 - 32-bit signed integer
-                let val = cursor.read_i32::<LittleEndian>().map_err(|_| NdrError::Decode)?;
+                let val = cursor
+                    .read_i32::<LittleEndian>()
+                    .map_err(|_| NdrError::Decode)?;
                 json!(val)
-            },
+            }
             0x0008 => {
                 // VT_BSTR - BSTR string
                 // Read pointer
-                let ptr = cursor.read_u32::<LittleEndian>().map_err(|_| NdrError::Decode)?;
+                let ptr = cursor
+                    .read_u32::<LittleEndian>()
+                    .map_err(|_| NdrError::Decode)?;
                 if ptr == 0 {
                     json!(null)
                 } else {
                     // For simplicity, assume inline BSTR follows
                     cursor.set_position(cursor.position() + 4); // Skip padding
-                    let len = cursor.read_u32::<LittleEndian>().map_err(|_| NdrError::Decode)? as usize;
+                    let len = cursor
+                        .read_u32::<LittleEndian>()
+                        .map_err(|_| NdrError::Decode)? as usize;
                     let mut chars = Vec::with_capacity(len / 2);
                     for _ in 0..(len / 2) {
-                        chars.push(cursor.read_u16::<LittleEndian>().map_err(|_| NdrError::Decode)?);
+                        chars.push(
+                            cursor
+                                .read_u16::<LittleEndian>()
+                                .map_err(|_| NdrError::Decode)?,
+                        );
                     }
                     let string = String::from_utf16_lossy(&chars);
                     json!(string)
                 }
-            },
+            }
             0x0013 => {
                 // VT_UI4 - 32-bit unsigned integer
-                let val = cursor.read_u32::<LittleEndian>().map_err(|_| NdrError::Decode)?;
+                let val = cursor
+                    .read_u32::<LittleEndian>()
+                    .map_err(|_| NdrError::Decode)?;
                 json!(val)
-            },
+            }
             0x0014 => {
                 // VT_I8 - 64-bit signed integer
-                let val = cursor.read_i64::<LittleEndian>().map_err(|_| NdrError::Decode)?;
+                let val = cursor
+                    .read_i64::<LittleEndian>()
+                    .map_err(|_| NdrError::Decode)?;
                 json!(val)
-            },
+            }
             _ => json!(null), // Unknown type
         };
 
@@ -137,27 +161,26 @@ impl RealNdrCodec {
         }
 
         let mut cursor = Cursor::new(data);
-        let _flags = cursor.read_u32::<LittleEndian>().map_err(|_| NdrError::Decode)?;
-        let ext_ptr = cursor.read_u32::<LittleEndian>().map_err(|_| NdrError::Decode)?;
+        cursor
+            .read_u32::<LittleEndian>()
+            .map_err(|_| NdrError::Decode)?; // flags
+        let ext_ptr = cursor
+            .read_u32::<LittleEndian>()
+            .map_err(|_| NdrError::Decode)? as usize;
 
-        let mut offset = 8;
+        let mut offset = cursor.position() as usize;
 
-        // Parse extensions if pointer is non-null
         if ext_ptr != 0 {
-            // Extension pointer is a referent ID, not an offset
-            // Extensions follow immediately after ORPCTHAT header
-
-            // Read conformant array size (at current offset)
-            if data.len() >= offset + 4 {
-                let size = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
-
-                // Skip conformant array size (4 bytes) + array data
-                offset += 4 + size;
-
-                // Ensure alignment to 4-byte boundary
-                let padding = (4 - (size % 4)) % 4;
-                offset += padding;
+            if ext_ptr + 4 > data.len() {
+                return Err(NdrError::Decode);
             }
+            let size = u32::from_le_bytes(data[ext_ptr..ext_ptr + 4].try_into().unwrap()) as usize;
+            if ext_ptr + 4 + size > data.len() {
+                return Err(NdrError::Decode);
+            }
+            offset = ext_ptr + 4 + size;
+            let padding = (4 - (offset % 4)) % 4;
+            offset += padding;
         }
 
         Ok(offset)
@@ -174,7 +197,9 @@ impl RealNdrCodec {
             return Err(NdrError::Decode);
         }
         let mut cursor = Cursor::new(&data[offset..]);
-        cursor.read_u32::<LittleEndian>().map_err(|_| NdrError::Decode)
+        cursor
+            .read_u32::<LittleEndian>()
+            .map_err(|_| NdrError::Decode)
     }
 }
 
@@ -231,7 +256,8 @@ impl NdrCodec for RealNdrCodec {
         Self::encode_bstr_field(&mut buf, 0x00020001, query);
 
         // 4. lFlags (WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY)
-        buf.write_u32::<LittleEndian>(0x00000020 | 0x00000010).unwrap();
+        buf.write_u32::<LittleEndian>(0x00000020 | 0x00000010)
+            .unwrap();
 
         // 5. pCtx (IWbemContext pointer - null for now)
         buf.write_u32::<LittleEndian>(0x00000000).unwrap();
@@ -264,13 +290,104 @@ impl NdrCodec for RealNdrCodec {
         offset += 4; // Move past HRESULT
 
         let mut cursor = Cursor::new(&data[offset..]);
-        let enum_ptr = cursor.read_u32::<LittleEndian>().map_err(|_| NdrError::Decode)?;
+        let enum_ptr = cursor
+            .read_u32::<LittleEndian>()
+            .map_err(|_| NdrError::Decode)?;
         if enum_ptr == 0 {
             return Ok(Vec::new());
         }
 
-        trace!("ExecQuery returned enumerator pointer 0x{:08x}; streaming not implemented", enum_ptr);
-        self.decode_stub_response(query)
+        let decode_attempt = (|| {
+            let remaining = cursor.get_ref().len() as u64 - cursor.position();
+            if remaining < 8 {
+                return Err(NdrError::Decode);
+            }
+
+            let object_count = cursor
+                .read_u32::<LittleEndian>()
+                .map_err(|_| NdrError::Decode)?;
+            let more_flag = cursor
+                .read_u32::<LittleEndian>()
+                .map_err(|_| NdrError::Decode)?;
+
+            let mut results = Vec::with_capacity(object_count as usize);
+            for _ in 0..object_count {
+                let referent = cursor
+                    .read_u32::<LittleEndian>()
+                    .map_err(|_| NdrError::Decode)?;
+                if referent == 0 {
+                    continue;
+                }
+
+                let _max_count = cursor
+                    .read_u32::<LittleEndian>()
+                    .map_err(|_| NdrError::Decode)?;
+                let _offset = cursor
+                    .read_u32::<LittleEndian>()
+                    .map_err(|_| NdrError::Decode)?;
+                let actual_count = cursor
+                    .read_u32::<LittleEndian>()
+                    .map_err(|_| NdrError::Decode)? as usize;
+
+                if actual_count == 0 {
+                    continue;
+                }
+
+                let mut utf16 = Vec::with_capacity(actual_count);
+                for _ in 0..actual_count {
+                    utf16.push(
+                        cursor
+                            .read_u16::<LittleEndian>()
+                            .map_err(|_| NdrError::Decode)?,
+                    );
+                }
+
+                if let Some(&0) = utf16.last() {
+                    utf16.pop();
+                }
+
+                let string = String::from_utf16(&utf16).map_err(|_| NdrError::Decode)?;
+                let value = serde_json::from_str::<Value>(&string).map_err(|_| NdrError::Decode)?;
+                results.push(value);
+
+                while cursor.position() % 4 != 0
+                    && (cursor.position() as usize) < cursor.get_ref().len()
+                {
+                    cursor.read_u8().map_err(|_| NdrError::Decode)?;
+                }
+            }
+
+            Ok((results, more_flag))
+        })();
+
+        match decode_attempt {
+            Ok((values, more_flag)) => {
+                if more_flag != 0 {
+                    warn!(
+                        more_flag,
+                        "enumerator 0x{:08x} indicates additional data; falling back to stub",
+                        enum_ptr
+                    );
+                    self.decode_stub_response(query)
+                } else {
+                    trace!(
+                        "ExecQuery decoded {} objects from enumerator 0x{:08x}",
+                        values.len(),
+                        enum_ptr
+                    );
+                    Ok(values)
+                }
+            }
+            Err(err) => {
+                warn!(
+                    ?err,
+                    enum_ptr,
+                    "failed to decode enumerator 0x{:08x}; falling back to stub",
+                    enum_ptr
+                );
+                self.decode_stub_response(query)
+            }
+        }
     }
 
     fn encode_exec_method(
@@ -310,11 +427,14 @@ impl NdrCodec for RealNdrCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn test_exec_query_encoding() {
         let codec = RealNdrCodec::new();
-        let encoded = codec.encode_exec_query("WQL", "SELECT * FROM Win32_Process").unwrap();
+        let encoded = codec
+            .encode_exec_query("WQL", "SELECT * FROM Win32_Process")
+            .unwrap();
 
         // Check ORPCTHIS header
         assert_eq!(&encoded[0..4], &[0x01, 0x00, 0x00, 0x00]); // Version
@@ -351,6 +471,88 @@ mod tests {
 
         let offset = RealNdrCodec::parse_orpcthat(&data).unwrap();
         assert_eq!(offset, 8);
+    }
+
+    #[test]
+    fn decode_exec_query_enumerator_single_batch() {
+        let codec = RealNdrCodec::new();
+        let mut data = Vec::new();
+
+        data.extend_from_slice(&0u32.to_le_bytes()); // ORPCTHAT flags
+        data.extend_from_slice(&0u32.to_le_bytes()); // extensions ptr
+        data.extend_from_slice(&0u32.to_le_bytes()); // HRESULT S_OK
+
+        data.extend_from_slice(&0x0002_0000u32.to_le_bytes()); // enumerator pointer referent
+        data.extend_from_slice(&1u32.to_le_bytes()); // object count
+        data.extend_from_slice(&0u32.to_le_bytes()); // more flag
+
+        let mut object_buf = Vec::new();
+        RealNdrCodec::encode_bstr_field(&mut object_buf, 0x0002_0001, r#"{"ProcessId": 42}"#);
+        data.extend_from_slice(&object_buf);
+
+        let results = codec
+            .decode_exec_query("root\\cimv2", "SELECT * FROM Win32_Process", &data)
+            .expect("decode enumerator");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["ProcessId"], 42);
+    }
+
+    #[test]
+    fn decode_exec_query_enumerator_falls_back_when_more_flag_set() {
+        let codec = RealNdrCodec::new();
+        let mut data = Vec::new();
+
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+
+        data.extend_from_slice(&0x0002_0000u32.to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes()); // more flag set
+
+        let mut object_buf = Vec::new();
+        RealNdrCodec::encode_bstr_field(&mut object_buf, 0x0002_0001, r#"{"ProcessId": 99}"#);
+        data.extend_from_slice(&object_buf);
+
+        let results = codec
+            .decode_exec_query("root\\cimv2", "SELECT * FROM Win32_Process", &data)
+            .expect("decode with fallback");
+
+        // Fallback should yield stubbed ProcessId (1234)
+        assert_eq!(results[0]["ProcessId"], 1234);
+    }
+
+    proptest! {
+        #[test]
+        fn decode_exec_query_enumerator_roundtrip(process_id in 0u32..5000) {
+            let codec = RealNdrCodec::new();
+            let mut data = Vec::new();
+
+            data.extend_from_slice(&0u32.to_le_bytes());
+            data.extend_from_slice(&0u32.to_le_bytes());
+            data.extend_from_slice(&0u32.to_le_bytes());
+
+            data.extend_from_slice(&0x0002_0000u32.to_le_bytes());
+            data.extend_from_slice(&1u32.to_le_bytes());
+            data.extend_from_slice(&0u32.to_le_bytes());
+
+            let json_string = format!("{{\"ProcessId\": {process_id}}}");
+            let mut object_buf = Vec::new();
+            RealNdrCodec::encode_bstr_field(&mut object_buf, 0x0002_0001, &json_string);
+            data.extend_from_slice(&object_buf);
+
+            let results = codec
+                .decode_exec_query(
+                    "root\\cimv2",
+                    "SELECT * FROM Win32_Process",
+                    &data,
+                )
+                .expect("decode enumerator");
+
+            prop_assert_eq!(results.len(), 1);
+            prop_assert_eq!(results[0]["ProcessId"].as_u64().unwrap(), process_id as u64);
+        }
     }
 
     #[test]
