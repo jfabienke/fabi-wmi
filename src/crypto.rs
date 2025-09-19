@@ -129,4 +129,61 @@ mod tests {
         let signature = hmac_md5_sign(&key, data);
         assert_eq!(signature, expected);
     }
+
+    #[test]
+    fn test_hmac_md5_with_long_key() {
+        // Test line 12-13: key > 64 bytes triggers MD5 hash
+        let long_key = vec![0xAA; 80]; // 80 bytes > 64
+        let data = b"Test data";
+
+        // This should trigger the MD5 hash path for long keys
+        let signature = hmac_md5_sign(&long_key, data);
+
+        // Verify it produces a valid 16-byte signature
+        assert_eq!(signature.len(), 16);
+
+        // Verify with same key
+        assert!(hmac_md5_verify(&long_key, data, &signature));
+    }
+
+    #[test]
+    fn test_derive_sealing_key() {
+        // Test line 80-83: derive_sealing_key function
+        let session_key = b"test_session_key";
+
+        // Test client to server
+        let client_key = derive_sealing_key(session_key, true);
+        assert_eq!(client_key, session_key.to_vec());
+
+        // Test server to client
+        let server_key = derive_sealing_key(session_key, false);
+        assert_eq!(server_key, session_key.to_vec());
+
+        // Currently just returns session key, but tests the function
+    }
+
+    #[test]
+    fn test_hmac_md5_empty_inputs() {
+        // Edge case: empty key and data
+        let empty_key = b"";
+        let empty_data = b"";
+
+        let signature = hmac_md5_sign(empty_key, empty_data);
+        assert_eq!(signature.len(), 16);
+        assert!(hmac_md5_verify(empty_key, empty_data, &signature));
+    }
+
+    #[test]
+    fn test_rc4_with_exact_16_byte_key() {
+        // Ensure RC4 works with exactly 16-byte keys (NTLM standard)
+        let key_16 = b"sixteen_byte_key"; // exactly 16 bytes
+        let mut data = b"test data".to_vec();
+        let original = data.clone();
+
+        rc4_encrypt(key_16, &mut data);
+        assert_ne!(data, original);
+
+        rc4_decrypt(key_16, &mut data);
+        assert_eq!(data, original);
+    }
 }

@@ -592,6 +592,115 @@ mod tests {
     }
 
     #[test]
+    fn test_auth_provider_trait_implementation() {
+        // Test lines 108-119: AuthProvider trait methods
+        let creds = Credentials {
+            username: "test".to_string(),
+            password: "pass".to_string(),
+            domain: "DOMAIN".to_string(),
+            workstation: "WORKSTATION".to_string(),
+        };
+        let mut client = NtlmV2Client::new(creds).unwrap();
+
+        // Test negotiate
+        let negotiate_msg = client.negotiate();
+        assert!(negotiate_msg.is_ok());
+        assert!(!negotiate_msg.unwrap().is_empty());
+
+        // Test respond with valid challenge
+        let challenge = sample_type2();
+        let response = client.respond(&challenge);
+        assert!(response.is_ok());
+
+        // Test session_key after response
+        assert!(client.session_key().is_some());
+        assert_eq!(client.session_key().unwrap().len(), 16);
+    }
+
+    #[test]
+    fn test_respond_with_invalid_type2() {
+        // Test line 91-94: respond_message error paths
+        let creds = Credentials {
+            username: "test".to_string(),
+            password: "pass".to_string(),
+            domain: "DOMAIN".to_string(),
+            workstation: "WORKSTATION".to_string(),
+        };
+        let mut client = NtlmV2Client::new(creds).unwrap();
+
+        // Invalid challenge should fail
+        let invalid_challenge = b"invalid";
+        let result = client.respond(invalid_challenge);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_credentials_validation() {
+        // Test Credentials validation
+        let empty_username = Credentials {
+            username: "".to_string(),
+            password: "pass".to_string(),
+            domain: "DOMAIN".to_string(),
+            workstation: "WORKSTATION".to_string(),
+        };
+
+        // Validate should fail with empty username
+        assert!(empty_username.validate().is_err());
+        assert!(matches!(empty_username.validate().unwrap_err(), AuthError::Creds));
+
+        let empty_password = Credentials {
+            username: "user".to_string(),
+            password: "".to_string(),
+            domain: "DOMAIN".to_string(),
+            workstation: "WORKSTATION".to_string(),
+        };
+
+        // Validate should fail with empty password
+        assert!(empty_password.validate().is_err());
+    }
+
+    #[test]
+    fn test_parse_type2_with_wrong_message_type() {
+        // Test line 154: parse_type2_message checks message type
+        let mut bytes = sample_type2();
+        // Change message type from 2 to 3
+        bytes[8] = 0x03;
+        let err = parse_type2_message(&bytes).unwrap_err();
+        assert!(matches!(err, AuthError::InvalidType2));
+    }
+
+    #[test]
+    fn test_build_type3_error_paths() {
+        // Test build_type3_message error handling
+        let creds = Credentials {
+            username: "a".repeat(256), // Very long username
+            password: "pass".to_string(),
+            domain: "DOMAIN".to_string(),
+            workstation: "WORKSTATION".to_string(),
+        };
+        let challenge = parse_type2_message(&sample_type2()).unwrap();
+
+        // Should still work with long username
+        let result = build_type3_message(&creds, &challenge, None, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_session_key_before_response() {
+        // Test line 117-118: session_key returns None before response
+        let creds = Credentials {
+            username: "test".to_string(),
+            password: "pass".to_string(),
+            domain: "DOMAIN".to_string(),
+            workstation: "WORKSTATION".to_string(),
+        };
+        let client = NtlmV2Client::new(creds).unwrap();
+
+        // No session key before authentication
+        assert!(client.session_key().is_none());
+    }
+
+    #[test]
     fn credentials_validation_requires_username_and_password() {
         let creds = Credentials {
             username: String::new(),
