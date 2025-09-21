@@ -12,6 +12,7 @@ use thiserror::Error;
 use tracing::{debug, error, info, instrument, trace, warn};
 
 use crate::auth::{AuthProvider, Credentials, NtlmV2Client};
+use crate::kerberos_integration::spnego;
 use crate::transport::RealRpcTransport;
 
 
@@ -666,6 +667,7 @@ fn activate_wmi_dcom_with_auth(
 }
 
 const AUTH_TYPE_NTLM: u8 = 0x0A;
+const AUTH_TYPE_SPNEGO: u8 = 0x09;
 const AUTH_LEVEL_PRIVACY: u8 = 0x06; // Packet Privacy for encrypted communication
 const MAX_XMIT_RECV: u16 = 0x10B8;
 
@@ -688,20 +690,28 @@ fn build_scm_bind_pdu(call_id: u32, abstract_syntax: &[u8; 16], negotiate: &[u8]
     let auth_len = if negotiate.is_empty() {
         0
     } else {
+        // Wrap NTLM in SPNEGO for modern Windows compatibility
+        let (auth_blob, auth_type) = if let Ok(wrapped) = spnego::wrap_in_spnego_init(negotiate, true) {
+            (wrapped, AUTH_TYPE_SPNEGO)
+        } else {
+            // Fallback to raw NTLM if wrapping fails
+            (negotiate.to_vec(), AUTH_TYPE_NTLM)
+        };
+
         // Pad body to 4-byte alignment before auth trailer
         let pad = (4 - (body.len() % 4)) % 4;
         body.extend(std::iter::repeat_n(0u8, pad));
 
         // Auth trailer header
-        body.push(AUTH_TYPE_NTLM);
+        body.push(auth_type);
         body.push(AUTH_LEVEL_PRIVACY);
         body.push(pad as u8); // pad_len field records the padding already applied
         body.push(0); // reserved
         body.write_u32::<LittleEndian>(0).unwrap(); // auth_context_id
 
-        // No second padding - extend NTLM blob directly
-        body.extend_from_slice(negotiate);
-        negotiate.len() as u16
+        // No second padding - extend auth blob directly
+        body.extend_from_slice(&auth_blob);
+        auth_blob.len() as u16
     };
 
     let frag_len = (16 + body.len()) as u16;
@@ -740,22 +750,30 @@ fn build_scm_alter_context_pdu(
     body.extend_from_slice(&hex_literal::hex!("045d888aeb1cc9119fe808002b104860"));
     body.write_u32::<LittleEndian>(2).unwrap();
 
+    // Wrap NTLM in SPNEGO for modern Windows compatibility
+    let (auth_blob, auth_type) = if let Ok(wrapped) = spnego::wrap_in_spnego_init(authenticate, true) {
+        (wrapped, AUTH_TYPE_SPNEGO)
+    } else {
+        // Fallback to raw NTLM if wrapping fails
+        (authenticate.to_vec(), AUTH_TYPE_NTLM)
+    };
+
     // Pad body to 4-byte alignment before auth trailer
     let pad = (4 - (body.len() % 4)) % 4;
     body.extend(std::iter::repeat_n(0u8, pad));
 
     // Auth trailer header
-    body.push(AUTH_TYPE_NTLM);
+    body.push(auth_type);
     body.push(AUTH_LEVEL_PRIVACY);
     body.push(pad as u8); // pad_len field records the padding already applied
     body.push(0); // reserved
     body.write_u32::<LittleEndian>(0).unwrap(); // auth_context_id
 
-    // No second padding - extend NTLM blob directly
-    body.extend_from_slice(authenticate);
+    // No second padding - extend auth blob directly
+    body.extend_from_slice(&auth_blob);
 
     let frag_len = (16 + body.len()) as u16;
-    let auth_len = authenticate.len() as u16;
+    let auth_len = auth_blob.len() as u16;
 
     let mut pdu = Vec::with_capacity(frag_len as usize);
     pdu.write_u8(5).unwrap();

@@ -13,8 +13,8 @@ This document describes the production-ready Kerberos authentication implementat
 
 ## Platform Compatibility Matrix (Corrected)
 
-| Platform         | Kerberos Tickets (TGT/TGS)     | DCE/RPC over GSS/SSPI          | Runtime Dependencies  | Notes                                        |
-|------------------|--------------------------------|--------------------------------|-----------------------|----------------------------------------------|
+| Platform         | Kerberos Tickets (TGT/TGS)     | DCE/RPC over GSS/SSPI          | Runtime Dependencies | Notes                                        |
+|------------------|--------------------------------|-------------------------------|-----------------------|----------------------------------------------|
 | **Linux**        | ✅ via `kerbeiros` (pure Rust) | ✅ via GSSAPI (MIT Kerberos)  | System GSS libraries  | Requires libgssapi for DCE-style wrap/unwrap |
 | **macOS**        | ✅ via `kerbeiros`             | ✅ via GSSAPI (Apple Heimdal) | Heimdal GSS framework | Test DCE-style IOV paths on target versions  |
 | **Windows**      | ✅ via `kerbeiros`             | ✅ via SSPI (not GSS)         | Windows SSPI          | Use `sspi` crate, auth service = 0x10        |
@@ -624,13 +624,13 @@ Client                          Server
 
 ### Dependency Assessment (As of September 2025)
 
-| Crate | Activity & Recency | Adoption Signals | Production Assessment |
-|-------|-------------------|------------------|----------------------|
-| **sspi** (Devolutions) | Recent releases (published last month); active GitHub with examples | Backed by Devolutions; cross-platform SSPI implementation and Windows bindings | ✅ **Production-ready** for Windows auth contexts |
-| **libgssapi** | Current on docs.rs; libgssapi-sys updated ~8 months ago; tested with MIT & Apple Heimdal | Used by ~40 crates via libgssapi-sys | ✅ **Production-acceptable** on Unix when linked to system GSS |
-| **kerbeiros** | Two lineages: original Zer1t0/kerbeiros (0.2.3) and Himmelblau fork (archived Sep 12, 2025) | Small ecosystem; AGPL-3.0; mainly used alongside Himmelblau crates | ⚠️ **Usable but niche**; expect to own bugfixes |
-| **himmelblau_kerberos_crypto** / **_keytab** | Latest 0.4.1 (Jul 2024) with AES/RC4; docs.rs/live; small but maintained | Used by a couple of crates only | ⚠️ **Fine as building blocks**, but not a drop-in "kerberos stack" |
-| **gssapi** (old crate) | Last published ~2018 | Low adoption | ❌ **Avoid**; prefer libgssapi |
+| Crate                                        | Activity & Recency                                                                          | Adoption Signals                                                               | Production Assessment                                              |
+|----------------------------------------------|---------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------|--------------------------------------------------------------------|
+| **sspi** (Devolutions)                       | Recent releases (published last month); active GitHub with examples                         | Backed by Devolutions; cross-platform SSPI implementation and Windows bindings | ✅ **Production-ready** for Windows auth contexts                  |
+| **libgssapi**                                | Current on docs.rs; libgssapi-sys updated ~8 months ago; tested with MIT & Apple Heimdal    | Used by ~40 crates via libgssapi-sys                                           | ✅ **Production-acceptable** on Unix when linked to system GSS     |
+| **kerbeiros**                                | Two lineages: original Zer1t0/kerbeiros (0.2.3) and Himmelblau fork (archived Sep 12, 2025) | Small ecosystem; AGPL-3.0; mainly used alongside Himmelblau crates             | ⚠️ **Usable but niche**; expect to own bugfixes                    |
+| **himmelblau_kerberos_crypto** / **_keytab** | Latest 0.4.1 (Jul 2024) with AES/RC4; docs.rs/live; small but maintained                    | Used by a couple of crates only                                                | ⚠️ **Fine as building blocks**, but not a drop-in "kerberos stack" |
+| **gssapi** (old crate)                       | Last published ~2018                                                                        | Low adoption                                                                   | ❌ **Avoid**; prefer libgssapi                                      |
 
 ### Production Implications
 

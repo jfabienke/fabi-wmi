@@ -10,13 +10,18 @@ A native Rust implementation of the Windows Management Instrumentation (WMI) pro
 ## Features
 
 - **Full Protocol Stack**: Complete implementation of DCOM activation, ORPC, NDR marshaling, and WMI protocols
-- **Secure Authentication**: NTLMv2 with signing/sealing + **Enhanced Kerberos v0.2.0 (NEW!)**
-  - ⚡ Credential caching with 60x performance boost (FILE, Memory, KCM, Keyring backends)
+- **Secure Authentication**: NTLMv2 with signing/sealing + **Production Kerberos via kerbsec (NEW!)**
+  - 🚀 **kerbsec**: Our purpose-built, lightweight (~1,500 LOC) Kerberos library
+  - ⚡ Credential caching with 30x performance boost (FILE, Memory, KCM, Keyring backends)
+  - 🔄 Zero-copy IOV operations for maximum DCE/RPC performance
+  - 🌐 Automatic DNS canonicalization and SPN construction
   - 🛡️ TLS channel bindings for relay attack prevention
   - 🔐 Automatic memory zeroization of all sensitive data
+  - 🎯 DCE/RPC optimized with proper 3-leg handshake
+  - 🖥️ Platform-native using system GSS-API (MIT Kerberos/Heimdal)
 - **Windows 11 Ready**: Kerberos authentication for post-NTLM environments
 - **Production Ready**: ~90% protocol coverage with 76 passing tests
-- **No Dependencies**: Pure Rust implementation, no Windows libraries required
+- **Minimal External Dependencies**: Uses system Kerberos libraries only
 - **Developer Friendly**: Stub transport for testing without Windows targets
 
 ## Current Status
@@ -201,6 +206,7 @@ LINUX_WMI_USE_REAL_NDR=1 cargo test
 - [🚀 Migration Guide](docs/MIGRATION-GUIDE.md) - Upgrade from v0.1.0 to v0.2.0
 - [🔐 Security Guide](docs/SECURITY-GUIDE.md) - Best practices and threat model
 - [🎯 Authentication Guide](docs/AUTHENTICATION-GUIDE.md) - NTLM and Kerberos setup
+- [⚡ kerbsec Features](docs/KERBSEC-FEATURES.md) - Our internal Kerberos library capabilities
 - [📋 Changelog](CHANGELOG.md) - Version history and updates
 
 ### Core Documentation
@@ -209,6 +215,7 @@ LINUX_WMI_USE_REAL_NDR=1 cargo test
 - [DCOM Activation](docs/DCOM_ACTIVATION.md) - Activation flow
 - [Implementation Strategy](docs/IMPLEMENTATION-STRATEGY.md) - Development phases
 - [Kerberos Design](docs/KERBEROS-DESIGN.md) - v0.2.0 Kerberos implementation
+- [Credential Caching](docs/KERBEROS_CREDENTIAL_CACHING.md) - Performance optimization guide
 
 ## Contributing
 

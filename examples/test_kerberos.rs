@@ -12,7 +12,6 @@
 use linux_wmi::{
     auth_exports::Credentials,
     KerberosClient, KerberosConfig, KerberosCacheBackend,
-    DcomError,
 };
 use std::env;
 use std::process;
@@ -79,12 +78,13 @@ fn main() {
         "LINUX-WMI".to_string(),
     );
 
-    // Test 1: Create Kerberos client with credential caching
-    info!("Creating Kerberos client with credential caching...");
+    // Test 1: Create Kerberos client with credential caching and SPNEGO
+    info!("Creating Kerberos client with credential caching and SPNEGO...");
     let config = KerberosConfig::new(domain)
         .with_spn(format!("HOST/{}", host))
         .with_cache_backend(KerberosCacheBackend::File)
-        .with_caching(true);
+        .with_caching(true)
+        .with_spnego();  // Enable SPNEGO negotiation
 
     let mut kerberos_client = match KerberosClient::new(host, config, creds.clone()) {
         Ok(client) => {
@@ -117,7 +117,7 @@ fn main() {
         .with_cache_backend(KerberosCacheBackend::File)
         .with_caching(true);
 
-    let kerberos_client2 = match KerberosClient::new(host, config2, creds.clone()) {
+    let _kerberos_client2 = match KerberosClient::new(host, config2, creds.clone()) {
         Ok(client) => {
             info!("✓ Second client created (should use cached credentials)");
             client

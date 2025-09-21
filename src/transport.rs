@@ -1,17 +1,17 @@
 use crate::auth::{AuthProvider, Credentials, NtlmV2Client};
 #[cfg(feature = "kerberos")]
 use crate::kerberos_adapter::{KerberosClient, KerberosConfig};
+use crate::kerberos_integration::spnego;
 use byteorder::{LittleEndian, WriteBytesExt};
 
 // RPC authentication type constants
 #[allow(dead_code)]
 const AUTH_TYPE_NTLM: u8 = 0x0A;
+#[allow(dead_code)]
+const AUTH_TYPE_SPNEGO: u8 = 0x09;
 #[cfg(feature = "kerberos")]
 #[allow(dead_code)]
 const AUTH_TYPE_KERBEROS: u8 = 0x10;
-#[cfg(feature = "kerberos")]
-#[allow(dead_code)]
-const AUTH_TYPE_SPNEGO: u8 = 0x09;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::io::{Cursor, Read, Write};
 #[cfg(feature = "async")]
@@ -523,12 +523,7 @@ impl RealRpcTransport {
         let mut auth = KerberosClient::new(host, config.clone(), creds)
             .map_err(|err| TransportError::Failure(err.to_string()))?;
 
-        // Determine auth type based on config
-        let _auth_type = if config.prefer_spnego {
-            AUTH_TYPE_SPNEGO
-        } else {
-            AUTH_TYPE_KERBEROS
-        };
+        // Determine auth type based on config (handled in KerberosClient now)
 
         // Step 1: Send bind with AP-REQ (first leg)
         let ap_req = auth.negotiate()
@@ -690,8 +685,15 @@ impl RealRpcTransport {
     fn build_bind_pdu(call_id: u32, ntlm: &[u8]) -> Vec<u8> {
         use byteorder::WriteBytesExt as _;
         const MAX_XMIT_RECV: u16 = 0x10B8;
-        const AUTH_TYPE_NTLM: u8 = 0x0A;
         const AUTH_LEVEL_PRIVACY: u8 = 0x06;
+
+        // Wrap NTLM in SPNEGO for modern Windows compatibility
+        let (auth_blob, auth_type) = if let Ok(wrapped) = spnego::wrap_in_spnego_init(ntlm, true) {
+            (wrapped, AUTH_TYPE_SPNEGO)
+        } else {
+            // Fallback to raw NTLM if wrapping fails
+            (ntlm.to_vec(), AUTH_TYPE_NTLM)
+        };
 
         let mut body = Vec::new();
         body.write_u16::<LittleEndian>(MAX_XMIT_RECV).unwrap();
@@ -713,16 +715,16 @@ impl RealRpcTransport {
         let pad = (4 - (body.len() % 4)) % 4;
         body.extend(std::iter::repeat_n(0u8, pad));
 
-        body.push(AUTH_TYPE_NTLM);
+        body.push(auth_type);
         body.push(AUTH_LEVEL_PRIVACY);
         body.push(pad as u8);
         body.push(0);
         body.write_u32::<LittleEndian>(0).unwrap(); // auth context id
         body.extend(std::iter::repeat_n(0u8, pad));
-        body.extend_from_slice(ntlm);
+        body.extend_from_slice(&auth_blob);
 
         let frag_len = (16 + body.len()) as u16;
-        let auth_len = ntlm.len() as u16;
+        let auth_len = auth_blob.len() as u16;
 
         let mut pdu = Vec::with_capacity(frag_len as usize);
         pdu.write_u8(5).unwrap();
@@ -740,8 +742,15 @@ impl RealRpcTransport {
     fn build_alter_context_pdu(call_id: u32, context_id: u16, ntlm: &[u8]) -> Vec<u8> {
         use byteorder::WriteBytesExt as _;
         const MAX_XMIT_RECV: u16 = 0x10B8;
-        const AUTH_TYPE_NTLM: u8 = 0x0A;
         const AUTH_LEVEL_PRIVACY: u8 = 0x06;
+
+        // Wrap NTLM in SPNEGO for modern Windows compatibility
+        let (auth_blob, auth_type) = if let Ok(wrapped) = spnego::wrap_in_spnego_init(ntlm, true) {
+            (wrapped, AUTH_TYPE_SPNEGO)
+        } else {
+            // Fallback to raw NTLM if wrapping fails
+            (ntlm.to_vec(), AUTH_TYPE_NTLM)
+        };
 
         let mut body = Vec::new();
         body.write_u16::<LittleEndian>(MAX_XMIT_RECV).unwrap();
@@ -761,16 +770,16 @@ impl RealRpcTransport {
         let pad = (4 - (body.len() % 4)) % 4;
         body.extend(std::iter::repeat_n(0u8, pad));
 
-        body.push(AUTH_TYPE_NTLM);
+        body.push(auth_type);
         body.push(AUTH_LEVEL_PRIVACY);
         body.push(pad as u8);
         body.push(0);
         body.write_u32::<LittleEndian>(0).unwrap();
         body.extend(std::iter::repeat_n(0u8, pad));
-        body.extend_from_slice(ntlm);
+        body.extend_from_slice(&auth_blob);
 
         let frag_len = (16 + body.len()) as u16;
-        let auth_len = ntlm.len() as u16;
+        let auth_len = auth_blob.len() as u16;
 
         let mut pdu = Vec::with_capacity(frag_len as usize);
         pdu.write_u8(5).unwrap();
@@ -875,21 +884,19 @@ impl RealRpcTransport {
             return Err(TransportError::Failure("bind_ack missing auth data".into()));
         }
 
-        let marker = b"NTLMSSP\0";
-        let ntlm_offset = pdu
-            .windows(marker.len())
-            .position(|window| window == marker)
-            .ok_or_else(|| {
-                TransportError::Failure("bind_ack missing NTLM challenge marker".into())
-            })?;
-        if ntlm_offset < 8 {
+        // Find the auth trailer - it should be at the end minus auth_len
+        // The auth trailer starts with auth_type (1 byte), auth_level (1 byte), etc.
+        let auth_data_start = pdu.len() - auth_len as usize;
+
+        // Auth trailer is 8 bytes before the auth data
+        let trailer_start = auth_data_start - 8;
+        if trailer_start >= pdu.len() || trailer_start < 16 {
             return Err(TransportError::Failure(
-                "bind_ack malformed: security trailer truncated".into(),
+                "bind_ack malformed: security trailer position invalid".into(),
             ));
         }
-        let trailer_start = ntlm_offset - 8;
-        cursor.set_position(trailer_start as u64);
 
+        cursor.set_position(trailer_start as u64);
         let auth_type = cursor.read_u8()?;
         let _auth_level = cursor.read_u8()?;
         let auth_pad_len = cursor.read_u8()?;
@@ -902,23 +909,58 @@ impl RealRpcTransport {
         let mut blob = vec![0u8; auth_len as usize];
         cursor.read_exact(&mut blob)?;
 
-        if auth_type != 0x0A {
-            return Err(TransportError::Failure(format!(
-                "Unexpected auth type in bind_ack: 0x{auth_type:02x}"
-            )));
-        }
-
-        match crate::auth::parse_type2_message(&blob) {
-            Ok(challenge) => {
-                debug!(
-                    flags = format_args!("0x{:#x}", challenge.flags),
-                    "parsed NTLM challenge"
-                );
+        // Handle different auth types
+        let unwrapped_blob = match auth_type {
+            0x0A => {
+                // Raw NTLM
+                match crate::auth::parse_type2_message(&blob) {
+                    Ok(challenge) => {
+                        debug!(
+                            flags = format_args!("0x{:#x}", challenge.flags),
+                            "parsed NTLM challenge"
+                        );
+                    }
+                    Err(err) => warn!(?err, "failed to parse NTLM challenge from bind_ack"),
+                }
+                blob.clone()
             }
-            Err(err) => warn!(?err, "failed to parse NTLM challenge from bind_ack"),
-        }
+            0x09 => {
+                // SPNEGO - need to unwrap
+                debug!("Received SPNEGO response in bind_ack, unwrapping");
+                match spnego::parse_spnego_response(&blob) {
+                    Ok(inner) => {
+                        // Try to parse as NTLM Type2 if it looks like NTLM
+                        if inner.starts_with(b"NTLMSSP\0") {
+                            match crate::auth::parse_type2_message(&inner) {
+                                Ok(challenge) => {
+                                    debug!(
+                                        flags = format_args!("0x{:#x}", challenge.flags),
+                                        "parsed NTLM challenge from SPNEGO"
+                                    );
+                                }
+                                Err(err) => warn!(?err, "failed to parse NTLM from SPNEGO"),
+                            }
+                        }
+                        inner
+                    }
+                    Err(err) => {
+                        warn!(?err, "Failed to parse SPNEGO response");
+                        blob.clone()
+                    }
+                }
+            }
+            0x10 => {
+                // Kerberos
+                debug!("Received Kerberos AP-REP in bind_ack");
+                blob.clone()
+            }
+            _ => {
+                warn!(auth_type, "Unknown auth type in bind_ack");
+                blob.clone()
+            }
+        };
 
-        Ok((context_id, blob, max_xmit, max_recv))
+        Ok((context_id, unwrapped_blob, max_xmit, max_recv))
     }
 
     pub(crate) fn parse_alter_ack(pdu: &[u8]) -> Result<(), TransportError> {

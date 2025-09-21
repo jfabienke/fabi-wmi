@@ -44,12 +44,16 @@ High-level overview of the linux-wmi implementation architecture, reflecting the
                            │
                            ▼
            ┌─────────────────────────────┐
-           │   Authentication (auth.rs)  │
+           │   Authentication Layer      │
            │ ─────────────────────────── │
-           │ • NTLMv2 Type1/2/3 flow     │  ✅ Complete
-           │ • HMAC-MD5 response         │
-           │ • Session key derivation    │
-           │ • Zeroize for security      │
+           │ • NTLMv2 (auth.rs)          │  ✅ Complete
+           │   - Type1/2/3 flow          │
+           │   - HMAC-MD5 response       │
+           │   - Session keys            │
+           │ • Kerberos (kerbsec)        │  ✅ Complete
+           │   - GSS-API integration     │
+           │   - Credential caching      │
+           │   - Channel bindings        │
            └─────────────────────────────┘
 ```
 
@@ -61,7 +65,7 @@ Based on PROTOCOL-COMPLETION.md estimates:
 |---------------------|--------------------|---------------------------------------------------------------------------|
 | **Transport Layer** | ✅ Mostly Complete |  90% - Stable synchronous TCP stack; async/pooling planned                |
 | **RPCE (RPC)**      | ✅ Mostly Complete |  90% - Bind/alter/fragments solid, needs broader live validation          |
-| **Authentication**  | ✅ Mostly Complete |  90% - NTLMv2 + signing/sealing; further hardening tracked                |
+| **Authentication**  | ✅ Complete        |  95% - NTLMv2 + Kerberos via kerbsec; SPNEGO wrapping implemented         |
 | **DCOM Activation** | ✅ Mostly Complete |  85% - RemoteActivation working; additional error paths untested          |
 | **ORPC Layer**      | ⚠️ Partial         |  70% - ORPCTHIS/THAT & OXID implemented, enumerator usage pending         |
 | **NDR Codec**       | ⚠️ Foundation      |  60% - Core types encoded, response decoding still stub-backed            |
@@ -83,6 +87,8 @@ src/
 ├── transport.rs            # RpcTransport trait & RealRpcTransport
 ├── dcom.rs                 # DCOM activation, OXID resolver
 ├── auth.rs                 # NTLMv2 implementation
+├── kerberos_adapter.rs     # Kerberos adapter for kerbsec
+├── kerberos_integration.rs # SPNEGO wrapping, Kerberos RPC
 ├── ndr.rs                  # NDR codec traits and exports
 │   ├── codec.rs           # RealNdrCodec implementation
 │   ├── types.rs           # VARIANT, BSTR, ConformantArray
@@ -90,12 +96,65 @@ src/
 ├── tower.rs                # EPM tower builder/parser
 └── rpc_fixtures.rs         # Test fixtures, golden PDUs
 
+../kerbsec/                 # Internal Kerberos library
+├── src/
+│   ├── context.rs         # GSS-API context management
+│   ├── config.rs          # Configuration builder
+│   ├── security/
+│   │   ├── gss.rs        # GSS-API wrapper (Unix)
+│   │   └── gss_iov.rs    # Zero-copy IOV operations
+│   └── ccache/           # Credential cache support
+
 examples/
 ├── test_connect.rs         # E2E WMI query example
 ├── dcom_activation.rs      # Standalone DCOM test
 ├── wmi_probe.rs           # Anonymous RPC detection
 └── test_e2e.sh            # Integration test script
 ```
+
+## Authentication Architecture
+
+### Dual Authentication Support
+
+linux-wmi supports both NTLM and Kerberos authentication through a modular design:
+
+```
+┌──────────────────────────────────────────┐
+│          Application (WmiSession)        │
+└────────────────┬─────────────────────────┘
+                 │
+     ┌───────────┴───────────┐
+     ▼                       ▼
+┌─────────────┐         ┌──────────────────┐
+│    NTLM     │         │    Kerberos      │
+│  (auth.rs)  │         │(kerberos_adapter)│
+└──────┬──────┘         └────────┬─────────┘
+       │                         │
+       │                    ┌────▼─────┐
+       │                    │ kerbsec  │
+       │                    │ (~1.5K   │
+       │                    │   LOC)   │
+       │                    └────┬─────┘
+       │                         │
+       ▼                    ┌────▼─────┐
+   Windows Host             │ GSS-API  │
+   (NTLM auth)              │ (system) │
+                            └──────────┘
+                                 │
+                                 ▼
+                            Windows Host
+                            (Kerberos auth)
+```
+
+### kerbsec: Our Internal Kerberos Library
+
+**kerbsec** is not a third-party dependency but our own purpose-built Kerberos implementation:
+
+- **Lightweight**: ~1,500 lines of focused DCE/RPC code
+- **Platform-native**: Uses system GSS-API (MIT Kerberos/Heimdal)
+- **Zero-copy**: IOV operations for maximum performance
+- **DCE-optimized**: Proper 3-leg handshake for DCOM/WMI
+- **Enterprise features**: Credential caching, channel bindings, DNS canonicalization
 
 ## Key Design Decisions
 
