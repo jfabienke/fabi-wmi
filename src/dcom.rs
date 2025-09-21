@@ -14,6 +14,7 @@ use tracing::{debug, error, info, instrument, trace, warn};
 use crate::auth::{AuthProvider, Credentials, NtlmV2Client};
 use crate::transport::RealRpcTransport;
 
+
 /// Object reference returned from OXID resolver
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
@@ -51,6 +52,23 @@ pub enum DcomError {
 
 #[instrument(level = "debug", skip_all, fields(host))]
 pub fn resolve_wmi_port(host: &str, creds: Option<&Credentials>) -> Result<u16, DcomError> {
+    // Step 1: Check for hardcoded port (highest priority)
+    if let Ok(port_str) = std::env::var("LINUX_WMI_PORT") {
+        match port_str.trim().parse::<u16>() {
+            Ok(port) if port > 0 => {
+                info!("Using hardcoded WMI port from LINUX_WMI_PORT: {}", port);
+                return Ok(port);
+            }
+            Ok(_) => {
+                warn!("Invalid LINUX_WMI_PORT value '{}': port must be > 0", port_str);
+            }
+            Err(e) => {
+                warn!("Failed to parse LINUX_WMI_PORT value '{}': {}", port_str, e);
+            }
+        }
+    }
+
+    // Step 2: Check if we should skip EPM/DCOM entirely (legacy behavior)
     if let Ok(value) = std::env::var("LINUX_WMI_SKIP_EPM") {
         if value.trim() == "1" {
             warn!("LINUX_WMI_SKIP_EPM set; returning port 135");
@@ -58,16 +76,35 @@ pub fn resolve_wmi_port(host: &str, creds: Option<&Credentials>) -> Result<u16, 
         }
     }
 
-    if let Some(creds) = creds {
-        match activate_wmi_dcom(host, creds) {
-            Ok((port, _oxid)) => return Ok(port),
-            Err(err) => warn!(?err, "DCOM activation failed; falling back to port 135"),
+    // Step 3: Try anonymous DCOM activation first (works even with NTLM blocked)
+    match activate_wmi_dcom_anonymous(host) {
+        Ok((port, _oxid)) => {
+            info!("Anonymous DCOM activation succeeded, WMI port: {}", port);
+            return Ok(port);
         }
-    } else {
-        warn!("No credentials provided; falling back to port 135");
+        Err(err) => {
+            debug!(?err, "Anonymous DCOM activation failed, trying authenticated");
+        }
     }
 
-    Ok(135)
+    // Step 4: Try authenticated DCOM activation if we have credentials
+    if let Some(creds) = creds {
+        match activate_wmi_dcom(host, creds) {
+            Ok((port, _oxid)) => {
+                info!("Authenticated DCOM activation succeeded, WMI port: {}", port);
+                return Ok(port);
+            }
+            Err(err) => {
+                warn!(?err, "Authenticated DCOM activation failed");
+            }
+        }
+    } else {
+        debug!("No credentials provided for authenticated DCOM");
+    }
+
+    // Step 5: All methods failed
+    error!("Failed to resolve WMI port. Set LINUX_WMI_PORT or check Windows DCOM/NTLM settings");
+    Err(DcomError::Port)
 }
 
 /// Resolve OXID to get object reference using IObjectExporter
@@ -80,6 +117,58 @@ pub fn resolve_oxid(
 ) -> Result<ObjectReference, DcomError> {
     debug!("Resolving OXID {} on port {}", hex::encode(oxid), port);
 
+    // Try Kerberos first if feature is enabled
+    #[cfg(feature = "kerberos")]
+    {
+        let realm = if !creds.domain.is_empty() {
+            creds.domain.to_uppercase()
+        } else {
+            host.split('.')
+                .skip(1)
+                .collect::<Vec<_>>()
+                .join(".")
+                .to_uppercase()
+        };
+
+        if !realm.is_empty() && realm.contains('.') {
+            debug!("Trying Kerberos for OXID resolution with realm: {}", realm);
+            #[cfg(feature = "kerberos")]
+            {
+                use crate::kerberos_adapter::KerberosClient;
+                let kerberos_config = crate::kerberos_adapter::KerberosConfig::new(&realm);
+                match KerberosClient::new(host, kerberos_config, creds.clone()) {
+                    Ok(kerberos_client) => {
+                        match resolve_oxid_with_auth(host, port, Box::new(kerberos_client), oxid) {
+                            Ok(result) => {
+                                info!("OXID resolution succeeded with Kerberos");
+                                return Ok(result);
+                            }
+                            Err(err) => {
+                                debug!(?err, "Kerberos failed for OXID resolution, falling back to NTLM");
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        debug!(?err, "Failed to create Kerberos client for OXID resolution");
+                    }
+                }
+            }
+        }
+    }
+
+    // Fall back to NTLM
+    debug!("Using NTLM for OXID resolution");
+    let ntlm_client = NtlmV2Client::new(creds.clone()).map_err(|_| DcomError::Protocol)?;
+    resolve_oxid_with_auth(host, port, Box::new(ntlm_client), oxid)
+}
+
+/// Internal function to resolve OXID with a generic auth provider
+fn resolve_oxid_with_auth(
+    host: &str,
+    port: u16,
+    mut auth_client: Box<dyn AuthProvider>,
+    oxid: &[u8; 8],
+) -> Result<ObjectReference, DcomError> {
     // Connect to dynamic port
     let addr = format!("{host}:{port}");
     let mut stream = TcpStream::connect_timeout(
@@ -105,23 +194,22 @@ pub fn resolve_oxid(
     // IObjectExporter UUID
     let object_exporter_uuid: [u8; 16] =
         hex_literal::hex!("c4 fe 9f 99 60 52 1b 10 bb cb 00 aa 00 21 34 7a");
-    let mut auth_client = NtlmV2Client::new(creds.clone()).map_err(|_| DcomError::Protocol)?;
 
-    // Bind to IObjectExporter with NTLM auth
-    let type1 = auth_client.negotiate().map_err(|_| DcomError::Protocol)?;
-    let bind_pdu = build_scm_bind_pdu(1, &object_exporter_uuid, &type1);
+    // Bind to IObjectExporter with auth
+    let negotiate_token = auth_client.negotiate().map_err(|_| DcomError::Protocol)?;
+    let bind_pdu = build_scm_bind_pdu(1, &object_exporter_uuid, &negotiate_token);
     stream.write_all(&bind_pdu).map_err(|_| DcomError::Send)?;
 
     let bind_ack = read_rpc_pdu(&mut stream)?;
-    let (context_id, type2_blob, _, _) =
+    let (context_id, challenge_blob, _, _) =
         RealRpcTransport::parse_bind_ack(&bind_ack).map_err(|_| DcomError::Protocol)?;
 
     // Complete auth with alter_context
-    let authenticate = auth_client
-        .respond_message(&type2_blob)
+    let response_token = auth_client
+        .respond(&challenge_blob)
         .map_err(|_| DcomError::Protocol)?;
     let alter_pdu =
-        build_scm_alter_context_pdu(2, context_id, &object_exporter_uuid, &authenticate.message);
+        build_scm_alter_context_pdu(2, context_id, &object_exporter_uuid, &response_token);
     stream.write_all(&alter_pdu).map_err(|_| DcomError::Send)?;
 
     let alter_ack = read_rpc_pdu(&mut stream)?;
@@ -282,11 +370,11 @@ fn parse_resolve_oxid_response(pdu: &[u8], oxid: &[u8; 8]) -> Result<ObjectRefer
     })
 }
 
-/// Activate WMI via DCOM (IRemoteSCMActivator::RemoteActivation)
+/// Activate WMI via anonymous DCOM (IRemoteSCMActivator::RemoteActivation without auth)
 /// Returns (port, OXID) tuple
 #[instrument(level = "debug", skip_all, fields(host))]
-pub fn activate_wmi_dcom(host: &str, creds: &Credentials) -> Result<(u16, [u8; 8]), DcomError> {
-    info!("Using DCOM activation for WMI port resolution");
+pub fn activate_wmi_dcom_anonymous(host: &str) -> Result<(u16, [u8; 8]), DcomError> {
+    info!("Attempting anonymous DCOM activation for WMI port resolution");
 
     // Connect to SCM on port 135
     let addr = format!("{host}:135");
@@ -314,11 +402,218 @@ pub fn activate_wmi_dcom(host: &str, creds: &Credentials) -> Result<(u16, [u8; 8
         .map_err(|_| DcomError::Connect)?;
 
     let scm_uuid: [u8; 16] = hex_literal::hex!("a0 01 00 00 00 00 00 00 c0 00 00 00 00 00 00 46");
-    let mut auth_client = NtlmV2Client::new(creds.clone()).map_err(|_| DcomError::Protocol)?;
 
-    // Step 1: Bind with NTLM Type 1
-    let type1 = auth_client.negotiate().map_err(|_| DcomError::Protocol)?;
-    let bind_pdu = build_scm_bind_pdu(1, &scm_uuid, &type1);
+    // Build anonymous bind PDU (no auth trailer)
+    let bind_pdu = build_anonymous_bind_pdu(1, &scm_uuid);
+
+    debug!("Sending anonymous SCM bind PDU, len: {}", bind_pdu.len());
+    stream.write_all(&bind_pdu).map_err(|e| {
+        error!(%e, "failed to send bind PDU");
+        DcomError::Send
+    })?;
+
+    // Read bind_ack
+    let mut header = [0u8; 16];
+    stream.read_exact(&mut header).map_err(|e| {
+        error!(%e, "failed to read bind_ack header");
+        DcomError::Recv
+    })?;
+
+    let ptype = header[2];
+    if ptype == 0x0d {
+        // bind_nak - need to read the full PDU to get the reason
+        let frag_len = u16::from_le_bytes([header[8], header[9]]) as usize;
+        if frag_len > 16 {
+            let mut full_pdu = vec![0u8; frag_len];
+            full_pdu[..16].copy_from_slice(&header);
+            let _ = stream.read_exact(&mut full_pdu[16..]);
+            let reason = if full_pdu.len() > 20 {
+                full_pdu[20]
+            } else {
+                0xff
+            };
+            error!("Anonymous bind rejected (bind_nak), reason: 0x{:02x}", reason);
+        } else {
+            error!("Anonymous bind rejected (bind_nak)");
+        }
+        return Err(DcomError::Protocol);
+    }
+
+    if ptype != 0x0c {
+        error!("Unexpected PDU type 0x{:02x}, expected bind_ack (0x0c)", ptype);
+        return Err(DcomError::Protocol);
+    }
+
+    let frag_len = u16::from_le_bytes([header[8], header[9]]) as usize;
+    let mut pdu = vec![0u8; frag_len];
+    pdu[..16].copy_from_slice(&header);
+    stream.read_exact(&mut pdu[16..]).map_err(|e| {
+        error!(%e, "failed to read bind_ack body");
+        DcomError::Recv
+    })?;
+
+    debug!("Received anonymous bind_ack, len: {}", pdu.len());
+
+    // Extract context_id from bind_ack
+    let context_id = if pdu.len() >= 24 {
+        u16::from_le_bytes([pdu[22], pdu[23]])
+    } else {
+        0
+    };
+
+    // Build RemoteActivation request stub
+    // IWbemLocator CLSID: {dc12a687-737f-11cf-884d-00aa004b2e24}
+    let clsid = hex_literal::hex!("87a612dc7f73cf11884d00aa004b2e24"); // IWbemLocator (little-endian)
+    let iid = clsid; // Same as CLSID for IWbemLocator
+
+    let stub = build_remote_activation_stub(&clsid, &iid).map_err(|e| {
+        error!(%e, "failed to build activation stub");
+        DcomError::Protocol
+    })?;
+
+    // Build request PDU without auth
+    let req_pdu = build_anonymous_request_pdu(2, context_id, 4, &stub); // opnum=4 for RemoteActivation
+
+    debug!("Sending anonymous RemoteActivation request, len: {}", req_pdu.len());
+    stream.write_all(&req_pdu).map_err(|e| {
+        error!(%e, "failed to send request");
+        DcomError::Send
+    })?;
+
+    // Read response
+    let mut resp_header = [0u8; 16];
+    stream.read_exact(&mut resp_header).map_err(|e| {
+        error!(%e, "failed to read response header");
+        DcomError::Recv
+    })?;
+
+    let resp_type = resp_header[2];
+    if resp_type == 0x03 {
+        // Fault
+        error!("RemoteActivation returned fault");
+        return Err(DcomError::Protocol);
+    }
+
+    let resp_len = u16::from_le_bytes([resp_header[8], resp_header[9]]) as usize;
+    let mut response = vec![0u8; resp_len];
+    response[..16].copy_from_slice(&resp_header);
+    stream.read_exact(&mut response[16..]).map_err(|e| {
+        error!(%e, "failed to read response body");
+        DcomError::Recv
+    })?;
+
+    debug!("Received anonymous RemoteActivation response, len: {}", response.len());
+
+    // Parse the response to extract port and OXID
+    let (_remaining, port) = parse_dualstringarray_port(&response).map_err(|e| {
+        error!("Failed to parse DUALSTRINGARRAY: {:?}", e);
+        DcomError::Protocol
+    })?;
+
+    // Extract OXID from response (first 8 bytes after ORPCTHAT and HRESULT)
+    let oxid = if response.len() >= 32 {
+        let mut oxid_bytes = [0u8; 8];
+        oxid_bytes.copy_from_slice(&response[24..32]);
+        oxid_bytes
+    } else {
+        [0u8; 8]
+    };
+
+    Ok((port, oxid))
+}
+
+/// Activate WMI via DCOM (IRemoteSCMActivator::RemoteActivation)
+/// Returns (port, OXID) tuple
+#[instrument(level = "debug", skip_all, fields(host))]
+pub fn activate_wmi_dcom(host: &str, creds: &Credentials) -> Result<(u16, [u8; 8]), DcomError> {
+    info!("Using DCOM activation for WMI port resolution");
+
+    // Try Kerberos first if feature is enabled
+    #[cfg(feature = "kerberos")]
+    {
+        // Determine realm from credentials or host
+        let realm = if !creds.domain.is_empty() {
+            creds.domain.to_uppercase()
+        } else {
+            // Extract domain from FQDN if available
+            host.split('.')
+                .skip(1)
+                .collect::<Vec<_>>()
+                .join(".")
+                .to_uppercase()
+        };
+
+        // Only try Kerberos if we have a proper realm
+        if !realm.is_empty() && realm.contains('.') {
+            debug!("Trying Kerberos authentication with realm: {}", realm);
+
+            #[cfg(feature = "kerberos")]
+            {
+                use crate::kerberos_adapter::KerberosClient;
+                let kerberos_config = crate::kerberos_adapter::KerberosConfig::new(&realm);
+                match KerberosClient::new(host, kerberos_config, creds.clone()) {
+                    Ok(kerberos_client) => {
+                        match activate_wmi_dcom_with_auth(host, Box::new(kerberos_client)) {
+                            Ok(result) => {
+                                info!("DCOM activation succeeded with Kerberos");
+                                return Ok(result);
+                            }
+                            Err(err) => {
+                                warn!(?err, "Kerberos authentication failed, falling back to NTLM");
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        debug!(?err, "Failed to create Kerberos client, falling back to NTLM");
+                    }
+                }
+            }
+        } else {
+            debug!("Skipping Kerberos: no proper realm available");
+        }
+    }
+
+    // Fall back to NTLM
+    debug!("Using NTLM authentication for DCOM activation");
+    let ntlm_client = NtlmV2Client::new(creds.clone()).map_err(|_| DcomError::Protocol)?;
+    activate_wmi_dcom_with_auth(host, Box::new(ntlm_client))
+}
+
+/// Internal function that performs DCOM activation with a generic auth provider
+fn activate_wmi_dcom_with_auth(
+    host: &str,
+    mut auth_client: Box<dyn AuthProvider>,
+) -> Result<(u16, [u8; 8]), DcomError> {
+    // Connect to SCM on port 135
+    let addr = format!("{host}:135");
+    let mut stream = TcpStream::connect_timeout(
+        &addr
+            .to_socket_addrs()
+            .map_err(|e| {
+                error!(%e, "failed to resolve host");
+                DcomError::Connect
+            })?
+            .next()
+            .ok_or(DcomError::Connect)?,
+        Duration::from_secs(5),
+    )
+    .map_err(|e| {
+        error!(%e, "failed to connect to SCM");
+        DcomError::Connect
+    })?;
+
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|_| DcomError::Connect)?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|_| DcomError::Connect)?;
+
+    let scm_uuid: [u8; 16] = hex_literal::hex!("a0 01 00 00 00 00 00 00 c0 00 00 00 00 00 00 46");
+
+    // Step 1: Bind with auth type 1 (negotiate)
+    let negotiate_token = auth_client.negotiate().map_err(|_| DcomError::Protocol)?;
+    let bind_pdu = build_scm_bind_pdu(1, &scm_uuid, &negotiate_token);
     debug!(
         len = bind_pdu.len(),
         hex = %hex::encode(&bind_pdu),
@@ -328,18 +623,18 @@ pub fn activate_wmi_dcom(host: &str, creds: &Credentials) -> Result<(u16, [u8; 8
 
     let bind_ack = read_rpc_pdu(&mut stream)?;
     debug!(len = bind_ack.len(), hex = %hex::encode(&bind_ack), "SCM bind_ack raw");
-    let (context_id, type2_blob, max_xmit, max_recv) = RealRpcTransport::parse_bind_ack(&bind_ack)
+    let (context_id, challenge_blob, max_xmit, max_recv) = RealRpcTransport::parse_bind_ack(&bind_ack)
         .map_err(|err| {
             debug!(?err, "SCM bind_ack parse failure");
             DcomError::Protocol
         })?;
     debug!(context_id, max_xmit, max_recv, "SCM bind accepted");
 
-    // Step 2: Send NTLM Type 3 via alter_context
-    let authenticate = auth_client
-        .respond_message(&type2_blob)
+    // Step 2: Send auth response via alter_context
+    let response_token = auth_client
+        .respond(&challenge_blob)
         .map_err(|_| DcomError::Protocol)?;
-    let alter_pdu = build_scm_alter_context_pdu(2, context_id, &scm_uuid, &authenticate.message);
+    let alter_pdu = build_scm_alter_context_pdu(2, context_id, &scm_uuid, &response_token);
     debug!(len = alter_pdu.len(), hex = %hex::encode(&alter_pdu), "Sending SCM alter_context");
     stream.write_all(&alter_pdu).map_err(|_| DcomError::Send)?;
 
@@ -366,20 +661,6 @@ pub fn activate_wmi_dcom(host: &str, creds: &Credentials) -> Result<(u16, [u8; 8
         port,
         hex::encode(oxid)
     );
-
-    // Optionally resolve the OXID to get the full object reference
-    // For now, just log the attempt and return port and OXID
-    match resolve_oxid(host, port, creds, &oxid) {
-        Ok(obj_ref) => {
-            info!("OXID resolved successfully: {:?}", obj_ref);
-        }
-        Err(e) => {
-            warn!(
-                "OXID resolution failed: {:?}, continuing with port and OXID only",
-                e
-            );
-        }
-    }
 
     Ok((port, oxid))
 }
@@ -790,6 +1071,99 @@ fn parse_dualstringarray_port_inner(input: &[u8]) -> IResult<&[u8], u16> {
     }
 
     Ok((input, 135)) // Default fallback to port 135
+}
+
+/// Build an anonymous RPC bind PDU (no authentication)
+fn build_anonymous_bind_pdu(call_id: u32, interface_uuid: &[u8; 16]) -> Vec<u8> {
+    use byteorder::WriteBytesExt;
+
+    let mut pdu = Vec::new();
+
+    // RPC header
+    pdu.write_u8(5).unwrap();  // version major
+    pdu.write_u8(0).unwrap();  // version minor
+    pdu.write_u8(0x0B).unwrap(); // ptype: BIND
+    pdu.write_u8(0x03).unwrap(); // flags: first+last fragment
+    pdu.write_u32::<LittleEndian>(0x10000000).unwrap(); // data representation (little-endian)
+
+    // Fragment length (will update later)
+    let frag_len_offset = pdu.len();
+    pdu.write_u16::<LittleEndian>(0).unwrap(); // placeholder
+
+    // Auth length = 0 for anonymous
+    pdu.write_u16::<LittleEndian>(0).unwrap();
+
+    // Call ID
+    pdu.write_u32::<LittleEndian>(call_id).unwrap();
+
+    // Bind body
+    pdu.write_u16::<LittleEndian>(0x10B8).unwrap(); // max_xmit_frag
+    pdu.write_u16::<LittleEndian>(0x10B8).unwrap(); // max_recv_frag
+    pdu.write_u32::<LittleEndian>(0).unwrap(); // assoc_group
+
+    // Context list
+    pdu.write_u8(1).unwrap(); // num_ctx_items
+    pdu.write_u8(0).unwrap(); // reserved
+    pdu.write_u16::<LittleEndian>(0).unwrap(); // context_id = 0
+    pdu.write_u8(1).unwrap(); // num_trans_items
+    pdu.write_u8(0).unwrap(); // reserved
+
+    // Abstract syntax (interface UUID)
+    pdu.extend_from_slice(interface_uuid);
+    pdu.write_u16::<LittleEndian>(0).unwrap(); // interface version major
+    pdu.write_u16::<LittleEndian>(0).unwrap(); // interface version minor
+
+    // Transfer syntax (NDR)
+    pdu.extend_from_slice(&hex_literal::hex!("045d888aeb1cc9119fe808002b104860")); // NDR UUID
+    pdu.write_u32::<LittleEndian>(2).unwrap(); // NDR version 2.0
+
+    // NO auth trailer for anonymous bind
+
+    // Update fragment length
+    let frag_len = pdu.len() as u16;
+    pdu[frag_len_offset..frag_len_offset+2].copy_from_slice(&frag_len.to_le_bytes());
+
+    pdu
+}
+
+/// Build an anonymous RPC request PDU (no authentication)
+fn build_anonymous_request_pdu(call_id: u32, context_id: u16, opnum: u16, stub: &[u8]) -> Vec<u8> {
+    use byteorder::WriteBytesExt;
+
+    let mut pdu = Vec::new();
+
+    // RPC header
+    pdu.write_u8(5).unwrap();  // version major
+    pdu.write_u8(0).unwrap();  // version minor
+    pdu.write_u8(0x00).unwrap(); // ptype: REQUEST
+    pdu.write_u8(0x03).unwrap(); // flags: first+last fragment
+    pdu.write_u32::<LittleEndian>(0x10000000).unwrap(); // data representation
+
+    // Fragment length (will update later)
+    let frag_len_offset = pdu.len();
+    pdu.write_u16::<LittleEndian>(0).unwrap(); // placeholder
+
+    // Auth length = 0 for anonymous
+    pdu.write_u16::<LittleEndian>(0).unwrap();
+
+    // Call ID
+    pdu.write_u32::<LittleEndian>(call_id).unwrap();
+
+    // Request body
+    pdu.write_u32::<LittleEndian>(stub.len() as u32).unwrap(); // alloc_hint
+    pdu.write_u16::<LittleEndian>(context_id).unwrap(); // p_cont_id
+    pdu.write_u16::<LittleEndian>(opnum).unwrap(); // opnum
+
+    // Stub data
+    pdu.extend_from_slice(stub);
+
+    // NO auth trailer for anonymous request
+
+    // Update fragment length
+    let frag_len = pdu.len() as u16;
+    pdu[frag_len_offset..frag_len_offset+2].copy_from_slice(&frag_len.to_le_bytes());
+
+    pdu
 }
 
 #[allow(dead_code)]

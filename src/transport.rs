@@ -1,5 +1,17 @@
 use crate::auth::{AuthProvider, Credentials, NtlmV2Client};
+#[cfg(feature = "kerberos")]
+use crate::kerberos_adapter::{KerberosClient, KerberosConfig};
 use byteorder::{LittleEndian, WriteBytesExt};
+
+// RPC authentication type constants
+#[allow(dead_code)]
+const AUTH_TYPE_NTLM: u8 = 0x0A;
+#[cfg(feature = "kerberos")]
+#[allow(dead_code)]
+const AUTH_TYPE_KERBEROS: u8 = 0x10;
+#[cfg(feature = "kerberos")]
+#[allow(dead_code)]
+const AUTH_TYPE_SPNEGO: u8 = 0x09;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::io::{Cursor, Read, Write};
 #[cfg(feature = "async")]
@@ -393,12 +405,12 @@ impl RealRpcTransport {
 
         let domain = domain.unwrap_or_default();
 
-        let creds = Credentials {
-            username: username.clone(),
-            password: password.clone(),
-            domain: domain.clone(),
-            workstation: host.clone(),
-        };
+        let creds = Credentials::new(
+            username.clone(),
+            password.clone(),
+            domain.clone(),
+            host.clone(),
+        );
 
         let mut auth = NtlmV2Client::new(creds.clone())
             .map_err(|err| TransportError::Failure(err.to_string()))?;
@@ -420,12 +432,9 @@ impl RealRpcTransport {
         };
         let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))
             .map_err(|err| TransportError::Failure(err.to_string()))?;
-        socket
-            .set_read_timeout(Some(read_timeout))
-            .map_err(|err| TransportError::Failure(err.to_string()))?;
-        socket
-            .set_write_timeout(Some(write_timeout))
-            .map_err(|err| TransportError::Failure(err.to_string()))?;
+
+        // Use platform-specific socket configuration
+        Self::configure_socket_timeouts(&socket, read_timeout, write_timeout)?;
         socket
             .connect(&addr.into())
             .map_err(|err| TransportError::Failure(err.to_string()))?;
@@ -489,6 +498,84 @@ impl RealRpcTransport {
         })
     }
 
+    /// Connect with Kerberos authentication (Windows 11 compatible)
+    #[cfg(feature = "kerberos")]
+    #[instrument(level = "debug", skip_all, fields(host, port))]
+    pub fn connect_with_kerberos(
+        host: &str,
+        port: u16,
+        config: KerberosConfig,
+        creds: Credentials,
+    ) -> Result<Self, TransportError> {
+        debug!("Connecting with Kerberos to {}:{}", host, port);
+
+        let addr = (host, port)
+            .to_socket_addrs()
+            .map_err(|err| TransportError::Failure(err.to_string()))?
+            .next()
+            .ok_or_else(|| TransportError::Failure("Failed to resolve address".into()))?;
+
+        let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))?;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+
+        // Create Kerberos client
+        let mut auth = KerberosClient::new(host, config.clone(), creds)
+            .map_err(|err| TransportError::Failure(err.to_string()))?;
+
+        // Determine auth type based on config
+        let _auth_type = if config.prefer_spnego {
+            AUTH_TYPE_SPNEGO
+        } else {
+            AUTH_TYPE_KERBEROS
+        };
+
+        // Step 1: Send bind with AP-REQ (first leg)
+        let ap_req = auth.negotiate()
+            .map_err(|err| TransportError::Failure(err.to_string()))?;
+
+        let bind_pdu = Self::build_bind_pdu(1, &ap_req);
+        debug!("Sending Kerberos bind PDU, len={}", bind_pdu.len());
+        stream.write_all(&bind_pdu)?;
+
+        // Step 2: Receive bind_ack with AP-REP (second leg)
+        let bind_ack = Self::read_pdu(&mut stream)?;
+        let (context_id, ap_rep, max_xmit, max_recv) = Self::parse_bind_ack(&bind_ack)?;
+        debug!("Received bind_ack, context_id={}", context_id);
+
+        // Step 3: Send alter_context with final token (third leg - DCE style)
+        // CRITICAL: Always send third leg even if token is empty
+        let final_token = auth.respond(&ap_rep)
+            .map_err(|err| TransportError::Failure(err.to_string()))?;
+
+        let alter_pdu = Self::build_alter_context_pdu(2, context_id, &final_token);
+        debug!("Sending alter_context (third leg), len={}", alter_pdu.len());
+        stream.write_all(&alter_pdu)?;
+
+        let alter_ack = Self::read_pdu(&mut stream)?;
+        Self::parse_alter_ack(&alter_ack)?;
+        debug!("Kerberos context established");
+
+        // Extract session key from AP-REP subkey (for mutual auth)
+        let session_key = auth.session_key()
+            .ok_or_else(|| TransportError::Failure("No session key available".into()))?
+            .to_vec();
+
+        Ok(Self {
+            stream,
+            context_id,
+            call_id: 3,
+            causality_id: 0,
+            session_key,
+            auth_level: config.auth_level as u8,
+            _max_xmit: max_xmit,
+            _max_recv: max_recv,
+            ipid: None,
+            _object_ref: None,
+            seqno: 0,
+        })
+    }
+
     /// Creates a new transport after resolving the dynamic endpoint via EPM and performing the
     /// NTLM authenticated bind.  The detailed network logic will be filled in during the
     /// subsequent iterations of Step 1.
@@ -512,12 +599,12 @@ impl RealRpcTransport {
         let password = password.unwrap_or_default();
         let domain = domain.unwrap_or_default();
 
-        let creds = Credentials {
-            username: username.clone(),
-            password: password.clone(),
-            domain: domain.clone(),
-            workstation: host.clone(),
-        };
+        let creds = Credentials::new(
+            username.clone(),
+            password.clone(),
+            domain.clone(),
+            host.clone(),
+        );
 
         let mut auth = NtlmV2Client::new(creds.clone())
             .map_err(|err| TransportError::Failure(err.to_string()))?;
@@ -539,12 +626,9 @@ impl RealRpcTransport {
         };
         let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))
             .map_err(|err| TransportError::Failure(err.to_string()))?;
-        socket
-            .set_read_timeout(Some(read_timeout))
-            .map_err(|err| TransportError::Failure(err.to_string()))?;
-        socket
-            .set_write_timeout(Some(write_timeout))
-            .map_err(|err| TransportError::Failure(err.to_string()))?;
+
+        // Use platform-specific socket configuration
+        Self::configure_socket_timeouts(&socket, read_timeout, write_timeout)?;
         socket
             .connect(&addr.into())
             .map_err(|err| TransportError::Failure(err.to_string()))?;
@@ -709,10 +793,21 @@ impl RealRpcTransport {
         let ptype = cursor.read_u8()?;
         if ptype == 0x0D {
             // bind_nak - server rejected our bind request
-            // This can happen when auth is required or protocol mismatch
-            return Err(TransportError::Failure(
-                "Bind rejected (bind_nak) - server requires different auth or protocol".into(),
-            ));
+            // bind_nak structure: header (16 bytes) + reject_reason (2 bytes) + versions_supported
+            let reason = if pdu.len() >= 18 {
+                cursor.set_position(16);
+                cursor.read_u16::<LittleEndian>().unwrap_or(0)
+            } else {
+                0
+            };
+            let versions = if pdu.len() >= 19 {
+                cursor.set_position(18);
+                cursor.read_u8().unwrap_or(0)
+            } else {
+                0
+            };
+            warn!(reason, versions, "bind rejected (bind_nak)");
+            return Err(TransportError::Bind { result: reason, reason: versions as u16 });
         }
         if ptype != 0x0C {
             return Err(TransportError::Failure(format!(
@@ -894,16 +989,132 @@ impl RealRpcTransport {
         Ok(())
     }
 
+    /// Configure socket timeouts in a platform-specific way
+    /// On macOS, socket timeouts can cause non-blocking behavior
+    #[cfg(target_os = "macos")]
+    fn configure_socket_timeouts(
+        socket: &Socket,
+        read_timeout: Duration,
+        write_timeout: Duration,
+    ) -> Result<(), TransportError> {
+        // On macOS, we use a short timeout to detect non-blocking behavior
+        // but keep the socket effectively blocking for most operations
+        socket
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .map_err(|err| TransportError::Failure(err.to_string()))?;
+        socket
+            .set_write_timeout(Some(Duration::from_millis(100)))
+            .map_err(|err| TransportError::Failure(err.to_string()))?;
+        debug!("macOS: Socket configured with short timeouts for retry loops (100ms), actual timeouts: read={:?}, write={:?}", read_timeout, write_timeout);
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn configure_socket_timeouts(
+        socket: &Socket,
+        read_timeout: Duration,
+        write_timeout: Duration,
+    ) -> Result<(), TransportError> {
+        socket
+            .set_read_timeout(Some(read_timeout))
+            .map_err(|err| TransportError::Failure(err.to_string()))?;
+        socket
+            .set_write_timeout(Some(write_timeout))
+            .map_err(|err| TransportError::Failure(err.to_string()))?;
+        debug!("Socket timeouts set: read={:?}, write={:?}", read_timeout, write_timeout);
+        Ok(())
+    }
+
+    /// Write all bytes with retry logic for non-blocking sockets
+    /// This handles macOS-specific behavior where sockets may be non-blocking
+    fn write_all_with_retry(
+        stream: &mut TcpStream,
+        buf: &[u8],
+        timeout: Duration,
+    ) -> Result<(), std::io::Error> {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut pos = 0;
+
+        debug!("write_all_with_retry: attempting to write {} bytes with {:?} timeout", buf.len(), timeout);
+
+        while pos < buf.len() {
+            match stream.write(&buf[pos..]) {
+                Ok(n) => {
+                    pos += n;
+                    debug!("wrote {} bytes, total {}/{}", n, pos, buf.len());
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            format!("write timeout after writing {} of {} bytes", pos, buf.len()),
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Read exact number of bytes with retry logic for non-blocking sockets
+    /// This handles macOS-specific behavior where sockets with timeouts behave as non-blocking
+    fn read_exact_with_retry(
+        stream: &mut TcpStream,
+        buf: &mut [u8],
+        timeout: Duration,
+    ) -> Result<(), std::io::Error> {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut pos = 0;
+
+        debug!("read_exact_with_retry: attempting to read {} bytes with {:?} timeout", buf.len(), timeout);
+
+        while pos < buf.len() {
+            match stream.read(&mut buf[pos..]) {
+                Ok(0) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "connection closed while reading",
+                    ));
+                }
+                Ok(n) => {
+                    pos += n;
+                    debug!("read {} bytes, total {}/{}", n, pos, buf.len());
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
+                           || e.kind() == std::io::ErrorKind::TimedOut => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            format!("read timeout after reading {} of {} bytes", pos, buf.len()),
+                        ));
+                    }
+                    // Use smaller sleep for better responsiveness on macOS
+                    std::thread::sleep(Duration::from_millis(1));
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(())
+    }
+
     fn read_pdu(stream: &mut TcpStream) -> Result<Vec<u8>, TransportError> {
         let span = tracing::trace_span!("read_pdu");
         let _enter = span.enter();
 
         // Read the first fragment
         let mut header = [0u8; 16];
-        stream.read_exact(&mut header).map_err(|err| {
-            error!(?err, "failed to read RPC PDU header");
-            TransportError::Failure(err.to_string())
-        })?;
+        // Use our retry-capable read function to handle macOS non-blocking behavior
+        Self::read_exact_with_retry(stream, &mut header, Duration::from_secs(10))
+            .map_err(|err| {
+                error!(?err, "failed to read RPC PDU header");
+                TransportError::Failure(err.to_string())
+            })?;
 
         let flags = header[3];
         let frag_len = u16::from_le_bytes([header[8], header[9]]) as usize;
@@ -1175,6 +1386,7 @@ impl RpcTransport for RealRpcTransport {
 
 #[cfg(feature = "async")]
 #[async_trait]
+#[allow(dead_code)]
 pub trait AsyncRpcTransport: Send + Sync {
     async fn name(&self) -> &'static str;
     async fn invoke(&self, opnum: u16, payload: &[u8]) -> Result<Vec<u8>, TransportError>;
@@ -1228,12 +1440,12 @@ impl AsyncRealRpcTransport {
         let password = password.unwrap_or_default();
         let domain = domain.unwrap_or_default();
 
-        let creds = Credentials {
-            username: username.clone(),
-            password: password.clone(),
-            domain: domain.clone(),
-            workstation: host.clone(),
-        };
+        let creds = Credentials::new(
+            username.clone(),
+            password.clone(),
+            domain.clone(),
+            host.clone(),
+        );
 
         let creds_for_epm = creds.clone();
         let host_for_epm = host.clone();
@@ -1295,12 +1507,12 @@ impl AsyncRealRpcTransport {
             }
         };
         let domain = domain.unwrap_or_default();
-        let creds = Credentials {
-            username: username.clone(),
-            password: password.clone(),
-            domain: domain.clone(),
-            workstation: host.clone(),
-        };
+        let creds = Credentials::new(
+            username.clone(),
+            password.clone(),
+            domain.clone(),
+            host.clone(),
+        );
 
         let stream = Self::connect_stream(&host, port).await?;
         let (state, context_id, session_key, auth_level) = Self::perform_handshake(

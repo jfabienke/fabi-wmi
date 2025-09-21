@@ -30,12 +30,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Host: {}, User: {}@{}", host, username, domain);
 
     // Create credentials
-    let creds = Credentials {
-        username: username.to_string(),
-        password: password.to_string(),
-        domain: domain.to_string(),
-        workstation: "LINUX-WMI".to_string(),
-    };
+    let creds = Credentials::new(
+        username.to_string(),
+        password.to_string(),
+        domain.to_string(),
+        "LINUX-WMI".to_string(),
+    );
 
     // Phase 1-2: DCOM activation to get dynamic port and OXID
     info!("Phase 1-2: Performing DCOM activation...");

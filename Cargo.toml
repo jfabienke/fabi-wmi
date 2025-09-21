@@ -19,6 +19,11 @@ path = "examples/dcom_activation.rs"
 name = "wmi_probe"
 path = "examples/wmi_probe.rs"
 
+[[example]]
+name = "test_kerberos"
+path = "examples/test_kerberos.rs"
+required-features = ["kerberos"]
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -40,10 +45,22 @@ async-trait = { version = "0.1", optional = true }
 deadpool = { version = "0.12", features = ["managed", "rt_tokio_1"], optional = true }
 deadpool-runtime = { version = "0.1", optional = true }
 
+# Security dependencies
+zeroize = { version = "1.7", features = ["derive"] }
+
+# Platform-specific dependencies
+[target.'cfg(unix)'.dependencies]
+# Internal kerbsec library v0.2.0 with new features
+kerbsec = { path = "../kerbsec", version = "0.2.0", features = ["dns", "runtime", "trace", "ccache", "channel-bindings", "channel-bindings-rustls", "iov"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+sspi = { version = "0.12", optional = true }
+
 [features]
-default = []
+default = ["kerberos"]
 async = ["tokio", "async-trait", "deadpool", "deadpool-runtime"]
 test-support = []
+kerberos = ["kerbsec"]
 
 [dev-dependencies]
 proptest = "1.4"

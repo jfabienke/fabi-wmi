@@ -76,12 +76,12 @@ impl IWbemLocator {
             // Validate configuration
             config.validate().map_err(|_| WmiError::Connect)?;
 
-            let creds = crate::auth::Credentials {
-                username: user.to_string(),
-                password: pass.to_string(),
-                domain: domain.unwrap_or("").to_string(),
-                workstation: self.host.clone(),
-            };
+            let creds = crate::auth::Credentials::new(
+                user.to_string(),
+                pass.to_string(),
+                domain.unwrap_or("").to_string(),
+                self.host.clone(),
+            );
 
             // Perform DCOM activation to get port and OXID
             let (port, oxid) = crate::dcom::activate_wmi_dcom(&self.host, &creds)

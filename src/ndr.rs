@@ -60,12 +60,14 @@ pub struct StubNdrCodec;
 
 #[cfg(feature = "async")]
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct AsyncNdrCodec {
     inner: Arc<dyn NdrCodec + Send + Sync>,
 }
 
 #[cfg(feature = "async")]
 impl AsyncNdrCodec {
+    #[allow(dead_code)]
     pub fn new(inner: Arc<dyn NdrCodec + Send + Sync>) -> Self {
         Self { inner }
     }

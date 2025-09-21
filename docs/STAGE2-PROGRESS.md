@@ -95,12 +95,12 @@ To reach 90% coverage, we would need:
 3. Focus on critical path coverage over 100%
 
 ## Metrics Summary
-| Module | Start | Current | Target | Gap |
-|--------|-------|---------|--------|-----|
-| Overall | 52.70% | 55.28% | 90% | -34.72% |
-| DCOM | 37% | ~40% | 75% | -35% |
-| NDR | 44% | ~48% | 85% | -37% |
-| Transport | 60% | ~60% | 90% | -30% |
+| Module    | Start  | Current | Target | Gap     |
+|-----------|--------|---------|--------|---------|
+| Overall   | 52.70% |  55.28% | 90%    | -34.72% |
+| DCOM      | 37%    | ~40%    | 75%    | -35%    |
+| NDR       | 44%    | ~48%    | 85%    | -37%    |
+| Transport | 60%    | ~60%    | 90%    | -30%    |
 
 ## Conclusion
 While Stage 2 made progress, reaching 90% coverage requires significant additional effort, primarily adding unit tests within source files. The current architecture (private modules) makes it challenging to test from external test files. A more realistic target would be 70-80% coverage focusing on critical paths.

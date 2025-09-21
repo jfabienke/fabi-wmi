@@ -50,12 +50,12 @@ fn activate_wmi(
     let scm_uuid = hex_literal::hex!("a0 01 00 00 00 00 00 00 c0 00 00 00 00 00 00 46");
 
     // Create NTLM client and get Type1 message
-    let creds = Credentials {
-        username: user.to_string(),
-        password: pass.to_string(),
-        domain: domain.to_string(),
-        workstation: "LINUX".to_string(),
-    };
+    let creds = Credentials::new(
+        user.to_string(),
+        pass.to_string(),
+        domain.to_string(),
+        "LINUX".to_string(),
+    );
     let mut ntlm = NtlmV2Client::new(creds)?;
     let type1_msg = ntlm.negotiate_message();
     let type1 = type1_msg.message;
@@ -81,7 +81,7 @@ fn activate_wmi(
 
     if !skip_alter {
         let type3_msg = ntlm.respond_message(&type2)?;
-        let type3 = type3_msg.message;
+        let type3 = type3_msg.message.clone();
         debug!(
             "Type3 message: len={}, hex_preview={}",
             type3.len(),

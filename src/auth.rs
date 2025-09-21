@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 use tracing::debug;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[derive(Error, Debug)]
 pub enum AuthError {
@@ -24,24 +25,54 @@ const NTLMSSP_SIGNATURE: &[u8; 8] = b"NTLMSSP\0";
 /// See: [MS-NLMP] §3.2.5.1.2, Table 3 "Negotiate Flags"
 const NEGOTIATE_FLAGS: u32 = 0xE289_8235;
 
-#[derive(Clone)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct Credentials {
     pub username: String,
-    pub password: String,
+    #[zeroize(skip)]
+    pub password: SecureString,
     pub domain: String,
     pub workstation: String,
 }
 
+/// Secure string wrapper that zeroizes on drop
+#[derive(Clone)]
+pub struct SecureString(String);
+
+impl SecureString {
+    pub fn new(s: String) -> Self {
+        SecureString(s)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl Drop for SecureString {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
 impl Credentials {
+    pub fn new(username: String, password: String, domain: String, workstation: String) -> Self {
+        Self {
+            username,
+            password: SecureString::new(password),
+            domain,
+            workstation,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), AuthError> {
         if self.username.is_empty() || self.password.is_empty() {
             return Err(AuthError::Creds);
         }
         Ok(())
-    }
-
-    pub fn zeroize(&mut self) {
-        zeroize_string(&mut self.password);
     }
 }
 
@@ -56,16 +87,19 @@ pub struct ChallengeMessage {
     pub target_info: Vec<u8>,
 }
 
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct AuthenticateMessage {
     pub message: Vec<u8>,
     pub session_key: [u8; 16],
     pub negotiate_flags: u32,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct NtlmV2Client {
     creds: Credentials,
     last_session_key: Option<[u8; 16]>,
+    type1_message: Option<Vec<u8>>,
+    type2_message: Option<Vec<u8>>,
 }
 
 impl NtlmV2Client {
@@ -74,13 +108,17 @@ impl NtlmV2Client {
         Ok(Self {
             creds,
             last_session_key: None,
+            type1_message: None,
+            type2_message: None,
         })
     }
 
-    pub fn negotiate_message(&self) -> NegotiateMessage {
+    pub fn negotiate_message(&mut self) -> NegotiateMessage {
         debug!(domain = %self.creds.domain, workstation = %self.creds.workstation, "building NTLM type1");
+        let message = build_type1_message(&self.creds.domain, &self.creds.workstation);
+        self.type1_message = Some(message.clone());
         NegotiateMessage {
-            message: build_type1_message(&self.creds.domain, &self.creds.workstation),
+            message,
         }
     }
 
@@ -90,8 +128,21 @@ impl NtlmV2Client {
     ) -> Result<AuthenticateMessage, AuthError> {
         let challenge = parse_type2_message(challenge_bytes)?;
         debug!("received NTLM challenge");
-        let auth = build_type3_message(&self.creds, &challenge, None, None)?;
-        debug!("generated NTLM type3 response");
+
+        // Store Type2 message for MIC calculation
+        self.type2_message = Some(challenge_bytes.to_vec());
+
+        // Build Type3 with MIC support
+        let auth = build_type3_message_with_mic(
+            &self.creds,
+            &challenge,
+            self.type1_message.as_deref(),
+            challenge_bytes,
+            None,
+            None
+        )?;
+
+        debug!("generated NTLM type3 response with MIC");
         self.last_session_key = Some(auth.session_key);
         Ok(auth)
     }
@@ -106,12 +157,13 @@ pub trait AuthProvider: Send {
 
 impl AuthProvider for NtlmV2Client {
     fn negotiate(&mut self) -> Result<Vec<u8>, AuthError> {
-        Ok(self.negotiate_message().message)
+        let msg = self.negotiate_message();
+        Ok(msg.message)
     }
 
     fn respond(&mut self, challenge: &[u8]) -> Result<Vec<u8>, AuthError> {
         let auth = self.respond_message(challenge)?;
-        Ok(auth.message)
+        Ok(auth.message.clone())
     }
 
     fn session_key(&self) -> Option<&[u8]> {
@@ -183,7 +235,7 @@ fn build_type3_message(
     let username_upper = creds.username.to_uppercase();
     let domain_upper = creds.domain.to_uppercase();
 
-    let mut password_utf16 = utf16le(&creds.password);
+    let mut password_utf16 = utf16le(creds.password.as_str());
     let mut nt_hash = md4_hash(&password_utf16);
     zeroize_bytes(&mut password_utf16);
 
@@ -259,6 +311,150 @@ fn build_type3_message(
     message.extend_from_slice(&workstation_utf16);
     message.extend_from_slice(&session_key_bytes);
 
+    zeroize_bytes(&mut nt_hash);
+    zeroize_bytes(&mut ntlm_v2_hash_arr);
+    zeroize_bytes(&mut client_nonce);
+
+    let mut session_key = [0u8; 16];
+    session_key.copy_from_slice(&session_key_bytes);
+
+    Ok(AuthenticateMessage {
+        message,
+        session_key,
+        negotiate_flags: challenge.flags,
+    })
+}
+
+/// Build Type3 message with MIC (Message Integrity Code) for Windows 11 compatibility
+fn build_type3_message_with_mic(
+    creds: &Credentials,
+    challenge: &ChallengeMessage,
+    type1_message: Option<&[u8]>,
+    type2_message: &[u8],
+    forced_client_nonce: Option<[u8; 8]>,
+    forced_timestamp: Option<u64>,
+) -> Result<AuthenticateMessage, AuthError> {
+    let username_upper = creds.username.to_uppercase();
+    let domain_upper = creds.domain.to_uppercase();
+
+    let mut password_utf16 = utf16le(creds.password.as_str());
+    let mut nt_hash = md4_hash(&password_utf16);
+    zeroize_bytes(&mut password_utf16);
+
+    let mut identity = utf16le(&(username_upper.clone() + &domain_upper));
+    let ntlm_v2_hash = hmac_md5_segments(&nt_hash, &[&identity]);
+    zeroize_bytes(&mut identity);
+
+    let mut ntlm_v2_hash_arr = ntlm_v2_hash;
+
+    let mut client_nonce = if let Some(nonce) = forced_client_nonce {
+        nonce
+    } else {
+        generate_client_nonce()
+    };
+
+    let timestamp = forced_timestamp.unwrap_or_else(current_filetime);
+
+    // Build the NTLMv2 blob
+    let mut blob = Vec::new();
+    blob.extend_from_slice(&0x0101_0000u32.to_le_bytes()); // RespType and HiRespType
+    blob.extend_from_slice(&0u32.to_le_bytes()); // Reserved1
+    blob.extend_from_slice(&timestamp.to_le_bytes());
+    blob.extend_from_slice(&client_nonce);
+    blob.extend_from_slice(&0u32.to_le_bytes()); // Reserved2
+    blob.extend_from_slice(&challenge.target_info);
+    blob.extend_from_slice(&0u32.to_le_bytes()); // Reserved3
+
+    // Calculate NT proof
+    let nt_proof = hmac_md5_segments(&ntlm_v2_hash_arr, &[&challenge.server_challenge, &blob]);
+
+    let mut nt_response = Vec::with_capacity(nt_proof.len() + blob.len());
+    nt_response.extend_from_slice(&nt_proof);
+    nt_response.extend_from_slice(&blob);
+
+    // Calculate LM response
+    let lm_proof = hmac_md5_segments(
+        &ntlm_v2_hash_arr,
+        &[&challenge.server_challenge, &client_nonce],
+    );
+
+    let mut lm_response = Vec::with_capacity(lm_proof.len() + client_nonce.len());
+    lm_response.extend_from_slice(&lm_proof);
+    lm_response.extend_from_slice(&client_nonce);
+
+    // Calculate session key
+    let session_key_bytes = hmac_md5_segments(&ntlm_v2_hash_arr, &[&nt_proof]);
+
+    // Prepare UTF-16LE strings
+    let domain_utf16 = utf16le(&creds.domain);
+    let user_utf16 = utf16le(&creds.username);
+    let workstation_utf16 = utf16le(&creds.workstation);
+
+    // Build buffer descriptors
+    let mut buffers = Vec::with_capacity(6 * 8);
+    let mut offset = 80u32; // Start after header (64 bytes) + MIC (16 bytes)
+
+    for buf in [
+        lm_response.as_slice(),
+        nt_response.as_slice(),
+        domain_utf16.as_slice(),
+        user_utf16.as_slice(),
+        workstation_utf16.as_slice(),
+        session_key_bytes.as_slice(),
+    ] {
+        let len = buf.len() as u16;
+        buffers.extend_from_slice(&len.to_le_bytes()); // Length
+        buffers.extend_from_slice(&len.to_le_bytes()); // MaxLength
+        buffers.extend_from_slice(&offset.to_le_bytes()); // Offset
+        offset += buf.len() as u32;
+    }
+
+    // Build Type3 message with placeholder for MIC
+    let mut message = Vec::new();
+    message.extend_from_slice(NTLMSSP_SIGNATURE);
+    message.extend_from_slice(&3u32.to_le_bytes()); // Type 3
+    message.extend_from_slice(&buffers); // 6 buffer descriptors (48 bytes)
+    message.extend_from_slice(&NEGOTIATE_FLAGS.to_le_bytes()); // Flags (4 bytes)
+
+    // Add 16-byte placeholder for MIC (will be calculated and replaced)
+    let mic_offset = message.len();
+    message.extend_from_slice(&[0u8; 16]);
+
+    // Add the actual payloads
+    message.extend_from_slice(&lm_response);
+    message.extend_from_slice(&nt_response);
+    message.extend_from_slice(&domain_utf16);
+    message.extend_from_slice(&user_utf16);
+    message.extend_from_slice(&workstation_utf16);
+    message.extend_from_slice(&session_key_bytes);
+
+    // Calculate MIC if we have all three messages
+    if let Some(type1) = type1_message {
+        // MIC = HMAC-MD5(session_key, concatenation of Type1, Type2, and Type3 with zero MIC)
+        let mut mic_data = Vec::new();
+        mic_data.extend_from_slice(type1);
+        mic_data.extend_from_slice(type2_message);
+        mic_data.extend_from_slice(&message); // Type3 with zero MIC
+
+        let mic = hmac_md5_segments(&session_key_bytes, &[&mic_data]);
+
+        debug!(
+            "MIC calculation: type1_len={}, type2_len={}, type3_len={}, mic={}, mic_offset={}",
+            type1.len(),
+            type2_message.len(),
+            message.len(),
+            hex::encode(&mic),
+            mic_offset
+        );
+
+        // Replace the zero MIC with the calculated MIC
+        message[mic_offset..mic_offset + 16].copy_from_slice(&mic);
+        debug!("Added MIC to Type3 message at offset {}", mic_offset);
+    } else {
+        debug!("Skipping MIC calculation (Type1 message not available)");
+    }
+
+    // Clean up sensitive data
     zeroize_bytes(&mut nt_hash);
     zeroize_bytes(&mut ntlm_v2_hash_arr);
     zeroize_bytes(&mut client_nonce);
@@ -515,24 +711,24 @@ mod tests {
 
     #[test]
     fn build_type3_matches_reference() {
-        let creds = Credentials {
-            username: "User".into(),
-            password: "Password".into(),
-            domain: "Domain".into(),
-            workstation: "COMPUTER".into(),
-        };
+        let creds = Credentials::new(
+            "User".into(),
+            "Password".into(),
+            "Domain".into(),
+            "COMPUTER".into(),
+        );
         let expected_nt_hash = [
             0xa4, 0xf4, 0x9c, 0x40, 0x65, 0x10, 0xbd, 0xca, 0xb6, 0x82, 0x4e, 0xe7, 0xc3, 0x0f,
             0xd8, 0x52,
         ];
         assert_eq!(
-            utf16le(&creds.password),
+            utf16le(creds.password.as_str()),
             vec![
                 0x50, 0x00, 0x61, 0x00, 0x73, 0x00, 0x73, 0x00, 0x77, 0x00, 0x6f, 0x00, 0x72, 0x00,
                 0x64, 0x00,
             ]
         );
-        assert_eq!(md4_hash(&utf16le(&creds.password)), expected_nt_hash);
+        assert_eq!(md4_hash(&utf16le(creds.password.as_str())), expected_nt_hash);
         let challenge = parse_type2_message(&sample_type2()).unwrap();
         let client_nonce = [0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa];
         let timestamp = 0x00000001_6b5de5cd;
@@ -594,12 +790,12 @@ mod tests {
     #[test]
     fn test_auth_provider_trait_implementation() {
         // Test lines 108-119: AuthProvider trait methods
-        let creds = Credentials {
-            username: "test".to_string(),
-            password: "pass".to_string(),
-            domain: "DOMAIN".to_string(),
-            workstation: "WORKSTATION".to_string(),
-        };
+        let creds = Credentials::new(
+            "test".to_string(),
+            "pass".to_string(),
+            "DOMAIN".to_string(),
+            "WORKSTATION".to_string(),
+        );
         let mut client = NtlmV2Client::new(creds).unwrap();
 
         // Test negotiate
@@ -620,12 +816,12 @@ mod tests {
     #[test]
     fn test_respond_with_invalid_type2() {
         // Test line 91-94: respond_message error paths
-        let creds = Credentials {
-            username: "test".to_string(),
-            password: "pass".to_string(),
-            domain: "DOMAIN".to_string(),
-            workstation: "WORKSTATION".to_string(),
-        };
+        let creds = Credentials::new(
+            "test".to_string(),
+            "pass".to_string(),
+            "DOMAIN".to_string(),
+            "WORKSTATION".to_string(),
+        );
         let mut client = NtlmV2Client::new(creds).unwrap();
 
         // Invalid challenge should fail
@@ -637,23 +833,23 @@ mod tests {
     #[test]
     fn test_credentials_validation() {
         // Test Credentials validation
-        let empty_username = Credentials {
-            username: "".to_string(),
-            password: "pass".to_string(),
-            domain: "DOMAIN".to_string(),
-            workstation: "WORKSTATION".to_string(),
-        };
+        let empty_username = Credentials::new(
+            "".to_string(),
+            "pass".to_string(),
+            "DOMAIN".to_string(),
+            "WORKSTATION".to_string(),
+        );
 
         // Validate should fail with empty username
         assert!(empty_username.validate().is_err());
         assert!(matches!(empty_username.validate().unwrap_err(), AuthError::Creds));
 
-        let empty_password = Credentials {
-            username: "user".to_string(),
-            password: "".to_string(),
-            domain: "DOMAIN".to_string(),
-            workstation: "WORKSTATION".to_string(),
-        };
+        let empty_password = Credentials::new(
+            "user".to_string(),
+            "".to_string(),
+            "DOMAIN".to_string(),
+            "WORKSTATION".to_string(),
+        );
 
         // Validate should fail with empty password
         assert!(empty_password.validate().is_err());
@@ -672,12 +868,12 @@ mod tests {
     #[test]
     fn test_build_type3_error_paths() {
         // Test build_type3_message error handling
-        let creds = Credentials {
-            username: "a".repeat(256), // Very long username
-            password: "pass".to_string(),
-            domain: "DOMAIN".to_string(),
-            workstation: "WORKSTATION".to_string(),
-        };
+        let creds = Credentials::new(
+            "a".repeat(256), // Very long username
+            "pass".to_string(),
+            "DOMAIN".to_string(),
+            "WORKSTATION".to_string(),
+        );
         let challenge = parse_type2_message(&sample_type2()).unwrap();
 
         // Should still work with long username
@@ -688,12 +884,12 @@ mod tests {
     #[test]
     fn test_session_key_before_response() {
         // Test line 117-118: session_key returns None before response
-        let creds = Credentials {
-            username: "test".to_string(),
-            password: "pass".to_string(),
-            domain: "DOMAIN".to_string(),
-            workstation: "WORKSTATION".to_string(),
-        };
+        let creds = Credentials::new(
+            "test".to_string(),
+            "pass".to_string(),
+            "DOMAIN".to_string(),
+            "WORKSTATION".to_string(),
+        );
         let client = NtlmV2Client::new(creds).unwrap();
 
         // No session key before authentication
@@ -702,20 +898,20 @@ mod tests {
 
     #[test]
     fn credentials_validation_requires_username_and_password() {
-        let creds = Credentials {
-            username: String::new(),
-            password: "pass".into(),
-            domain: String::new(),
-            workstation: "wkst".into(),
-        };
+        let creds = Credentials::new(
+            String::new(),
+            "pass".into(),
+            String::new(),
+            "wkst".into(),
+        );
         assert!(matches!(creds.validate(), Err(AuthError::Creds)));
 
-        let creds = Credentials {
-            username: "user".into(),
-            password: String::new(),
-            domain: String::new(),
-            workstation: "wkst".into(),
-        };
+        let creds = Credentials::new(
+            "user".into(),
+            String::new(),
+            String::new(),
+            "wkst".into(),
+        );
         assert!(matches!(creds.validate(), Err(AuthError::Creds)));
     }
 }

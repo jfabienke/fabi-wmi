@@ -1,4 +1,5 @@
 use std::alloc::{alloc, dealloc, Layout};
+use zeroize::Zeroize;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
@@ -18,15 +19,29 @@ mod rpc;
 mod transport; // Used internally by dcom and lib
 mod wmi; // Re-exported types below
 
+// Kerberos modules
+#[cfg(feature = "kerberos")]
+mod kerberos_adapter; // Adapter to new kerbsec
+#[cfg(feature = "kerberos")]
+mod kerberos_integration; // Integration layer
+
+// Kerberos support via kerbsec crate
+#[cfg(feature = "kerberos")]
+pub use kerbsec;
+
 // Export auth module for examples
 pub mod auth_exports {
     pub use crate::auth::{
-        AuthError, AuthenticateMessage, Credentials, NegotiateMessage, NtlmV2Client,
+        AuthError, AuthenticateMessage, AuthProvider, Credentials, NegotiateMessage, NtlmV2Client,
     };
 }
 
 pub use auth::AuthError;
 pub use dcom::{activate_wmi_dcom, resolve_oxid, DcomError, ObjectReference};
+
+// Export Kerberos types from adapter
+#[cfg(feature = "kerberos")]
+pub use kerberos_adapter::{KerberosClient, KerberosConfig, KerberosError, KerberosCacheBackend};
 #[cfg(feature = "async")]
 pub use pool::{
     AsyncTransportManager, PoolAcquireError, PoolBuildError, PooledTransport, WmiConnectionPool,
@@ -114,12 +129,12 @@ impl InnerSession {
 
         let base_creds =
             if let (Some(ref user), Some(ref pass)) = (username.as_ref(), password.as_ref()) {
-                Some(auth::Credentials {
-                    username: user.to_string(),
-                    password: pass.to_string(),
-                    domain: domain_owned.clone(),
-                    workstation: host.to_string(),
-                })
+                Some(auth::Credentials::new(
+                    user.to_string(),
+                    pass.to_string(),
+                    domain_owned.clone(),
+                    host.to_string(),
+                ))
             } else {
                 None
             };

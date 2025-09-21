@@ -22,7 +22,7 @@ pub struct NtlmBindState {
 }
 
 pub fn start_ntlm_bind(creds: Credentials) -> Result<NtlmBindState, RpcError> {
-    let client = NtlmV2Client::new(creds)?;
+    let mut client = NtlmV2Client::new(creds)?;
     let negotiate = client.negotiate_message();
     Ok(NtlmBindState {
         client,
@@ -43,12 +43,12 @@ mod tests {
 
     #[test]
     fn ntlm_bind_round_trip() {
-        let creds = Credentials {
-            username: "User".into(),
-            password: "Password".into(),
-            domain: "Domain".into(),
-            workstation: "WORK".into(),
-        };
+        let creds = Credentials::new(
+            "User".into(),
+            "Password".into(),
+            "Domain".into(),
+            "WORK".into(),
+        );
         let mut state = start_ntlm_bind(creds).unwrap();
         assert_eq!(&state.negotiate_message[..8], b"NTLMSSP\0");
         let challenge = crate::auth::sample_type2();
@@ -76,12 +76,12 @@ mod tests {
     #[test]
     fn start_ntlm_bind_with_invalid_credentials() {
         // Test start_ntlm_bind with empty credentials
-        let invalid_creds = Credentials {
-            username: "".into(),
-            password: "".into(),
-            domain: "".into(),
-            workstation: "".into(),
-        };
+        let invalid_creds = Credentials::new(
+            "".into(),
+            "".into(),
+            "".into(),
+            "".into(),
+        );
 
         let result = start_ntlm_bind(invalid_creds);
         assert!(result.is_err());
@@ -94,12 +94,12 @@ mod tests {
     #[test]
     fn complete_ntlm_bind_with_invalid_challenge() {
         // Test complete_ntlm_bind with invalid challenge
-        let creds = Credentials {
-            username: "User".into(),
-            password: "Password".into(),
-            domain: "Domain".into(),
-            workstation: "WORK".into(),
-        };
+        let creds = Credentials::new(
+            "User".into(),
+            "Password".into(),
+            "Domain".into(),
+            "WORK".into(),
+        );
         let mut state = start_ntlm_bind(creds).unwrap();
 
         // Invalid challenge
