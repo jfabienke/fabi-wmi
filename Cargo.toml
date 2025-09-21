@@ -1,6 +1,6 @@
 [package]
 name = "linux-wmi"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [lib]
@@ -55,7 +55,7 @@ zeroize = { version = "1.7", features = ["derive"] }
 
 # Platform-specific dependencies
 [target.'cfg(unix)'.dependencies]
-# Internal kerbsec library v0.2.0 with new features
+# Internal kerbsec library v0.2.0 with runtime-configurable GSS flags
 kerbsec = { path = "../kerbsec", version = "0.2.0", features = ["dns", "runtime", "trace", "ccache", "channel-bindings", "channel-bindings-rustls", "iov"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
