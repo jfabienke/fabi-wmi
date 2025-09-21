@@ -19,6 +19,10 @@ mod rpc;
 mod transport; // Used internally by dcom and lib
 mod wmi; // Re-exported types below
 
+// Test support infrastructure
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+
 // Kerberos modules
 #[cfg(feature = "kerberos")]
 mod kerberos_adapter; // Adapter to new kerbsec
@@ -150,7 +154,14 @@ impl InnerSession {
         // Use stub codec in test mode with stub transport, otherwise use real codec
         let codec: Arc<dyn ndr::NdrCodec + Send + Sync> = if use_stub {
             debug!("Using StubNdrCodec for test mode");
-            Arc::new(ndr::StubNdrCodec)
+            #[cfg(any(test, feature = "test-support"))]
+            {
+                Arc::new(test_support::StubNdrCodec)
+            }
+            #[cfg(not(any(test, feature = "test-support")))]
+            {
+                panic!("Test support not enabled but LINUX_WMI_USE_STUB=1")
+            }
         } else {
             debug!("Using RealNdrCodec for NDR marshaling");
             Arc::new(ndr::RealNdrCodec::new())
@@ -176,7 +187,14 @@ impl InnerSession {
         };
 
         let transport: Arc<Mutex<Box<dyn transport::RpcTransport + Send>>> = if use_stub {
-            Arc::new(Mutex::new(Box::new(transport::StubTransport)))
+            #[cfg(any(test, feature = "test-support"))]
+            {
+                Arc::new(Mutex::new(Box::new(test_support::StubTransport)))
+            }
+            #[cfg(not(any(test, feature = "test-support")))]
+            {
+                panic!("Test support not enabled but LINUX_WMI_USE_STUB=1")
+            }
         } else {
             match transport::RealRpcTransport::connect(config) {
                 Ok(real_transport) => Arc::new(Mutex::new(

@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::ndr::{NdrCodec, StubNdrCodec};
-use crate::transport::{RpcTransport, StubTransport};
+use crate::ndr::NdrCodec;
+use crate::transport::RpcTransport;
 
 #[derive(Error, Debug)]
 pub enum WmiError {
@@ -35,12 +35,20 @@ pub struct IWbemServices {
 
 impl IWbemLocator {
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new(host: &str) -> Self {
+        use crate::test_support::{StubNdrCodec, StubTransport};
         Self {
             host: host.to_string(),
             codec: Arc::new(StubNdrCodec),
             transport: Arc::new(Mutex::new(Box::new(StubTransport))),
         }
+    }
+
+    #[doc(hidden)]
+    #[cfg(not(any(test, feature = "test-support")))]
+    pub fn new(_host: &str) -> Self {
+        panic!("IWbemLocator::new() requires test-support feature")
     }
 
     pub fn with_components(

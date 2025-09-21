@@ -5,7 +5,7 @@ pub mod types;
 mod golden_tests;
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use serde_json::{json, Value};
+use serde_json::Value;
 use thiserror::Error;
 
 pub use codec::RealNdrCodec;
@@ -54,9 +54,6 @@ pub trait NdrCodec: Send + Sync {
         -> Result<Value, NdrError>;
 }
 
-/// Stub codec that mirrors the current hard-coded behaviour.
-#[derive(Default)]
-pub struct StubNdrCodec;
 
 #[cfg(feature = "async")]
 #[derive(Clone)]
@@ -103,6 +100,7 @@ impl AsyncNdrCodec {
     }
 }
 
+#[allow(dead_code)] // Used by test_support module
 pub(crate) fn write_bstr(buf: &mut Vec<u8>, value: &str) {
     let utf16: Vec<u16> = value.encode_utf16().collect();
     buf.write_u32::<LittleEndian>(utf16.len() as u32)
@@ -126,105 +124,16 @@ pub(crate) fn read_bstr(cursor: &mut std::io::Cursor<&[u8]>) -> Option<String> {
     String::from_utf16(&data).ok()
 }
 
-pub(crate) fn stub_results_for_query(query: &str) -> Option<Vec<Value>> {
-    let upper = query.to_ascii_uppercase();
-    let class = upper
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .windows(2)
-        .find_map(|pair| {
-            if pair[0] == "FROM" {
-                Some(pair[1])
-            } else {
-                None
-            }
-        })?;
 
-    match class {
-        "WIN32_PROCESS" => Some(vec![json!({
-            "ProcessId": 1234,
-            "Name": "explorer.exe",
-            "ThreadCount": 42
-        })]),
-        "WIN32_PROCESSOR" => Some(vec![json!({
-            "Name": "stub CPU",
-            "Manufacturer": "StubCo",
-            "LoadPercentage": 50,
-            "NumberOfCores": 4,
-            "NumberOfLogicalProcessors": 8
-        })]),
-        "WIN32_LOGICALDISK" => Some(vec![json!({
-            "DeviceID": "C:",
-            "FreeSpace": 64_000_000_u64,
-            "Size": 128_000_000_u64
-        })]),
-        "WIN32_COMPUTERSYSTEM" => Some(vec![json!({
-            "Name": "STUB-PC",
-            "Manufacturer": "StubVendor",
-            "Model": "StubModel",
-            "Domain": "WORKGROUP",
-            "NumberOfProcessors": 1,
-            "TotalPhysicalMemory": 8_589_934_592u64
-        })]),
-        _ => None,
-    }
-}
-
-impl NdrCodec for StubNdrCodec {
-    fn encode_exec_query(&self, language: &str, query: &str) -> Result<Vec<u8>, NdrError> {
-        let mut buf = Vec::new();
-        write_bstr(&mut buf, language);
-        write_bstr(&mut buf, query);
-        Ok(buf)
-    }
-
-    fn decode_exec_query(
-        &self,
-        _namespace: &str,
-        query: &str,
-        _data: &[u8],
-    ) -> Result<Vec<Value>, NdrError> {
-        if !_data.is_empty() {
-            if let Ok(values) = serde_json::from_slice::<Vec<Value>>(_data) {
-                return Ok(values);
-            }
-        }
-
-        stub_results_for_query(query).ok_or(NdrError::Decode)
-    }
-
-    fn encode_exec_method(
-        &self,
-        _class: &str,
-        _method: &str,
-        _params: &Value,
-    ) -> Result<Vec<u8>, NdrError> {
-        Ok(Vec::new())
-    }
-
-    fn decode_exec_method(
-        &self,
-        _class: &str,
-        method: &str,
-        _data: &[u8],
-    ) -> Result<Value, NdrError> {
-        match method {
-            "GetOwner" => Ok(json!({
-                "Domain": "CONTOSO",
-                "User": "SYSTEM",
-                "ReturnValue": 0
-            })),
-            _ => Err(NdrError::Decode),
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    #[cfg(any(test, feature = "test-support"))]
     fn encode_exec_query_emits_bstrs() {
+        use crate::test_support::StubNdrCodec;
         let codec = StubNdrCodec;
         let payload = codec
             .encode_exec_query("WQL", "SELECT * FROM Win32_ComputerSystem")
@@ -237,7 +146,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(test, feature = "test-support"))]
     fn stub_results_for_known_query_matches_decode() {
+        use crate::test_support::StubNdrCodec;
         let codec = StubNdrCodec;
         let query = "SELECT * FROM Win32_ComputerSystem";
         let payload = codec.encode_exec_query("WQL", query).expect("encode");

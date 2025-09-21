@@ -1,8 +1,6 @@
 // Transport tests - most transport types are not exported publicly
 // We test transport functionality through the session API
 
-use linux_wmi::auth_exports::Credentials;
-
 #[test]
 fn session_creation_with_invalid_host_fails() {
     // Session creation should fail with invalid host

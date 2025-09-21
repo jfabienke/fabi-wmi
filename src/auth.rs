@@ -443,7 +443,7 @@ fn build_type3_message_with_mic(
             type1.len(),
             type2_message.len(),
             message.len(),
-            hex::encode(&mic),
+            hex::encode(mic),
             mic_offset
         );
 

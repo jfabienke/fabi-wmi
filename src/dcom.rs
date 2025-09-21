@@ -666,8 +666,7 @@ fn activate_wmi_dcom_with_auth(
     Ok((port, oxid))
 }
 
-const AUTH_TYPE_NTLM: u8 = 0x0A;
-const AUTH_TYPE_SPNEGO: u8 = 0x09;
+use crate::transport::{AUTH_TYPE_NTLM, AUTH_TYPE_SPNEGO};
 const AUTH_LEVEL_PRIVACY: u8 = 0x06; // Packet Privacy for encrypted communication
 const MAX_XMIT_RECV: u16 = 0x10B8;
 
@@ -1268,10 +1267,10 @@ mod tests {
 
         // Find auth header in PDU
         // Auth trailer comes after the main body, before the auth blob
-        // Look for AUTH_TYPE_NTLM (0x0A) followed by AUTH_LEVEL_PRIVACY (0x06)
+        // Now using SPNEGO (0x09) instead of raw NTLM (0x0A)
         let mut found_auth_level = false;
         for i in 0..pdu.len() - 1 {
-            if pdu[i] == AUTH_TYPE_NTLM && i + 1 < pdu.len() {
+            if pdu[i] == AUTH_TYPE_SPNEGO && i + 1 < pdu.len() {
                 assert_eq!(
                     pdu[i + 1],
                     AUTH_LEVEL_PRIVACY,
@@ -1299,9 +1298,10 @@ mod tests {
         );
 
         // Find auth header in PDU
+        // Now using SPNEGO (0x09) instead of raw NTLM (0x0A)
         let mut found_auth_level = false;
         for i in 0..pdu.len() - 1 {
-            if pdu[i] == AUTH_TYPE_NTLM && i + 1 < pdu.len() {
+            if pdu[i] == AUTH_TYPE_SPNEGO && i + 1 < pdu.len() {
                 assert_eq!(
                     pdu[i + 1],
                     AUTH_LEVEL_PRIVACY,

@@ -1,4 +1,4 @@
-use linux_wmi::{activate_wmi_dcom, resolve_oxid, DcomError, auth_exports::Credentials};
+use linux_wmi::{activate_wmi_dcom, resolve_oxid, auth_exports::Credentials};
 
 #[test]
 fn activate_wmi_dcom_with_invalid_host_fails() {

@@ -24,6 +24,11 @@ name = "test_kerberos"
 path = "examples/test_kerberos.rs"
 required-features = ["kerberos"]
 
+[[example]]
+name = "dce_rpc_kerberos"
+path = "examples/dce_rpc_kerberos.rs"
+required-features = ["kerberos"]
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
