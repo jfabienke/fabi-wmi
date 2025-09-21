@@ -302,12 +302,12 @@ let creds = Credentials::new(username, password, domain, workstation);
 #### ⚡ Credential Caching
 Multiple cache backends for different security/performance needs:
 
-| Backend | Security | Speed | Persistence | Use Case |
-|---------|----------|-------|-------------|----------|
-| FILE | Standard | Fast | Yes | Default, single-user |
-| Memory | High | Fastest | No | Short scripts |
-| KCM | High | Good | Yes | Multi-user systems |
-| Keyring | Highest | Good | Yes | High-security apps |
+| Backend | Security | Speed   | Persistence | Use Case             |
+|---------|----------|---------|-------------|----------------------|
+| FILE    | Standard | Fast    | Yes         | Default, single-user |
+| Memory  | High     | Fastest | No          | Short scripts        |
+| KCM     | High     | Good    | Yes         | Multi-user systems   |
+| Keyring | Highest  | Good    | Yes         | High-security apps   |
 
 #### 🛡️ TLS Channel Bindings
 Prevent relay attacks when using TLS:
