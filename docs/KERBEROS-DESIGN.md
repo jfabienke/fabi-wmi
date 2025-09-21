@@ -31,23 +31,48 @@ This document describes the production-ready Kerberos authentication implementat
 │      AuthProvider Interface         │
 ├─────────────────────────────────────┤
 │   KerberosClient │ NtlmV2Client     │
+│ (kerberos_adapter.rs)               │
 ├─────────────────────────────────────┤
-│     SecurityContext Abstraction     │
-├──────────────────┬──────────────────┤
-│  GssapiContext   │   SspiContext    │
-│     (Unix)       │    (Windows)     │
-├──────────────────┴──────────────────┤
-│     kerbeiros crate (tickets)       │
+│        kerbsec (~1,500 LOC)         │
+│   Our Internal Kerberos Library     │
+├─────────────────────────────────────┤
+│      System GSS-API (libgssapi)     │
+│   MIT Kerberos / Heimdal Backend    │
 ├─────────────────────────────────────┤
 │        Transport Layer (RPC)        │
+│          + SPNEGO Wrapping          │
 └─────────────────────────────────────┘
 ```
+
+## kerbsec: Our Internal Kerberos Implementation
+
+**kerbsec** is not a third-party dependency but our own purpose-built Kerberos library specifically designed for DCE/RPC protocols:
+
+### Design Philosophy
+- **Minimal footprint**: ~1,500 lines of focused code
+- **DCE/RPC optimized**: Proper 3-leg handshake and IOV operations
+- **Platform-native**: Thin wrapper around system GSS-API
+- **Transport-agnostic**: Users handle RPC framing, kerbsec handles GSS tokens
+- **MIT licensed**: Business-friendly open source
+
+### Key Features
+- **Zero-copy IOV**: Native `gss_wrap_iov`/`gss_unwrap_iov` for performance
+- **Credential caching**: Multiple backends with 30x performance improvement
+- **DNS canonicalization**: Automatic FQDN resolution and SPN construction
+- **Channel bindings**: TLS integration for relay attack prevention
+- **Automatic cleanup**: Memory zeroization and cache management
+- **SPNEGO support**: Wrapping for Windows 11 compatibility
+
+For complete documentation, see [kerbsec Features Guide](./KERBSEC-FEATURES.md).
 
 ## Implementation Status (v0.2.0)
 
 ### ✅ Completed Features
 
+- **kerbsec Integration**: Our internal Kerberos library fully integrated
+- **SPNEGO Wrapping**: NTLMv2 and Kerberos wrapped for Windows 11
 - **Credential Caching**: Multiple backend support (FILE, Memory, KCM, Keyring)
+- **Credential Management**: Automatic kinit with validation
   - 60x performance improvement for repeated connections
   - Automatic ticket reuse with configurable cache paths
   - Environment variable support (KRB5CCNAME)

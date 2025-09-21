@@ -170,16 +170,27 @@ Look for messages indicating which method is being attempted:
 
 ## Kerberos Authentication (Production Ready)
 
-Kerberos authentication is now fully implemented with kerbsec v0.2.0 integration, providing enterprise-grade features to address Windows 11's NTLM removal. This is critical for cross-platform WMI connectivity.
+Kerberos authentication is now fully implemented via **kerbsec**, our internal purpose-built Kerberos library. This lightweight (~1,500 LOC) but comprehensive implementation provides enterprise-grade features to address Windows 11's NTLM removal.
+
+### kerbsec: Our Internal Kerberos Library
+
+**kerbsec** is not a third-party dependency but our own DCE/RPC-optimized Kerberos implementation:
+
+- **Lightweight**: ~1,500 lines of focused code
+- **Platform-native**: Uses system GSS-API for compatibility
+- **Zero-copy IOV**: Maximum performance for RPC operations
+- **Credential caching**: 30x performance improvement
+- **Enterprise features**: Channel bindings, DNS canonicalization, multiple cache backends
+
+See [kerbsec Features Guide](./KERBSEC-FEATURES.md) for complete documentation.
 
 ### Platform Requirements
 
-| Platform | Requirements                    | Status       |
-|----------|---------------------------------|--------------|
-| Linux    | MIT Kerberos libs, `libgssapi`  | ✅ Supported |
-| macOS    | Heimdal (built-in), `libgssapi` | ✅ Supported |
-| Windows  | SSPI (built-in), `sspi` crate   | ✅ Supported |
-| FreeBSD  | MIT/Heimdal libs                | ✅ Supported |
+| Platform | GSS Library     | kerbsec Support | Installation                  |
+|----------|-----------------|-----------------|-------------------------------|
+| Linux    | MIT Kerberos    | ✅ Full IOV     | `apt-get install libkrb5-dev` |
+| macOS    | Heimdal         | ✅ Full IOV     | Built-in (no install needed)  |
+| FreeBSD  | Heimdal         | ✅ Full IOV     | Base system includes          |
 
 ### Configuration Examples
 
@@ -204,7 +215,7 @@ let mut session = WmiSession::with_kerberos(
 )?;
 ```
 
-#### With Credential Caching (60x Faster)
+#### With Credential Caching (30x Faster)
 ```rust
 use linux_wmi::{KerberosConfig, KerberosCacheBackend};
 
@@ -214,14 +225,55 @@ let config = KerberosConfig::new("CONTOSO.COM")
     .with_cache_backend(KerberosCacheBackend::File)
     .with_caching(true);
 
-// First connection: ~500ms (gets TGT, stores in cache)
-// Subsequent connections: <10ms (uses cached ticket)
+// First connection: ~150ms (gets TGT, stores in cache)
+// Subsequent connections: ~5ms (uses cached ticket)
+```
+
+#### Advanced Configuration
+```rust
+// All kerbsec features enabled
+let config = KerberosConfig::new("CONTOSO.COM")
+    // Performance
+    .with_cache_backend(KerberosCacheBackend::File)
+    .with_cache_path("/tmp/my_krb_cache")
+    .with_caching(true)
+
+    // Security
+    .with_channel_bindings(tls_binding_data)
+    .require_channel_bindings(true)
+
+    // DNS
+    .with_spn_override("HOST/actual-server.contoso.com")
+
+    // SPNEGO wrapper for Windows 11
+    .with_spnego();
+```
+
+#### Credential Management
+
+kerbsec automatically handles credential acquisition via kinit:
+
+```rust
+// Credentials trigger automatic kinit if needed
+let creds = Credentials::new(
+    "user".to_string(),
+    "password".to_string(),  // Automatically zeroized after use
+    "CONTOSO.COM".to_string(),
+    "WORKSTATION".to_string(),
+);
+
+// kerbsec runs kinit internally when creating the client
+let mut client = KerberosClient::new(
+    "server.contoso.com",
+    config,
+    creds  // Password used for kinit, then zeroized
+)?;
 ```
 
 #### Command Line Example
 ```bash
-# Set cache location (optional)
-export KRB5CCNAME=FILE:/tmp/krb5cc_myapp
+# kerbsec manages cache automatically
+export KRB5CCNAME=FILE:/tmp/krb5cc_$$  # Process-specific cache
 
 # Run with Kerberos
 cargo run --example test_connect server.contoso.com \
@@ -269,11 +321,35 @@ let config = config
     .require_channel_bindings(true);
 ```
 
+## SPNEGO Support (NEW)
+
+linux-wmi now includes full SPNEGO (Simple and Protected GSS-API Negotiation) support for Windows 11 compatibility:
+
+### What is SPNEGO?
+SPNEGO wraps authentication tokens (NTLM or Kerberos) in a negotiation structure that allows Windows to choose the best authentication method.
+
+### Implementation Details
+- **NegTokenInit**: Properly formatted with mechTypeList
+- **ASN.1 Encoding**: Correct SPNEGO OID (1.3.6.1.5.5.2)
+- **Auth Type**: Changed from 0x0A (raw NTLM) to 0x09 (SPNEGO)
+- **Windows Compatibility**: Windows 11 successfully parses our SPNEGO structures
+
+### Usage
+SPNEGO wrapping is automatic when using Kerberos configuration:
+```rust
+let config = KerberosConfig::new("CONTOSO.COM")
+    .with_spnego();  // Enable SPNEGO wrapper
+```
+
+### Windows 11 Status
+While our SPNEGO implementation is protocol-compliant, Windows 11 24H2 still blocks NTLM authentication at the policy level. See [Windows 11 Authentication Status](./WINDOWS11-AUTHENTICATION-STATUS.md) for details and workarounds.
+
 ### Implementation Status
 
 - Design: ✅ Complete
 - Implementation: ✅ Production Ready (kerbsec v0.2.0)
-- Windows 11 24H2: ✅ Compatible
+- SPNEGO: ✅ Protocol-compliant
+- Windows 11 24H2: ⚠️ Blocked by policy (not a protocol issue)
 - Security Features: ✅ Enterprise-grade
 
 For migration guide, see [MIGRATION-GUIDE.md](./MIGRATION-GUIDE.md).

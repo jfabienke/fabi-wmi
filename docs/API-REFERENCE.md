@@ -154,12 +154,12 @@ pub enum KerberosCacheBackend {
 
 ### Backend Characteristics
 
-| Backend | Persistent | Security | Performance | Use Case |
-|---------|------------|----------|-------------|----------|
-| `File` | ✅ Yes | Standard | Fast | Default, single-user apps |
-| `Memory` | ❌ No | High | Fastest | Short-lived processes |
-| `Kcm` | ✅ Yes | High | Good | Multi-user systems |
-| `Keyring` | ✅ Yes | Highest | Good | Security-critical apps |
+| Backend   | Persistent | Security | Performance | Use Case                  |
+|-----------|------------|----------|-------------|---------------------------|
+| `File`    | ✅ Yes     | Standard | Fast        | Default, single-user apps |
+| `Memory`  | ❌ No       | High     | Fastest     | Short-lived processes     |
+| `Kcm`     | ✅ Yes     | High     | Good        | Multi-user systems        |
+| `Keyring` | ✅ Yes     | Highest  | Good        | Security-critical apps    |
 
 **Example:**
 ```rust
