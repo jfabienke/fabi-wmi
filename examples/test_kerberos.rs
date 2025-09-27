@@ -9,10 +9,7 @@
 //!     server.contoso.com --user admin --pass <password> \
 //!     --domain CONTOSO.COM --query "SELECT Name FROM Win32_ComputerSystem"
 
-use linux_wmi::{
-    auth_exports::Credentials,
-    KerberosClient, KerberosConfig, KerberosCacheBackend,
-};
+use linux_wmi::{auth_exports::Credentials, KerberosCacheBackend, KerberosClient, KerberosConfig};
 use std::env;
 use std::process;
 use tracing::{error, info};
@@ -44,7 +41,7 @@ fn main() {
     let mut domain = "";
     let mut query = "";
     let mut enable_delegation = false;
-    let mut enable_dce_style = true;  // Default: enabled for DCE/RPC
+    let mut enable_dce_style = true; // Default: enabled for DCE/RPC
 
     let mut i = 2;
     while i < args.len() {
@@ -93,8 +90,22 @@ fn main() {
 
     // Show configuration
     info!("Configuration:");
-    info!("  DCE-style: {}", if enable_dce_style { "enabled" } else { "disabled" });
-    info!("  Delegation: {}", if enable_delegation { "enabled (DANGEROUS!)" } else { "disabled (safe)" });
+    info!(
+        "  DCE-style: {}",
+        if enable_dce_style {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    info!(
+        "  Delegation: {}",
+        if enable_delegation {
+            "enabled (DANGEROUS!)"
+        } else {
+            "disabled (safe)"
+        }
+    );
 
     // Test 1: Create Kerberos client with credential caching and SPNEGO
     info!("Creating Kerberos client with credential caching and SPNEGO...");
@@ -102,9 +113,9 @@ fn main() {
         .with_spn(format!("HOST/{}", host))
         .with_cache_backend(KerberosCacheBackend::File)
         .with_caching(true)
-        .with_spnego()  // Enable SPNEGO negotiation
-        .with_dce_style(enable_dce_style)  // Configure DCE-style flag
-        .with_delegation(enable_delegation);  // Configure delegation
+        .with_spnego() // Enable SPNEGO negotiation
+        .with_dce_style(enable_dce_style) // Configure DCE-style flag
+        .with_delegation(enable_delegation); // Configure delegation
 
     if enable_delegation {
         info!("⚠️  WARNING: Credential delegation is enabled!");
@@ -196,7 +207,10 @@ fn main() {
             info!("Using explicit port {} from LINUX_WMI_PORT", port);
 
             // Would normally continue with WMI connection here
-            info!("Would connect to WMI on port {} and execute query: {}", port, query);
+            info!(
+                "Would connect to WMI on port {} and execute query: {}",
+                port, query
+            );
         }
     }
 
@@ -218,7 +232,7 @@ fn main() {
     let config_dce = KerberosConfig::new(domain)
         .with_spn(format!("HOST/{}", host))
         .with_cache_backend(KerberosCacheBackend::File)
-        .with_dce_style(false);  // Disable DCE-style for testing
+        .with_dce_style(false); // Disable DCE-style for testing
 
     match KerberosClient::new(host, config_dce, creds.clone()) {
         Ok(_) => info!("✓ Non-DCE-style configuration working"),
@@ -231,8 +245,8 @@ fn main() {
         let config_deleg = KerberosConfig::new(domain)
             .with_spn(format!("HOST/{}", host))
             .with_cache_backend(KerberosCacheBackend::File)
-            .with_delegation(false)  // Explicitly disabled
-            .with_mutual_auth(true);  // Require mutual auth
+            .with_delegation(false) // Explicitly disabled
+            .with_mutual_auth(true); // Require mutual auth
 
         match KerberosClient::new(host, config_deleg, creds.clone()) {
             Ok(client) => {

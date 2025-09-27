@@ -2,7 +2,7 @@
 //!
 //! Provides mock WMI responses for testing without a real Windows host.
 
-use crate::ndr::{NdrCodec, NdrError, write_bstr};
+use crate::ndr::{write_bstr, NdrCodec, NdrError};
 use serde_json::{json, Value};
 
 /// TEST INFRASTRUCTURE - DO NOT DELETE
@@ -47,14 +47,15 @@ impl NdrCodec for StubNdrCodec {
         _data: &[u8],
     ) -> Result<Value, NdrError> {
         // Return appropriate responses based on method
-        match (class.to_uppercase().as_str(), method.to_uppercase().as_str()) {
-            ("WIN32_PROCESS", "GETOWNER") => {
-                Ok(json!({
-                    "User": "SYSTEM",
-                    "Domain": "NT AUTHORITY",
-                    "ReturnValue": 0
-                }))
-            }
+        match (
+            class.to_uppercase().as_str(),
+            method.to_uppercase().as_str(),
+        ) {
+            ("WIN32_PROCESS", "GETOWNER") => Ok(json!({
+                "User": "SYSTEM",
+                "Domain": "NT AUTHORITY",
+                "ReturnValue": 0
+            })),
             ("WIN32_PROCESS", "UNKNOWN") => {
                 // Return error for unknown methods
                 Err(NdrError::Decode)

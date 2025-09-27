@@ -5,8 +5,7 @@
 //!
 //! THIS IS A DEMO ONLY - Full integration pending kerbsec completion
 
-use std::io::{Read, Write};
-use std::net::TcpStream;
+// Imports removed - not used in this demo
 
 // Mock structures to demonstrate integration pattern
 // In real implementation, these would come from linux-wmi and kerbsec
@@ -33,14 +32,18 @@ mod transport_mock {
         body.write_u8(0).unwrap();
 
         // Abstract syntax: IRemoteSCMActivator
-        body.extend_from_slice(&[0xa0, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                                 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46]);
+        body.extend_from_slice(&[
+            0xa0, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x46,
+        ]);
         body.write_u16::<LittleEndian>(0).unwrap();
         body.write_u16::<LittleEndian>(0).unwrap();
 
         // Transfer syntax: NDR
-        body.extend_from_slice(&[0x04, 0x5d, 0x88, 0x8a, 0xeb, 0x1c, 0xc9, 0x11,
-                                 0x9f, 0xe8, 0x08, 0x00, 0x2b, 0x10, 0x48, 0x60]);
+        body.extend_from_slice(&[
+            0x04, 0x5d, 0x88, 0x8a, 0xeb, 0x1c, 0xc9, 0x11, 0x9f, 0xe8, 0x08, 0x00, 0x2b, 0x10,
+            0x48, 0x60,
+        ]);
         body.write_u32::<LittleEndian>(2).unwrap();
 
         // Pad to 4-byte alignment
@@ -87,12 +90,16 @@ mod transport_mock {
         body.write_u8(0).unwrap();
 
         // Same abstract and transfer syntax
-        body.extend_from_slice(&[0xa0, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                                 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46]);
+        body.extend_from_slice(&[
+            0xa0, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x46,
+        ]);
         body.write_u16::<LittleEndian>(0).unwrap();
         body.write_u16::<LittleEndian>(0).unwrap();
-        body.extend_from_slice(&[0x04, 0x5d, 0x88, 0x8a, 0xeb, 0x1c, 0xc9, 0x11,
-                                 0x9f, 0xe8, 0x08, 0x00, 0x2b, 0x10, 0x48, 0x60]);
+        body.extend_from_slice(&[
+            0x04, 0x5d, 0x88, 0x8a, 0xeb, 0x1c, 0xc9, 0x11, 0x9f, 0xe8, 0x08, 0x00, 0x2b, 0x10,
+            0x48, 0x60,
+        ]);
         body.write_u32::<LittleEndian>(2).unwrap();
 
         let pad = (4 - (body.len() % 4)) % 4;
@@ -214,7 +221,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Step 5: Process AP-REP and get third leg
     println!("5. Processing AP-REP from server...");
     let third_leg = kerberos.accept_ap_rep(&mock_ap_rep).unwrap();
-    println!("   Third leg token: {} bytes (must send even if empty)", third_leg.len());
+    println!(
+        "   Third leg token: {} bytes (must send even if empty)",
+        third_leg.len()
+    );
 
     // Step 6: Send alter_context with third leg
     println!("6. Building alter_context with third leg...");

@@ -18,6 +18,8 @@ pub enum WmiError {
     Response,
     #[error("Unsupported method {0}.{1}")]
     Method(String, String),
+    #[error("Unsupported operation: {0}")]
+    Unsupported(String),
 }
 
 #[derive(Clone)]
@@ -157,22 +159,9 @@ impl IWbemServices {
         method: &str,
         params: &Value,
     ) -> Result<Value, WmiError> {
-        const EXEC_METHOD_OPNUM: u16 = 20;
-        let class_name = class.to_string();
-        let method_name = method.to_string();
-        let request = self
-            .codec
-            .encode_exec_method(class, method, params)
-            .map_err(|_| WmiError::Marshal)?;
-
-        let mut transport = self.transport.lock().map_err(|_| WmiError::Response)?;
-        let response = transport
-            .invoke(EXEC_METHOD_OPNUM, &request)
-            .map_err(|_| WmiError::Response)?;
-
-        self.codec
-            .decode_exec_method(class, method, &response)
-            .map_err(|_| WmiError::Method(class_name, method_name))
+        let message = format!("ExecMethod is not implemented for {class}.{method}");
+        let _ = params; // keep signature consistent for future implementation
+        Err(WmiError::Unsupported(message))
     }
 
     pub fn namespace(&self) -> &str {
@@ -209,13 +198,13 @@ mod tests {
     }
 
     #[test]
-    fn exec_method_returns_error_for_unknown() {
+    fn exec_method_returns_unsupported() {
         let locator = IWbemLocator::new("host");
         let services = locator.connect_server("CimV2", None, None, None).unwrap();
         let err = services
             .exec_method("Win32_Process", "Unknown", &json!({}))
             .unwrap_err();
-        assert!(matches!(err, WmiError::Method(_, _)));
+        assert!(matches!(err, WmiError::Unsupported(_)));
     }
 
     #[test]

@@ -76,12 +76,7 @@ mod tests {
     #[test]
     fn start_ntlm_bind_with_invalid_credentials() {
         // Test start_ntlm_bind with empty credentials
-        let invalid_creds = Credentials::new(
-            "".into(),
-            "".into(),
-            "".into(),
-            "".into(),
-        );
+        let invalid_creds = Credentials::new("".into(), "".into(), "".into(), "".into());
 
         let result = start_ntlm_bind(invalid_creds);
         assert!(result.is_err());

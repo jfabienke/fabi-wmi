@@ -1339,6 +1339,7 @@ dependencies = [
  "mockall",
  "nom",
  "proptest",
+ "rand 0.8.5",
  "rc4",
  "serde",
  "serde_json",

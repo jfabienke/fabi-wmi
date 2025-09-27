@@ -37,11 +37,11 @@ use tracing::{debug, info, warn};
 
 #[cfg(feature = "kerberos")]
 use kerbsec::{
+    // Channel bindings are available when kerbsec has the feature
+    channel_bindings::{ChannelBindingType, ChannelBindings},
     AuthLevel as KerbsecAuthLevel,
     Context as KerbsecContext,
     KerberosConfig as KerbsecConfig,
-    // Channel bindings are available when kerbsec has the feature
-    channel_bindings::{ChannelBindings, ChannelBindingType},
 };
 
 /// Kerberos error types
@@ -128,8 +128,8 @@ impl KerberosConfig {
             enable_cache: true,
             require_channel_bindings: false,
             channel_binding_data: None,
-            enable_dce_style: true,  // Default: enabled for DCE/RPC
-            enable_delegation: false, // Default: disabled for security
+            enable_dce_style: true,    // Default: enabled for DCE/RPC
+            enable_delegation: false,  // Default: disabled for security
             require_mutual_auth: true, // Default: enabled for security
         }
     }
@@ -251,22 +251,22 @@ impl KerberosClient {
                 let cache_string = format!("FILE:{}", path.display());
                 debug!("Using FILE cache at: {}", cache_string);
                 cache_string
-            },
+            }
             KerberosCacheBackend::Memory => {
                 let cache_string = format!("MEMORY:{}", username);
                 debug!("Using Memory cache (non-persistent): {}", cache_string);
                 cache_string
-            },
+            }
             KerberosCacheBackend::Kcm => {
                 let cache_string = "KCM:".to_string();
                 debug!("Using KCM cache backend");
                 cache_string
-            },
+            }
             KerberosCacheBackend::Keyring => {
                 let cache_string = "KEYRING:persistent".to_string();
                 debug!("Using Keyring cache backend");
                 cache_string
-            },
+            }
         }
     }
 
@@ -278,14 +278,20 @@ impl KerberosClient {
         server_cert_hash: Option<&[u8]>,
     ) -> Option<ChannelBindings> {
         if let Some(unique) = tls_unique {
-            debug!("Creating TLS channel bindings with tls-unique: {} bytes", unique.len());
+            debug!(
+                "Creating TLS channel bindings with tls-unique: {} bytes",
+                unique.len()
+            );
             // Use the new_tls constructor to properly create channel bindings
             Some(ChannelBindings::new_tls(
                 ChannelBindingType::TlsUnique,
                 unique.to_vec(),
             ))
         } else if let Some(cert_hash) = server_cert_hash {
-            debug!("Creating TLS channel bindings with server cert hash: {} bytes", cert_hash.len());
+            debug!(
+                "Creating TLS channel bindings with server cert hash: {} bytes",
+                cert_hash.len()
+            );
             // Using server certificate hash for channel binding
             Some(ChannelBindings::new_tls(
                 ChannelBindingType::TlsServerEndPoint,
@@ -319,11 +325,11 @@ impl KerberosClient {
                 AuthLevel::PacketIntegrity => {
                     debug!("Auth level: Packet Integrity");
                     KerbsecAuthLevel::Integrity
-                },
+                }
                 AuthLevel::PacketPrivacy => {
                     debug!("Auth level: Packet Privacy");
                     KerbsecAuthLevel::Privacy
-                },
+                }
                 _ => {
                     debug!("Auth level: Default (Privacy)");
                     KerbsecAuthLevel::Privacy
@@ -353,7 +359,7 @@ impl KerberosClient {
                 builder = builder.spn_override(Some(spn.clone()));
             } else if target_host.parse::<std::net::IpAddr>().is_ok() {
                 return Err(KerberosError::SpnResolution(
-                    "IP address requires SPN override".into()
+                    "IP address requires SPN override".into(),
                 ));
             } else {
                 // SPN will be generated as host/<target_host>
@@ -403,7 +409,8 @@ impl KerberosClient {
             }
 
             // Build config (synchronous for now, DNS canonicalization handled internally)
-            let kerbsec_config = builder.build()
+            let kerbsec_config = builder
+                .build()
                 .map_err(|e| KerberosError::AuthFailure(e.to_string()))?;
 
             // Create kerbsec context
@@ -425,7 +432,9 @@ impl KerberosClient {
 
         #[cfg(not(feature = "kerberos"))]
         {
-            Err(KerberosError::AuthFailure("Kerberos feature not enabled".into()))
+            Err(KerberosError::AuthFailure(
+                "Kerberos feature not enabled".into(),
+            ))
         }
     }
 
@@ -436,8 +445,9 @@ impl KerberosClient {
             if let Some(ref mut ctx) = self.context {
                 debug!("Generating AP-REQ token for target: {}", self.target_host);
                 self.auth_state = AuthState::FirstLeg;
-                let token = ctx.initial_token()
-                    .map_err(|e| KerberosError::AuthFailure(format!("AP-REQ generation failed: {e}")))?;
+                let token = ctx.initial_token().map_err(|e| {
+                    KerberosError::AuthFailure(format!("AP-REQ generation failed: {e}"))
+                })?;
                 debug!("Generated AP-REQ token: {} bytes", token.len());
                 Ok(token)
             } else {
@@ -447,7 +457,9 @@ impl KerberosClient {
 
         #[cfg(not(feature = "kerberos"))]
         {
-            Err(KerberosError::AuthFailure("Kerberos feature not enabled".into()))
+            Err(KerberosError::AuthFailure(
+                "Kerberos feature not enabled".into(),
+            ))
         }
     }
 
@@ -459,8 +471,9 @@ impl KerberosClient {
                 debug!("Processing AP-REP token: {} bytes", ap_rep.len());
                 self.auth_state = AuthState::SecondLeg;
 
-                let third_leg = ctx.accept_ap_rep(ap_rep)
-                    .map_err(|e| KerberosError::AuthFailure(format!("AP-REP processing failed: {e}")))?;
+                let third_leg = ctx.accept_ap_rep(ap_rep).map_err(|e| {
+                    KerberosError::AuthFailure(format!("AP-REP processing failed: {e}"))
+                })?;
 
                 if third_leg.is_some() {
                     self.auth_state = AuthState::ThirdLeg;
@@ -481,7 +494,9 @@ impl KerberosClient {
 
         #[cfg(not(feature = "kerberos"))]
         {
-            Err(KerberosError::AuthFailure("Kerberos feature not enabled".into()))
+            Err(KerberosError::AuthFailure(
+                "Kerberos feature not enabled".into(),
+            ))
         }
     }
 
@@ -494,7 +509,8 @@ impl KerberosClient {
                     return Err(KerberosError::InvalidState);
                 }
 
-                let iov = ctx.wrap_iov(pdu)
+                let iov = ctx
+                    .wrap_iov(pdu)
                     .map_err(|e| KerberosError::AuthFailure(format!("Wrap failed: {e}")))?;
 
                 Ok((iov.header.to_vec(), iov.trailer.to_vec()))
@@ -505,7 +521,9 @@ impl KerberosClient {
 
         #[cfg(not(feature = "kerberos"))]
         {
-            Err(KerberosError::AuthFailure("Kerberos feature not enabled".into()))
+            Err(KerberosError::AuthFailure(
+                "Kerberos feature not enabled".into(),
+            ))
         }
     }
 
@@ -527,14 +545,19 @@ impl KerberosClient {
 
         #[cfg(not(feature = "kerberos"))]
         {
-            Err(KerberosError::AuthFailure("Kerberos feature not enabled".into()))
+            Err(KerberosError::AuthFailure(
+                "Kerberos feature not enabled".into(),
+            ))
         }
     }
 
     /// Set channel bindings on the context
     /// Must be called before authentication starts
     #[cfg(feature = "kerberos")]
-    pub fn set_channel_bindings(&mut self, _bindings: ChannelBindings) -> Result<(), KerberosError> {
+    pub fn set_channel_bindings(
+        &mut self,
+        _bindings: ChannelBindings,
+    ) -> Result<(), KerberosError> {
         if self.auth_state != AuthState::Initial {
             return Err(KerberosError::InvalidState);
         }
@@ -592,10 +615,9 @@ impl KerberosClient {
                 return Err(KerberosError::InvalidState);
             }
 
-            ctx.export_delegated_credentials()
-                .map_err(|e| KerberosError::AuthFailure(
-                    format!("Failed to export delegated credentials: {}", e)
-                ))
+            ctx.export_delegated_credentials().map_err(|e| {
+                KerberosError::AuthFailure(format!("Failed to export delegated credentials: {}", e))
+            })
         } else {
             Err(KerberosError::InvalidState)
         }
@@ -605,8 +627,7 @@ impl KerberosClient {
 impl AuthProvider for KerberosClient {
     fn negotiate(&mut self) -> Result<Vec<u8>, AuthError> {
         // For DCE/RPC, this is the first leg (AP-REQ)
-        self.bind_token()
-            .map_err(|_| AuthError::Creds)
+        self.bind_token().map_err(|_| AuthError::Creds)
     }
 
     fn respond(&mut self, challenge: &[u8]) -> Result<Vec<u8>, AuthError> {

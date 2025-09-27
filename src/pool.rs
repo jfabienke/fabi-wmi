@@ -35,7 +35,11 @@ impl Manager for AsyncTransportManager {
         AsyncRealRpcTransport::connect(self.config.clone()).await
     }
 
-    async fn recycle(&self, conn: &mut Self::Type, _metrics: &deadpool::managed::Metrics) -> RecycleResult<Self::Error> {
+    async fn recycle(
+        &self,
+        conn: &mut Self::Type,
+        _metrics: &deadpool::managed::Metrics,
+    ) -> RecycleResult<Self::Error> {
         conn.check()
             .await
             .map_err(|err| RecycleError::Message(err.to_string().into()))
@@ -131,7 +135,10 @@ where
             .await
             .map_err(|_| PoolAcquireError::Closed)?;
 
-        let connection = self.pool.get().await
+        let connection = self
+            .pool
+            .get()
+            .await
             .map_err(|_| PoolAcquireError::Pool(deadpool::managed::PoolError::Closed))?;
 
         Ok(GenericPooledTransport {
@@ -304,7 +311,11 @@ mod tests {
             Ok(DummyTransport { id })
         }
 
-        async fn recycle(&self, _conn: &mut Self::Type, _metrics: &deadpool::managed::Metrics) -> RecycleResult<Self::Error> {
+        async fn recycle(
+            &self,
+            _conn: &mut Self::Type,
+            _metrics: &deadpool::managed::Metrics,
+        ) -> RecycleResult<Self::Error> {
             Ok(())
         }
     }

@@ -2,7 +2,7 @@ use linux_wmi::{
     wmi_exec_method_json, wmi_exec_query_json, wmi_free_err, wmi_free_json, wmi_namespace_open,
     wmi_session_free, wmi_session_new, WmiSession,
 };
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
 
@@ -102,14 +102,15 @@ fn ffi_method_flow_returns_stub_owner() {
             &mut err_ptr,
         )
     };
-    assert_eq!(rc, 0, "method should succeed");
-    assert!(err_ptr.is_null());
+    // ExecMethod is now unsupported and should return error
+    assert_eq!(rc, -1, "method should return unsupported");
+    assert!(!err_ptr.is_null());
 
-    let json = unsafe { std::slice::from_raw_parts(json_ptr, json_len) };
-    let json_str = std::str::from_utf8(json).unwrap();
-    assert!(json_str.contains("\"User\":\"SYSTEM\""));
+    // Check error message indicates it's unsupported
+    let err_msg = unsafe { CStr::from_ptr(err_ptr).to_string_lossy() };
+    assert!(err_msg.contains("not implemented") || err_msg.contains("not yet implemented"));
 
-    unsafe { wmi_free_json(json_ptr, json_len) };
+    unsafe { wmi_free_err(err_ptr) };
     unsafe { wmi_session_free(session_ptr) };
 }
 
@@ -152,10 +153,11 @@ fn ffi_method_handles_null_params_pointer() {
             &mut err_ptr,
         )
     };
-    assert_eq!(rc, 0);
-    assert!(err_ptr.is_null());
+    // ExecMethod is now unsupported and should return error
+    assert_eq!(rc, -1);
+    assert!(!err_ptr.is_null());
     unsafe {
-        wmi_free_json(json_ptr, json_len);
+        wmi_free_err(err_ptr);
         wmi_session_free(session_ptr);
     }
 }

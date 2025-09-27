@@ -1,7 +1,7 @@
 use crate::auth::{AuthProvider, Credentials, NtlmV2Client};
 #[cfg(feature = "kerberos")]
 use crate::kerberos_adapter::{KerberosClient, KerberosConfig};
-use crate::kerberos_integration::spnego;
+use crate::spnego;
 use byteorder::{LittleEndian, WriteBytesExt};
 
 // RPC authentication type constants
@@ -124,7 +124,15 @@ pub(crate) fn parse_response_pdu(pdu: &[u8]) -> Result<Vec<u8>, TransportError> 
 
     let stub_start = 24;
     let stub_end = if auth_len > 0 {
-        frag_len - auth_len - 8
+        let overhead = auth_len
+            .checked_add(8)
+            .ok_or_else(|| TransportError::Failure("invalid stub data bounds".into()))?;
+        if frag_len < overhead {
+            return Err(TransportError::Failure(
+                "invalid PDU: auth_len exceeds fragment length".into(),
+            ));
+        }
+        frag_len - overhead
     } else {
         frag_len
     };
@@ -511,7 +519,8 @@ impl RealRpcTransport {
         // Determine auth type based on config (handled in KerberosClient now)
 
         // Step 1: Send bind with AP-REQ (first leg)
-        let ap_req = auth.negotiate()
+        let ap_req = auth
+            .negotiate()
             .map_err(|err| TransportError::Failure(err.to_string()))?;
 
         let bind_pdu = Self::build_bind_pdu(1, &ap_req);
@@ -525,7 +534,8 @@ impl RealRpcTransport {
 
         // Step 3: Send alter_context with final token (third leg - DCE style)
         // CRITICAL: Always send third leg even if token is empty
-        let final_token = auth.respond(&ap_rep)
+        let final_token = auth
+            .respond(&ap_rep)
             .map_err(|err| TransportError::Failure(err.to_string()))?;
 
         let alter_pdu = Self::build_alter_context_pdu(2, context_id, &final_token);
@@ -537,7 +547,8 @@ impl RealRpcTransport {
         debug!("Kerberos context established");
 
         // Extract session key from AP-REP subkey (for mutual auth)
-        let session_key = auth.session_key()
+        let session_key = auth
+            .session_key()
             .ok_or_else(|| TransportError::Failure("No session key available".into()))?
             .to_vec();
 
@@ -801,7 +812,10 @@ impl RealRpcTransport {
                 0
             };
             warn!(reason, versions, "bind rejected (bind_nak)");
-            return Err(TransportError::Bind { result: reason, reason: versions as u16 });
+            return Err(TransportError::Bind {
+                result: reason,
+                reason: versions as u16,
+            });
         }
         if ptype != 0x0C {
             return Err(TransportError::Failure(format!(
@@ -1048,7 +1062,10 @@ impl RealRpcTransport {
         socket
             .set_write_timeout(Some(write_timeout))
             .map_err(|err| TransportError::Failure(err.to_string()))?;
-        debug!("Socket timeouts set: read={:?}, write={:?}", read_timeout, write_timeout);
+        debug!(
+            "Socket timeouts set: read={:?}, write={:?}",
+            read_timeout, write_timeout
+        );
         Ok(())
     }
 
@@ -1063,7 +1080,11 @@ impl RealRpcTransport {
         let deadline = std::time::Instant::now() + timeout;
         let mut pos = 0;
 
-        debug!("write_all_with_retry: attempting to write {} bytes with {:?} timeout", buf.len(), timeout);
+        debug!(
+            "write_all_with_retry: attempting to write {} bytes with {:?} timeout",
+            buf.len(),
+            timeout
+        );
 
         while pos < buf.len() {
             match stream.write(&buf[pos..]) {
@@ -1098,7 +1119,11 @@ impl RealRpcTransport {
         let deadline = std::time::Instant::now() + timeout;
         let mut pos = 0;
 
-        debug!("read_exact_with_retry: attempting to read {} bytes with {:?} timeout", buf.len(), timeout);
+        debug!(
+            "read_exact_with_retry: attempting to read {} bytes with {:?} timeout",
+            buf.len(),
+            timeout
+        );
 
         while pos < buf.len() {
             match stream.read(&mut buf[pos..]) {
@@ -1112,8 +1137,10 @@ impl RealRpcTransport {
                     pos += n;
                     debug!("read {} bytes, total {}/{}", n, pos, buf.len());
                 }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
-                           || e.kind() == std::io::ErrorKind::TimedOut => {
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
                     if std::time::Instant::now() >= deadline {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::TimedOut,
@@ -1138,11 +1165,12 @@ impl RealRpcTransport {
         // Read the first fragment
         let mut header = [0u8; 16];
         // Use our retry-capable read function to handle macOS non-blocking behavior
-        Self::read_exact_with_retry(stream, &mut header, Duration::from_secs(10))
-            .map_err(|err| {
+        Self::read_exact_with_retry(stream, &mut header, Duration::from_secs(10)).map_err(
+            |err| {
                 error!(?err, "failed to read RPC PDU header");
                 TransportError::Failure(err.to_string())
-            })?;
+            },
+        )?;
 
         let flags = header[3];
         let frag_len = u16::from_le_bytes([header[8], header[9]]) as usize;
@@ -1423,6 +1451,7 @@ pub trait AsyncRpcTransport: Send + Sync {
 
 #[cfg(feature = "async")]
 #[derive(Debug)]
+#[allow(dead_code)]
 struct AsyncTransportState {
     stream: TokioTcpStream,
     call_id: u32,
@@ -1434,6 +1463,7 @@ struct AsyncTransportState {
 
 #[cfg(feature = "async")]
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct AsyncRealRpcTransport {
     state: Mutex<AsyncTransportState>,
     context_id: u16,
@@ -1953,6 +1983,24 @@ fn reassemble_fragments(fragments: Vec<Vec<u8>>) -> Result<Vec<u8>, TransportErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_response_pdu_rejects_auth_overflow() {
+        // Minimal response header with auth_len larger than fragment length to trigger validation
+        let mut pdu = vec![0u8; 24];
+        pdu[0] = 5; // version
+        pdu[2] = 0x02; // response ptype
+                       // frag_len = 24 (header only)
+        pdu[8..10].copy_from_slice(&(24u16).to_le_bytes());
+        // auth_len = 40 (> frag_len)
+        pdu[10..12].copy_from_slice(&(40u16).to_le_bytes());
+
+        let err = parse_response_pdu(&pdu).expect_err("overflowing auth should error");
+        assert!(
+            err.to_string().to_lowercase().contains("auth_len"),
+            "unexpected error message: {err}"
+        );
+    }
     use byteorder::{LittleEndian, ReadBytesExt};
     use hex_literal::hex;
     use std::io::{Cursor, Read};
@@ -2196,7 +2244,10 @@ mod tests {
         let auth_len = u16::from_le_bytes([pdu[10], pdu[11]]);
         // With SPNEGO wrapping, auth_len is larger than the original NTLM blob
         // SPNEGO adds ASN.1 encoding overhead
-        assert!(auth_len > ntlm.len() as u16, "SPNEGO-wrapped auth should be larger than raw NTLM");
+        assert!(
+            auth_len > ntlm.len() as u16,
+            "SPNEGO-wrapped auth should be larger than raw NTLM"
+        );
 
         let call_id = u32::from_le_bytes([pdu[12], pdu[13], pdu[14], pdu[15]]);
         assert_eq!(call_id, 7);

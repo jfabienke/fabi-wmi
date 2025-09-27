@@ -1,9 +1,9 @@
 use std::alloc::{alloc, dealloc, Layout};
-use zeroize::Zeroize;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
 use std::sync::{Arc, Mutex};
+use zeroize::Zeroize;
 
 use serde_json::Value;
 use thiserror::Error;
@@ -16,6 +16,7 @@ mod ndr;
 #[cfg(feature = "async")]
 mod pool;
 mod rpc;
+pub mod spnego;
 mod transport; // Used internally by dcom and lib
 mod wmi; // Re-exported types below
 
@@ -36,7 +37,7 @@ pub use kerbsec;
 // Export auth module for examples
 pub mod auth_exports {
     pub use crate::auth::{
-        AuthError, AuthenticateMessage, AuthProvider, Credentials, NegotiateMessage, NtlmV2Client,
+        AuthError, AuthProvider, AuthenticateMessage, Credentials, NegotiateMessage, NtlmV2Client,
     };
 }
 
@@ -45,7 +46,7 @@ pub use dcom::{activate_wmi_dcom, resolve_oxid, DcomError, ObjectReference};
 
 // Export Kerberos types from adapter
 #[cfg(feature = "kerberos")]
-pub use kerberos_adapter::{KerberosClient, KerberosConfig, KerberosError, KerberosCacheBackend};
+pub use kerberos_adapter::{KerberosCacheBackend, KerberosClient, KerberosConfig, KerberosError};
 #[cfg(feature = "async")]
 pub use pool::{
     AsyncTransportManager, PoolAcquireError, PoolBuildError, PooledTransport, WmiConnectionPool,
@@ -131,6 +132,10 @@ impl InnerSession {
         let password = password.filter(|s| !s.is_empty()).map(|s| s.to_string());
         let domain_owned = domain.unwrap_or("").to_string();
 
+        // Allow stub transport only when explicitly enabled via environment variable
+        // This is for testing purposes only
+        let use_stub = std::env::var("LINUX_WMI_USE_STUB").as_deref() == Ok("1");
+
         let base_creds =
             if let (Some(ref user), Some(ref pass)) = (username.as_ref(), password.as_ref()) {
                 Some(auth::Credentials::new(
@@ -143,12 +148,13 @@ impl InnerSession {
                 None
             };
 
-        let port = dcom::resolve_wmi_port(host, base_creds.as_ref())
-            .map_err(|err| WmiClientError::Invalid(format!("Port resolution failed: {err}")))?;
-
-        // Allow stub transport only when explicitly enabled via environment variable
-        // This is for testing purposes only
-        let use_stub = std::env::var("LINUX_WMI_USE_STUB").as_deref() == Ok("1");
+        // Skip port resolution when using stub transport
+        let port = if use_stub {
+            135 // Default port for stub
+        } else {
+            dcom::resolve_wmi_port(host, base_creds.as_ref())
+                .map_err(|err| WmiClientError::Invalid(format!("Port resolution failed: {err}")))?
+        };
 
         // Choose NDR codec based on environment variable
         // Use stub codec in test mode with stub transport, otherwise use real codec
@@ -172,7 +178,7 @@ impl InnerSession {
             _ if use_stub => ("stub".to_string(), "stub".to_string()),
             _ => {
                 return Err(WmiClientError::Invalid(
-                    "Username and password are required for WMI connections".to_string()
+                    "Username and password are required for WMI connections".to_string(),
                 ));
             }
         };
@@ -544,6 +550,10 @@ pub unsafe extern "C" fn wmi_exec_method_json(
 
     let result = match inner.exec_method(&class, &method, &params) {
         Ok(json) => json,
+        Err(WmiClientError::Wmi(WmiError::Unsupported(msg))) => {
+            set_error(out_err, Some(msg));
+            return -1;
+        }
         Err(err) => {
             set_error(out_err, Some(format!("Method failed: {err}")));
             return -1;
@@ -674,13 +684,15 @@ mod tests {
         let mut session = InnerSession::new("host", None, None, None, 0).unwrap();
         session.open_namespace("CimV2").unwrap();
 
+        // Test query works
         let json = session.exec_query("SELECT * FROM Win32_Process").unwrap();
         assert!(json.contains("ThreadCount"));
 
-        let response = session
+        // Test exec_method returns Unsupported error
+        let err = session
             .exec_method("Win32_Process", "GetOwner", &json!({"Handle": 1}))
-            .unwrap();
-        assert!(response.contains("SYSTEM"));
+            .unwrap_err();
+        assert!(matches!(err, WmiClientError::Wmi(WmiError::Unsupported(_))));
     }
 
     #[test]

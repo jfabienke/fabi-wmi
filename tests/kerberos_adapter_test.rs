@@ -7,18 +7,20 @@
 
 #[cfg(all(test, feature = "kerberos"))]
 mod adapter_tests {
-    use linux_wmi::{KerberosClient, KerberosConfig};
     use linux_wmi::auth_exports::{AuthProvider, Credentials};
+    use linux_wmi::{KerberosClient, KerberosConfig};
     use std::collections::HashMap;
     use tracing::{debug, info};
 
     /// Mock transport that simulates DCE/RPC exchanges
+    #[allow(dead_code)]
     struct MockTransport {
         responses: HashMap<String, Vec<u8>>,
         captured_requests: Vec<Vec<u8>>,
     }
 
     impl MockTransport {
+        #[allow(dead_code)]
         fn new() -> Self {
             let mut responses = HashMap::new();
 
@@ -31,10 +33,9 @@ mod adapter_tests {
                     0xA1, 0x03, 0x02, 0x01, 0x0F, // msg-type
                     0xA2, 0x1A, // enc-part
                     0x04, 0x18, // dummy encrypted data
-                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                ]
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                ],
             );
 
             Self {
@@ -43,6 +44,7 @@ mod adapter_tests {
             }
         }
 
+        #[allow(dead_code)]
         fn send_receive(&mut self, request: Vec<u8>) -> Vec<u8> {
             self.captured_requests.push(request.clone());
 
@@ -69,8 +71,7 @@ mod adapter_tests {
             "TESTWS".to_string(),
         );
 
-        let config = KerberosConfig::new("EXAMPLE.COM")
-            .with_spn("host/server.example.com");
+        let config = KerberosConfig::new("EXAMPLE.COM").with_spn("host/server.example.com");
 
         // This will fail without real Kerberos, but tests compilation
         let result = KerberosClient::new("server.example.com", config, creds);
@@ -116,7 +117,10 @@ mod adapter_tests {
             .with_keytab_path("/etc/krb5.keytab");
 
         assert_eq!(config.realm, "EXAMPLE.COM");
-        assert_eq!(config.spn_override, Some("host/server.example.com".to_string()));
+        assert_eq!(
+            config.spn_override,
+            Some("host/server.example.com".to_string())
+        );
     }
 
     #[test]
@@ -142,8 +146,8 @@ mod adapter_tests {
         }
 
         // IP address with SPN should attempt connection
-        let config_with_spn = KerberosConfig::new("EXAMPLE.COM")
-            .with_spn("host/server.example.com");
+        let config_with_spn =
+            KerberosConfig::new("EXAMPLE.COM").with_spn("host/server.example.com");
         let _result = KerberosClient::new("192.168.1.1", config_with_spn, creds);
         // Will fail without real Kerberos, but shouldn't be SPN error
     }
@@ -166,7 +170,9 @@ mod mock_transport_tests {
         cursor.write_u8(0x03).unwrap(); // flags
         cursor.write_u32::<LittleEndian>(0x10).unwrap(); // data rep
         cursor.write_u16::<LittleEndian>(100).unwrap(); // frag length (dummy)
-        cursor.write_u16::<LittleEndian>(auth_data.len() as u16).unwrap(); // auth length
+        cursor
+            .write_u16::<LittleEndian>(auth_data.len() as u16)
+            .unwrap(); // auth length
         cursor.write_u32::<LittleEndian>(1).unwrap(); // call id
 
         // Rest of bind data (simplified)

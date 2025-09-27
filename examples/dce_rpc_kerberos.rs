@@ -16,10 +16,7 @@
 //!   cargo run --example dce_rpc_kerberos --features kerberos -- \
 //!     dc01.contoso.com --user admin --pass <password> --domain CONTOSO.COM
 
-use linux_wmi::{
-    auth_exports::Credentials,
-    KerberosClient, KerberosConfig, KerberosCacheBackend,
-};
+use linux_wmi::{auth_exports::Credentials, KerberosCacheBackend, KerberosClient, KerberosConfig};
 use std::env;
 use std::process;
 use tracing::{error, info, warn};
@@ -38,7 +35,10 @@ fn main() {
         eprintln!("DCE/RPC Kerberos Configuration Example");
         eprintln!("=======================================");
         eprintln!();
-        eprintln!("Usage: {} <host> --user <user> --pass <pass> --domain <domain> [options]", args[0]);
+        eprintln!(
+            "Usage: {} <host> --user <user> --pass <pass> --domain <domain> [options]",
+            args[0]
+        );
         eprintln!();
         eprintln!("Required arguments:");
         eprintln!("  <host>               Target server hostname or IP");
@@ -47,11 +47,16 @@ fn main() {
         eprintln!("  --domain <domain>    Kerberos realm/domain");
         eprintln!();
         eprintln!("Optional flags:");
-        eprintln!("  --trusted-server     Enable delegation (DANGEROUS - only for trusted servers!)");
+        eprintln!(
+            "  --trusted-server     Enable delegation (DANGEROUS - only for trusted servers!)"
+        );
         eprintln!("  --disable-mutual     Disable mutual authentication (NOT recommended)");
         eprintln!();
         eprintln!("Example:");
-        eprintln!("  {} dc01.contoso.com --user admin --pass <password> --domain CONTOSO.COM", args[0]);
+        eprintln!(
+            "  {} dc01.contoso.com --user admin --pass <password> --domain CONTOSO.COM",
+            args[0]
+        );
         process::exit(1);
     }
 
@@ -114,9 +119,9 @@ fn main() {
         .with_spn(format!("HOST/{}", host))
         .with_cache_backend(KerberosCacheBackend::File)
         .with_caching(true)
-        .with_dce_style(true)       // ENABLED: Required for DCE/RPC
-        .with_delegation(false)     // DISABLED: Security best practice
-        .with_mutual_auth(true);    // ENABLED: Security best practice
+        .with_dce_style(true) // ENABLED: Required for DCE/RPC
+        .with_delegation(false) // DISABLED: Security best practice
+        .with_mutual_auth(true); // ENABLED: Security best practice
 
     info!("Configuration:");
     info!("  ✓ DCE-style: ENABLED (required for DCE/RPC sequence handling)");
@@ -165,9 +170,9 @@ fn main() {
             .with_spn(format!("HOST/{}", host))
             .with_cache_backend(KerberosCacheBackend::File)
             .with_caching(true)
-            .with_dce_style(true)       // ENABLED: Required for DCE/RPC
-            .with_delegation(true)      // ENABLED: For S4U2Self/S4U2Proxy
-            .with_mutual_auth(true);    // ENABLED: Always verify server
+            .with_dce_style(true) // ENABLED: Required for DCE/RPC
+            .with_delegation(true) // ENABLED: For S4U2Self/S4U2Proxy
+            .with_mutual_auth(true); // ENABLED: Always verify server
 
         warn!("Configuration:");
         warn!("  ✓ DCE-style: ENABLED (required for DCE/RPC)");
@@ -206,18 +211,23 @@ fn main() {
 
     let perf_config = KerberosConfig::new(domain)
         .with_spn(format!("HOST/{}", host))
-        .with_cache_backend(KerberosCacheBackend::Memory)  // In-memory for speed
+        .with_cache_backend(KerberosCacheBackend::Memory) // In-memory for speed
         .with_caching(true)
-        .with_dce_style(true)           // ENABLED: Required for DCE/RPC
-        .with_delegation(false)         // DISABLED: Security
-        .with_mutual_auth(require_mutual);  // Configurable
+        .with_dce_style(true) // ENABLED: Required for DCE/RPC
+        .with_delegation(false) // DISABLED: Security
+        .with_mutual_auth(require_mutual); // Configurable
 
     info!("Configuration:");
     info!("  ✓ DCE-style: ENABLED (required for DCE/RPC)");
     info!("  ✓ Delegation: DISABLED");
-    info!("  {} Mutual auth: {}",
+    info!(
+        "  {} Mutual auth: {}",
         if require_mutual { "✓" } else { "⚠️" },
-        if require_mutual { "ENABLED" } else { "DISABLED (faster but less secure)" }
+        if require_mutual {
+            "ENABLED"
+        } else {
+            "DISABLED (faster but less secure)"
+        }
     );
     info!("  ✓ Cache: Memory-based (faster, not persistent)");
     info!("  ✓ Auth level: Packet Integrity (no encryption, faster)");
@@ -243,7 +253,7 @@ fn main() {
         .with_spn(format!("HOST/{}", host))
         .with_cache_backend(KerberosCacheBackend::File)
         .with_caching(true)
-        .with_dce_style(false)      // DISABLED: Use standard GSS-API
+        .with_dce_style(false) // DISABLED: Use standard GSS-API
         .with_delegation(false)
         .with_mutual_auth(true);
 

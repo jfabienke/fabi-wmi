@@ -3,6 +3,7 @@
 use std::convert::TryInto;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rand::{rngs::OsRng, RngCore};
 use thiserror::Error;
 use tracing::debug;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -117,9 +118,7 @@ impl NtlmV2Client {
         debug!(domain = %self.creds.domain, workstation = %self.creds.workstation, "building NTLM type1");
         let message = build_type1_message(&self.creds.domain, &self.creds.workstation);
         self.type1_message = Some(message.clone());
-        NegotiateMessage {
-            message,
-        }
+        NegotiateMessage { message }
     }
 
     pub fn respond_message(
@@ -139,7 +138,7 @@ impl NtlmV2Client {
             self.type1_message.as_deref(),
             challenge_bytes,
             None,
-            None
+            None,
         )?;
 
         debug!("generated NTLM type3 response with MIC");
@@ -486,16 +485,8 @@ fn current_filetime() -> u64 {
 }
 
 fn generate_client_nonce() -> [u8; 8] {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let mut seed = [0u8; 16];
-    seed[..8].copy_from_slice(&now.as_secs().to_le_bytes());
-    seed[8..12].copy_from_slice(&now.subsec_nanos().to_le_bytes());
-    seed[12..].copy_from_slice(&std::process::id().to_le_bytes());
-    let digest = md5_hash(&seed);
     let mut nonce = [0u8; 8];
-    nonce.copy_from_slice(&digest[..8]);
+    OsRng.fill_bytes(&mut nonce);
     nonce
 }
 
@@ -692,6 +683,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn generate_client_nonce_is_randomized() {
+        let nonce1 = generate_client_nonce();
+        let nonce2 = generate_client_nonce();
+        assert!(
+            nonce1.iter().any(|&b| b != 0),
+            "nonce1 should not be all zeros"
+        );
+        assert!(
+            nonce2.iter().any(|&b| b != 0),
+            "nonce2 should not be all zeros"
+        );
+        assert_ne!(nonce1, nonce2, "sequential nonces should differ");
+    }
+
+    #[test]
     fn type1_message_contains_signature() {
         let msg = build_type1_message("DOMAIN", "WORKSTATION");
         assert_eq!(&msg[..8], NTLMSSP_SIGNATURE);
@@ -728,7 +734,10 @@ mod tests {
                 0x64, 0x00,
             ]
         );
-        assert_eq!(md4_hash(&utf16le(creds.password.as_str())), expected_nt_hash);
+        assert_eq!(
+            md4_hash(&utf16le(creds.password.as_str())),
+            expected_nt_hash
+        );
         let challenge = parse_type2_message(&sample_type2()).unwrap();
         let client_nonce = [0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa];
         let timestamp = 0x00000001_6b5de5cd;
@@ -842,7 +851,10 @@ mod tests {
 
         // Validate should fail with empty username
         assert!(empty_username.validate().is_err());
-        assert!(matches!(empty_username.validate().unwrap_err(), AuthError::Creds));
+        assert!(matches!(
+            empty_username.validate().unwrap_err(),
+            AuthError::Creds
+        ));
 
         let empty_password = Credentials::new(
             "user".to_string(),
@@ -898,20 +910,10 @@ mod tests {
 
     #[test]
     fn credentials_validation_requires_username_and_password() {
-        let creds = Credentials::new(
-            String::new(),
-            "pass".into(),
-            String::new(),
-            "wkst".into(),
-        );
+        let creds = Credentials::new(String::new(), "pass".into(), String::new(), "wkst".into());
         assert!(matches!(creds.validate(), Err(AuthError::Creds)));
 
-        let creds = Credentials::new(
-            "user".into(),
-            String::new(),
-            String::new(),
-            "wkst".into(),
-        );
+        let creds = Credentials::new("user".into(), String::new(), String::new(), "wkst".into());
         assert!(matches!(creds.validate(), Err(AuthError::Creds)));
     }
 }

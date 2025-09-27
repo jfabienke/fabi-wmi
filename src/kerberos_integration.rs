@@ -3,19 +3,17 @@
 //! This module provides the integration between linux-wmi's transport
 //! and the kerbsec crate for Kerberos authentication.
 
-
-
-
-
-
-
 /// SPNEGO wrapping module (public for use in transport.rs)
 pub mod spnego {
     use std::error::Error;
 
     const OID_SPNEGO: &[u8] = &[0x06, 0x06, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02];
-    const OID_NTLM: &[u8] = &[0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a];
-    const OID_KERBEROS: &[u8] = &[0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02];
+    const OID_NTLM: &[u8] = &[
+        0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a,
+    ];
+    const OID_KERBEROS: &[u8] = &[
+        0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02,
+    ];
 
     /// Wrap a token in SPNEGO NegTokenInit
     pub fn wrap_in_spnego_init(token: &[u8], is_ntlm: bool) -> Result<Vec<u8>, Box<dyn Error>> {
@@ -134,7 +132,9 @@ mod tests {
         assert!(wrapped.windows(spnego_oid.len()).any(|w| w == spnego_oid));
 
         // Verify Kerberos OID is present
-        let krb_oid = &[0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02];
+        let krb_oid = &[
+            0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02,
+        ];
         assert!(wrapped.windows(krb_oid.len()).any(|w| w == krb_oid));
     }
 
@@ -150,5 +150,4 @@ mod tests {
         // Should extract the original token
         assert!(parsed.ends_with(token));
     }
-
 }

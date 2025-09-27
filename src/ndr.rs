@@ -54,7 +54,6 @@ pub trait NdrCodec: Send + Sync {
         -> Result<Value, NdrError>;
 }
 
-
 #[cfg(feature = "async")]
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -69,6 +68,7 @@ impl AsyncNdrCodec {
         Self { inner }
     }
 
+    #[allow(dead_code)]
     pub async fn encode_exec_query(
         &self,
         language: &str,
@@ -83,6 +83,7 @@ impl AsyncNdrCodec {
             .map_err(|_| NdrError::Encode)?
     }
 
+    #[allow(dead_code)]
     pub async fn decode_exec_query(
         &self,
         namespace: &str,
@@ -123,8 +124,6 @@ pub(crate) fn read_bstr(cursor: &mut std::io::Cursor<&[u8]>) -> Option<String> {
     let _ = cursor.read_u16::<LittleEndian>().ok()?; // terminator
     String::from_utf16(&data).ok()
 }
-
-
 
 #[cfg(test)]
 mod tests {

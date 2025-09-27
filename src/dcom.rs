@@ -12,9 +12,8 @@ use thiserror::Error;
 use tracing::{debug, error, info, instrument, trace, warn};
 
 use crate::auth::{AuthProvider, Credentials, NtlmV2Client};
-use crate::kerberos_integration::spnego;
+use crate::spnego;
 use crate::transport::RealRpcTransport;
-
 
 /// Object reference returned from OXID resolver
 #[allow(dead_code)]
@@ -61,7 +60,10 @@ pub fn resolve_wmi_port(host: &str, creds: Option<&Credentials>) -> Result<u16, 
                 return Ok(port);
             }
             Ok(_) => {
-                warn!("Invalid LINUX_WMI_PORT value '{}': port must be > 0", port_str);
+                warn!(
+                    "Invalid LINUX_WMI_PORT value '{}': port must be > 0",
+                    port_str
+                );
             }
             Err(e) => {
                 warn!("Failed to parse LINUX_WMI_PORT value '{}': {}", port_str, e);
@@ -84,7 +86,10 @@ pub fn resolve_wmi_port(host: &str, creds: Option<&Credentials>) -> Result<u16, 
             return Ok(port);
         }
         Err(err) => {
-            debug!(?err, "Anonymous DCOM activation failed, trying authenticated");
+            debug!(
+                ?err,
+                "Anonymous DCOM activation failed, trying authenticated"
+            );
         }
     }
 
@@ -92,7 +97,10 @@ pub fn resolve_wmi_port(host: &str, creds: Option<&Credentials>) -> Result<u16, 
     if let Some(creds) = creds {
         match activate_wmi_dcom(host, creds) {
             Ok((port, _oxid)) => {
-                info!("Authenticated DCOM activation succeeded, WMI port: {}", port);
+                info!(
+                    "Authenticated DCOM activation succeeded, WMI port: {}",
+                    port
+                );
                 return Ok(port);
             }
             Err(err) => {
@@ -145,7 +153,10 @@ pub fn resolve_oxid(
                                 return Ok(result);
                             }
                             Err(err) => {
-                                debug!(?err, "Kerberos failed for OXID resolution, falling back to NTLM");
+                                debug!(
+                                    ?err,
+                                    "Kerberos failed for OXID resolution, falling back to NTLM"
+                                );
                             }
                         }
                     }
@@ -433,7 +444,10 @@ pub fn activate_wmi_dcom_anonymous(host: &str) -> Result<(u16, [u8; 8]), DcomErr
             } else {
                 0xff
             };
-            error!("Anonymous bind rejected (bind_nak), reason: 0x{:02x}", reason);
+            error!(
+                "Anonymous bind rejected (bind_nak), reason: 0x{:02x}",
+                reason
+            );
         } else {
             error!("Anonymous bind rejected (bind_nak)");
         }
@@ -441,7 +455,10 @@ pub fn activate_wmi_dcom_anonymous(host: &str) -> Result<(u16, [u8; 8]), DcomErr
     }
 
     if ptype != 0x0c {
-        error!("Unexpected PDU type 0x{:02x}, expected bind_ack (0x0c)", ptype);
+        error!(
+            "Unexpected PDU type 0x{:02x}, expected bind_ack (0x0c)",
+            ptype
+        );
         return Err(DcomError::Protocol);
     }
 
@@ -475,7 +492,10 @@ pub fn activate_wmi_dcom_anonymous(host: &str) -> Result<(u16, [u8; 8]), DcomErr
     // Build request PDU without auth
     let req_pdu = build_anonymous_request_pdu(2, context_id, 4, &stub); // opnum=4 for RemoteActivation
 
-    debug!("Sending anonymous RemoteActivation request, len: {}", req_pdu.len());
+    debug!(
+        "Sending anonymous RemoteActivation request, len: {}",
+        req_pdu.len()
+    );
     stream.write_all(&req_pdu).map_err(|e| {
         error!(%e, "failed to send request");
         DcomError::Send
@@ -503,7 +523,10 @@ pub fn activate_wmi_dcom_anonymous(host: &str) -> Result<(u16, [u8; 8]), DcomErr
         DcomError::Recv
     })?;
 
-    debug!("Received anonymous RemoteActivation response, len: {}", response.len());
+    debug!(
+        "Received anonymous RemoteActivation response, len: {}",
+        response.len()
+    );
 
     // Parse the response to extract port and OXID
     let (_remaining, port) = parse_dualstringarray_port(&response).map_err(|e| {
@@ -565,7 +588,10 @@ pub fn activate_wmi_dcom(host: &str, creds: &Credentials) -> Result<(u16, [u8; 8
                         }
                     }
                     Err(err) => {
-                        debug!(?err, "Failed to create Kerberos client, falling back to NTLM");
+                        debug!(
+                            ?err,
+                            "Failed to create Kerberos client, falling back to NTLM"
+                        );
                     }
                 }
             }
@@ -624,8 +650,8 @@ fn activate_wmi_dcom_with_auth(
 
     let bind_ack = read_rpc_pdu(&mut stream)?;
     debug!(len = bind_ack.len(), hex = %hex::encode(&bind_ack), "SCM bind_ack raw");
-    let (context_id, challenge_blob, max_xmit, max_recv) = RealRpcTransport::parse_bind_ack(&bind_ack)
-        .map_err(|err| {
+    let (context_id, challenge_blob, max_xmit, max_recv) =
+        RealRpcTransport::parse_bind_ack(&bind_ack).map_err(|err| {
             debug!(?err, "SCM bind_ack parse failure");
             DcomError::Protocol
         })?;
@@ -690,12 +716,13 @@ fn build_scm_bind_pdu(call_id: u32, abstract_syntax: &[u8; 16], negotiate: &[u8]
         0
     } else {
         // Wrap NTLM in SPNEGO for modern Windows compatibility
-        let (auth_blob, auth_type) = if let Ok(wrapped) = spnego::wrap_in_spnego_init(negotiate, true) {
-            (wrapped, AUTH_TYPE_SPNEGO)
-        } else {
-            // Fallback to raw NTLM if wrapping fails
-            (negotiate.to_vec(), AUTH_TYPE_NTLM)
-        };
+        let (auth_blob, auth_type) =
+            if let Ok(wrapped) = spnego::wrap_in_spnego_init(negotiate, true) {
+                (wrapped, AUTH_TYPE_SPNEGO)
+            } else {
+                // Fallback to raw NTLM if wrapping fails
+                (negotiate.to_vec(), AUTH_TYPE_NTLM)
+            };
 
         // Pad body to 4-byte alignment before auth trailer
         let pad = (4 - (body.len() % 4)) % 4;
@@ -750,12 +777,13 @@ fn build_scm_alter_context_pdu(
     body.write_u32::<LittleEndian>(2).unwrap();
 
     // Wrap NTLM in SPNEGO for modern Windows compatibility
-    let (auth_blob, auth_type) = if let Ok(wrapped) = spnego::wrap_in_spnego_init(authenticate, true) {
-        (wrapped, AUTH_TYPE_SPNEGO)
-    } else {
-        // Fallback to raw NTLM if wrapping fails
-        (authenticate.to_vec(), AUTH_TYPE_NTLM)
-    };
+    let (auth_blob, auth_type) =
+        if let Ok(wrapped) = spnego::wrap_in_spnego_init(authenticate, true) {
+            (wrapped, AUTH_TYPE_SPNEGO)
+        } else {
+            // Fallback to raw NTLM if wrapping fails
+            (authenticate.to_vec(), AUTH_TYPE_NTLM)
+        };
 
     // Pad body to 4-byte alignment before auth trailer
     let pad = (4 - (body.len() % 4)) % 4;
@@ -1097,8 +1125,8 @@ fn build_anonymous_bind_pdu(call_id: u32, interface_uuid: &[u8; 16]) -> Vec<u8> 
     let mut pdu = Vec::new();
 
     // RPC header
-    pdu.write_u8(5).unwrap();  // version major
-    pdu.write_u8(0).unwrap();  // version minor
+    pdu.write_u8(5).unwrap(); // version major
+    pdu.write_u8(0).unwrap(); // version minor
     pdu.write_u8(0x0B).unwrap(); // ptype: BIND
     pdu.write_u8(0x03).unwrap(); // flags: first+last fragment
     pdu.write_u32::<LittleEndian>(0x10000000).unwrap(); // data representation (little-endian)
@@ -1138,7 +1166,7 @@ fn build_anonymous_bind_pdu(call_id: u32, interface_uuid: &[u8; 16]) -> Vec<u8> 
 
     // Update fragment length
     let frag_len = pdu.len() as u16;
-    pdu[frag_len_offset..frag_len_offset+2].copy_from_slice(&frag_len.to_le_bytes());
+    pdu[frag_len_offset..frag_len_offset + 2].copy_from_slice(&frag_len.to_le_bytes());
 
     pdu
 }
@@ -1150,8 +1178,8 @@ fn build_anonymous_request_pdu(call_id: u32, context_id: u16, opnum: u16, stub: 
     let mut pdu = Vec::new();
 
     // RPC header
-    pdu.write_u8(5).unwrap();  // version major
-    pdu.write_u8(0).unwrap();  // version minor
+    pdu.write_u8(5).unwrap(); // version major
+    pdu.write_u8(0).unwrap(); // version minor
     pdu.write_u8(0x00).unwrap(); // ptype: REQUEST
     pdu.write_u8(0x03).unwrap(); // flags: first+last fragment
     pdu.write_u32::<LittleEndian>(0x10000000).unwrap(); // data representation
@@ -1178,7 +1206,7 @@ fn build_anonymous_request_pdu(call_id: u32, context_id: u16, opnum: u16, stub: 
 
     // Update fragment length
     let frag_len = pdu.len() as u16;
-    pdu[frag_len_offset..frag_len_offset+2].copy_from_slice(&frag_len.to_le_bytes());
+    pdu[frag_len_offset..frag_len_offset + 2].copy_from_slice(&frag_len.to_le_bytes());
 
     pdu
 }
