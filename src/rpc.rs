@@ -41,11 +41,13 @@ pub fn complete_ntlm_bind(
 mod tests {
     use super::*;
 
+    const TEST_PASSWORD: &str = "test-password";
+
     #[test]
     fn ntlm_bind_round_trip() {
         let creds = Credentials::new(
             "User".into(),
-            "Password".into(),
+            TEST_PASSWORD.into(),
             "Domain".into(),
             "WORK".into(),
         );
@@ -91,7 +93,7 @@ mod tests {
         // Test complete_ntlm_bind with invalid challenge
         let creds = Credentials::new(
             "User".into(),
-            "Password".into(),
+            TEST_PASSWORD.into(),
             "Domain".into(),
             "WORK".into(),
         );

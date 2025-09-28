@@ -33,11 +33,18 @@ impl NdrCodec for StubNdrCodec {
 
     fn encode_exec_method(
         &self,
-        _class: &str,
-        _method: &str,
-        _params: &Value,
+        class: &str,
+        method: &str,
+        params: &Value,
     ) -> Result<Vec<u8>, NdrError> {
-        Ok(Vec::new())
+        let mut buf = Vec::new();
+        write_bstr(&mut buf, class);
+        write_bstr(&mut buf, method);
+        if !params.is_null() {
+            let json = serde_json::to_string(params).map_err(|_| NdrError::Encode)?;
+            write_bstr(&mut buf, &json);
+        }
+        Ok(buf)
     }
 
     fn decode_exec_method(

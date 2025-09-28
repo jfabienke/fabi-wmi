@@ -159,9 +159,22 @@ impl IWbemServices {
         method: &str,
         params: &Value,
     ) -> Result<Value, WmiError> {
-        let message = format!("ExecMethod is not implemented for {class}.{method}");
-        let _ = params; // keep signature consistent for future implementation
-        Err(WmiError::Unsupported(message))
+        const EXEC_METHOD_OPNUM: u16 = 25; // IWbemServices::ExecMethod
+
+        let request = self
+            .codec
+            .encode_exec_method(class, method, params)
+            .map_err(|_| WmiError::Marshal)?;
+
+        let mut transport = self.transport.lock().map_err(|_| WmiError::Response)?;
+
+        let response = transport
+            .invoke(EXEC_METHOD_OPNUM, &request)
+            .map_err(|_| WmiError::Response)?;
+
+        self.codec
+            .decode_exec_method(class, method, &response)
+            .map_err(|_| WmiError::Method(class.to_string(), method.to_string()))
     }
 
     pub fn namespace(&self) -> &str {
@@ -198,13 +211,23 @@ mod tests {
     }
 
     #[test]
-    fn exec_method_returns_unsupported() {
+    fn exec_method_handles_stub_results() {
+        let locator = IWbemLocator::new("host");
+        let services = locator.connect_server("CimV2", None, None, None).unwrap();
+        let result = services
+            .exec_method("Win32_Process", "GetOwner", &json!({}))
+            .expect("stub method result");
+        assert_eq!(result["User"], "SYSTEM");
+    }
+
+    #[test]
+    fn exec_method_unknown_returns_error() {
         let locator = IWbemLocator::new("host");
         let services = locator.connect_server("CimV2", None, None, None).unwrap();
         let err = services
             .exec_method("Win32_Process", "Unknown", &json!({}))
             .unwrap_err();
-        assert!(matches!(err, WmiError::Unsupported(_)));
+        assert!(matches!(err, WmiError::Method(_, _)));
     }
 
     #[test]

@@ -37,8 +37,12 @@ uuid = { version = "1.10", features = ["v4", "serde"] }
 thiserror = "1.0"
 byteorder = "1.5"
 socket2 = "0.5"
-md5 = "0.7"
-hmac = "0.12"
+
+# Cryptographic dependencies (RustCrypto ecosystem)
+md4 = "0.10"            # MD4 for NTLM (legacy compatibility)
+md5 = "0.7"             # MD5 for NTLM (legacy compatibility)
+hmac = "0.12"           # HMAC implementation
+digest = "0.10"         # Trait-based crypto abstraction
 hex-literal = "0.4"
 hex = "0.4"
 tracing = "0.1"
@@ -67,6 +71,7 @@ default = ["kerberos"]
 async = ["tokio", "async-trait", "deadpool", "deadpool-runtime"]
 test-support = []
 kerberos = ["kerbsec"]
+test-gss-mock = []
 
 [dev-dependencies]
 proptest = "1.4"

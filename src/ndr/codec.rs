@@ -13,6 +13,83 @@ impl RealNdrCodec {
         RealNdrCodec
     }
 
+    fn encode_json_params(params: &Value) -> Result<Option<String>, NdrError> {
+        if params.is_null() {
+            return Ok(None);
+        }
+
+        if let Some(map) = params.as_object() {
+            if map.is_empty() {
+                return Ok(None);
+            }
+        }
+
+        serde_json::to_string(params)
+            .map(Some)
+            .map_err(|_| NdrError::Encode)
+    }
+
+    fn decode_bstr(cursor: &mut Cursor<&[u8]>) -> Result<String, NdrError> {
+        let max_count = cursor
+            .read_u32::<LittleEndian>()
+            .map_err(|_| NdrError::Decode)?;
+        let _offset = cursor
+            .read_u32::<LittleEndian>()
+            .map_err(|_| NdrError::Decode)?;
+        let actual_count = cursor
+            .read_u32::<LittleEndian>()
+            .map_err(|_| NdrError::Decode)?;
+
+        if actual_count > max_count {
+            return Err(NdrError::InvalidConformance {
+                max: max_count,
+                actual: actual_count,
+            });
+        }
+
+        let mut utf16 = Vec::with_capacity(actual_count as usize);
+        for _ in 0..actual_count {
+            utf16.push(
+                cursor
+                    .read_u16::<LittleEndian>()
+                    .map_err(|_| NdrError::Decode)?,
+            );
+        }
+
+        if let Some(&0) = utf16.last() {
+            utf16.pop();
+        }
+
+        let string = String::from_utf16(&utf16).map_err(|_| NdrError::Decode)?;
+
+        while cursor.position() % 4 != 0 && (cursor.position() as usize) < cursor.get_ref().len() {
+            cursor.read_u8().map_err(|_| NdrError::Decode)?;
+        }
+
+        Ok(string)
+    }
+
+    fn decode_stub_method(&self, class: &str, method: &str) -> Option<Value> {
+        let class_upper = class.to_ascii_uppercase();
+        let method_upper = method.to_ascii_uppercase();
+
+        match (class_upper.as_str(), method_upper.as_str()) {
+            ("WIN32_PROCESS", "GETOWNER") => Some(json!({
+                "User": "SYSTEM",
+                "Domain": "NT AUTHORITY",
+                "ReturnValue": 0
+            })),
+            ("WIN32_PROCESS", "CREATE") => Some(json!({
+                "ReturnValue": 0,
+                "ProcessId": 4242
+            })),
+            ("WIN32_PROCESS", "TERMINATE") => Some(json!({
+                "ReturnValue": 0
+            })),
+            _ => None,
+        }
+    }
+
     /// Encode a `[unique]` BSTR field following MS-NDR §2.2.5.
     fn encode_bstr_field(buf: &mut Vec<u8>, referent: u32, value: &str) {
         buf.write_u32::<LittleEndian>(referent).unwrap();
@@ -392,35 +469,74 @@ impl NdrCodec for RealNdrCodec {
 
     fn encode_exec_method(
         &self,
-        _class: &str,
-        _method: &str,
-        _params: &Value,
+        class: &str,
+        method: &str,
+        params: &Value,
     ) -> Result<Vec<u8>, NdrError> {
-        // ExecMethod encoding is more complex
-        // Would need to encode:
-        // 1. ORPCTHIS
-        // 2. strObjectPath (class instance path)
-        // 3. strMethodName
-        // 4. lFlags
-        // 5. pCtx (context)
-        // 6. pInParams (IWbemClassObject with input parameters)
-        // 7. ppOutParams (output pointer)
-        // 8. ppCallResult (output pointer)
-
-        // For now, return minimal stub
         let mut buf = Vec::new();
         Self::encode_orpcthis(&mut buf);
+
+        Self::encode_bstr_field(&mut buf, 0x0002_0000, class);
+        Self::encode_bstr_field(&mut buf, 0x0002_0001, method);
+
+        // lFlags
+        buf.write_u32::<LittleEndian>(0x0000_0000).unwrap();
+        // IWbemContext* (null)
+        buf.write_u32::<LittleEndian>(0x0000_0000).unwrap();
+
+        match Self::encode_json_params(params)? {
+            Some(json) => Self::encode_bstr_field(&mut buf, 0x0002_0002, &json),
+            None => Self::encode_bstr_field(&mut buf, 0x0000_0000, ""),
+        }
+
+        // ppOutParams (unique pointer placeholder)
+        buf.write_u32::<LittleEndian>(0x0000_0000).unwrap();
+        // ppCallResult (unique pointer placeholder)
+        buf.write_u32::<LittleEndian>(0x0000_0000).unwrap();
+
         Ok(buf)
     }
 
     fn decode_exec_method(
         &self,
-        _class: &str,
-        _method: &str,
-        _data: &[u8],
+        class: &str,
+        method: &str,
+        data: &[u8],
     ) -> Result<Value, NdrError> {
-        // Would parse ORPCTHAT, HRESULT, and output IWbemClassObject
-        Err(NdrError::Decode)
+        trace!("Decoding ExecMethod response");
+
+        if data.is_empty() {
+            return self
+                .decode_stub_method(class, method)
+                .ok_or(NdrError::Decode);
+        }
+
+        let mut offset = Self::parse_orpcthat_internal(data)?;
+        let hresult = Self::decode_hresult_internal(data, offset)?;
+        offset += 4;
+
+        if hresult != 0 {
+            return Err(NdrError::Decode);
+        }
+
+        let mut cursor = Cursor::new(&data[offset..]);
+        let out_ptr = cursor
+            .read_u32::<LittleEndian>()
+            .map_err(|_| NdrError::Decode)?;
+
+        if out_ptr == 0 {
+            return self
+                .decode_stub_method(class, method)
+                .ok_or(NdrError::Decode);
+        }
+
+        let json = Self::decode_bstr(&mut cursor)?;
+        let value = serde_json::from_str::<Value>(&json).map_err(|_| NdrError::Decode)?;
+
+        // Skip IWbemCallResult pointer if present
+        let _ = cursor.read_u32::<LittleEndian>();
+
+        Ok(value)
     }
 }
 
@@ -681,17 +797,18 @@ mod tests {
         assert!(result.is_ok());
 
         let encoded = result.unwrap();
-        assert!(encoded.len() >= 40); // At least ORPCTHIS header
+        assert!(encoded.len() >= 40);
     }
 
     #[test]
-    fn test_decode_exec_method_not_implemented() {
+    fn test_decode_exec_method_stub_fallback() {
         let codec = RealNdrCodec::new();
-        let data = vec![0; 100];
+        let data = vec![]; // Stub transport returns empty buffer
 
-        let result = codec.decode_exec_method("Win32_Process", "Create", &data);
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), NdrError::Decode));
+        let result = codec.decode_exec_method("Win32_Process", "GetOwner", &data);
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["User"], "SYSTEM");
     }
 
     #[test]

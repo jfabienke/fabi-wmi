@@ -11,6 +11,7 @@ use tracing::debug;
 
 mod auth;
 mod crypto;
+pub mod crypto_v2; // New improved crypto module
 mod dcom;
 mod ndr;
 #[cfg(feature = "async")]
@@ -550,8 +551,11 @@ pub unsafe extern "C" fn wmi_exec_method_json(
 
     let result = match inner.exec_method(&class, &method, &params) {
         Ok(json) => json,
-        Err(WmiClientError::Wmi(WmiError::Unsupported(msg))) => {
-            set_error(out_err, Some(msg));
+        Err(WmiClientError::Wmi(WmiError::Method(class_name, method_name))) => {
+            set_error(
+                out_err,
+                Some(format!("Unsupported method {class_name}.{method_name}")),
+            );
             return -1;
         }
         Err(err) => {
@@ -688,11 +692,10 @@ mod tests {
         let json = session.exec_query("SELECT * FROM Win32_Process").unwrap();
         assert!(json.contains("ThreadCount"));
 
-        // Test exec_method returns Unsupported error
-        let err = session
-            .exec_method("Win32_Process", "GetOwner", &json!({"Handle": 1}))
-            .unwrap_err();
-        assert!(matches!(err, WmiClientError::Wmi(WmiError::Unsupported(_))));
+        let result = session
+            .exec_method("Win32_Process", "GetOwner", &json!({}))
+            .unwrap();
+        assert!(result.contains("\"ReturnValue\""));
     }
 
     #[test]

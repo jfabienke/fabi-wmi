@@ -253,7 +253,7 @@ impl KerberosClient {
                 cache_string
             }
             KerberosCacheBackend::Memory => {
-                let cache_string = format!("MEMORY:{}", username);
+                let cache_string = format!("MEMORY:{username}");
                 debug!("Using Memory cache (non-persistent): {}", cache_string);
                 cache_string
             }
@@ -616,7 +616,7 @@ impl KerberosClient {
             }
 
             ctx.export_delegated_credentials().map_err(|e| {
-                KerberosError::AuthFailure(format!("Failed to export delegated credentials: {}", e))
+                KerberosError::AuthFailure(format!("Failed to export delegated credentials: {e}"))
             })
         } else {
             Err(KerberosError::InvalidState)

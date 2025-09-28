@@ -47,7 +47,12 @@ pub fn hmac_md5_sign(session_key: &[u8], data: &[u8]) -> [u8; 16] {
 /// Verify HMAC-MD5 signature
 pub fn hmac_md5_verify(session_key: &[u8], data: &[u8], signature: &[u8; 16]) -> bool {
     let computed = hmac_md5_sign(session_key, data);
-    computed == *signature
+
+    let mut diff = 0u8;
+    for (a, b) in computed.iter().zip(signature.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
 }
 
 /// Encrypt data using RC4 with the session key

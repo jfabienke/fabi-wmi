@@ -18,58 +18,39 @@ pub mod spnego {
     /// Wrap a token in SPNEGO NegTokenInit
     pub fn wrap_in_spnego_init(token: &[u8], is_ntlm: bool) -> Result<Vec<u8>, Box<dyn Error>> {
         let mut out = Vec::new();
-
-        // Application constructed object [0]
-        out.push(0x60);
-        out.push(0); // Length placeholder
-        let length_offset = out.len() - 1;
-
-        // OID for SPNEGO
-        out.extend_from_slice(OID_SPNEGO);
-
-        // NegTokenInit [0] EXPLICIT SEQUENCE
-        out.push(0xa0);
-        out.push(0); // Length placeholder
-        let neg_token_length_offset = out.len() - 1;
-
-        // SEQUENCE
-        out.push(0x30);
-        out.push(0); // Length placeholder
-        let sequence_length_offset = out.len() - 1;
-
-        // mechTypes [0] SEQUENCE OF MechType
-        out.push(0xa0);
-        let mech_types = if is_ntlm {
-            vec![OID_NTLM, OID_KERBEROS]
-        } else {
-            vec![OID_KERBEROS, OID_NTLM]
-        };
-        let mech_types_len: usize = mech_types.iter().map(|o| o.len()).sum();
-        encode_length(&mut out, mech_types_len);
-
-        // Add mechanism OIDs
-        for oid in mech_types {
-            out.extend_from_slice(oid);
+        fn write_tlv(buf: &mut Vec<u8>, tag: u8, build: impl FnOnce(&mut Vec<u8>)) {
+            buf.push(tag);
+            let mut inner = Vec::new();
+            build(&mut inner);
+            encode_length(buf, inner.len());
+            buf.extend_from_slice(&inner);
         }
 
-        // mechToken [2] OCTET STRING OPTIONAL
-        if !token.is_empty() {
-            out.push(0xa2);
-            encode_length(&mut out, token.len() + 2);
-            out.push(0x04); // OCTET STRING
-            encode_length(&mut out, token.len());
-            out.extend_from_slice(token);
-        }
+        write_tlv(&mut out, 0x60, |buf| {
+            buf.extend_from_slice(OID_SPNEGO);
+            write_tlv(buf, 0xa0, |buf| {
+                write_tlv(buf, 0x30, |buf| {
+                    write_tlv(buf, 0xa0, |buf| {
+                        let mech_types = if is_ntlm {
+                            vec![OID_NTLM, OID_KERBEROS]
+                        } else {
+                            vec![OID_KERBEROS, OID_NTLM]
+                        };
+                        for oid in mech_types {
+                            buf.extend_from_slice(oid);
+                        }
+                    });
 
-        // Update lengths
-        let total_len = out.len() - sequence_length_offset - 1;
-        out[sequence_length_offset] = total_len as u8;
-
-        let neg_token_len = out.len() - neg_token_length_offset - 1;
-        out[neg_token_length_offset] = neg_token_len as u8;
-
-        let spnego_len = out.len() - length_offset - 1;
-        out[length_offset] = spnego_len as u8;
+                    if !token.is_empty() {
+                        write_tlv(buf, 0xa2, |buf| {
+                            buf.push(0x04);
+                            encode_length(buf, token.len());
+                            buf.extend_from_slice(token);
+                        });
+                    }
+                });
+            });
+        });
 
         Ok(out)
     }
@@ -117,6 +98,16 @@ pub mod spnego {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kerberos_integration::spnego::wrap_in_spnego_init;
+
+    #[test]
+    fn wrap_in_spnego_init_with_large_token() {
+        let large_token = vec![0xAA; 300];
+        let encoded = wrap_in_spnego_init(&large_token, false).expect("encode spnego");
+        assert!(encoded.len() > 320);
+        assert_eq!(encoded[0], 0x60);
+        assert!(encoded.contains(&0x04));
+    }
 
     #[test]
     fn test_spnego_wrap() {

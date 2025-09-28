@@ -8,6 +8,8 @@ use thiserror::Error;
 use tracing::debug;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use crate::crypto_v2::compute_nt_hash;
+
 #[derive(Error, Debug)]
 pub enum AuthError {
     #[error("NTLM unsupported")]
@@ -234,9 +236,7 @@ fn build_type3_message(
     let username_upper = creds.username.to_uppercase();
     let domain_upper = creds.domain.to_uppercase();
 
-    let mut password_utf16 = utf16le(creds.password.as_str());
-    let mut nt_hash = md4_hash(&password_utf16);
-    zeroize_bytes(&mut password_utf16);
+    let mut nt_hash = compute_nt_hash(creds.password.as_str());
 
     let mut identity = utf16le(&(username_upper.clone() + &domain_upper));
     let ntlm_v2_hash = hmac_md5_segments(&nt_hash, &[&identity]);
@@ -265,6 +265,7 @@ fn build_type3_message(
     let mut nt_response = Vec::with_capacity(nt_proof.len() + blob.len());
     nt_response.extend_from_slice(&nt_proof);
     nt_response.extend_from_slice(&blob);
+    blob.zeroize();
 
     let lm_proof = hmac_md5_segments(
         &ntlm_v2_hash_arr,
@@ -275,7 +276,7 @@ fn build_type3_message(
     lm_response.extend_from_slice(&lm_proof);
     lm_response.extend_from_slice(&client_nonce);
 
-    let session_key_bytes = hmac_md5_segments(&ntlm_v2_hash_arr, &[&nt_proof]);
+    let session_key = hmac_md5_segments(&ntlm_v2_hash_arr, &[&nt_proof]);
 
     let domain_utf16 = utf16le(&creds.domain);
     let user_utf16 = utf16le(&creds.username);
@@ -289,7 +290,7 @@ fn build_type3_message(
         domain_utf16.as_slice(),
         user_utf16.as_slice(),
         workstation_utf16.as_slice(),
-        session_key_bytes.as_slice(),
+        session_key.as_slice(),
     ] {
         let len = buf.len() as u16;
         buffers.extend_from_slice(&len.to_le_bytes());
@@ -308,14 +309,11 @@ fn build_type3_message(
     message.extend_from_slice(&domain_utf16);
     message.extend_from_slice(&user_utf16);
     message.extend_from_slice(&workstation_utf16);
-    message.extend_from_slice(&session_key_bytes);
+    message.extend_from_slice(&session_key);
 
     zeroize_bytes(&mut nt_hash);
     zeroize_bytes(&mut ntlm_v2_hash_arr);
     zeroize_bytes(&mut client_nonce);
-
-    let mut session_key = [0u8; 16];
-    session_key.copy_from_slice(&session_key_bytes);
 
     Ok(AuthenticateMessage {
         message,
@@ -336,9 +334,7 @@ fn build_type3_message_with_mic(
     let username_upper = creds.username.to_uppercase();
     let domain_upper = creds.domain.to_uppercase();
 
-    let mut password_utf16 = utf16le(creds.password.as_str());
-    let mut nt_hash = md4_hash(&password_utf16);
-    zeroize_bytes(&mut password_utf16);
+    let mut nt_hash = compute_nt_hash(creds.password.as_str());
 
     let mut identity = utf16le(&(username_upper.clone() + &domain_upper));
     let ntlm_v2_hash = hmac_md5_segments(&nt_hash, &[&identity]);
@@ -370,6 +366,7 @@ fn build_type3_message_with_mic(
     let mut nt_response = Vec::with_capacity(nt_proof.len() + blob.len());
     nt_response.extend_from_slice(&nt_proof);
     nt_response.extend_from_slice(&blob);
+    blob.zeroize();
 
     // Calculate LM response
     let lm_proof = hmac_md5_segments(
@@ -382,7 +379,7 @@ fn build_type3_message_with_mic(
     lm_response.extend_from_slice(&client_nonce);
 
     // Calculate session key
-    let session_key_bytes = hmac_md5_segments(&ntlm_v2_hash_arr, &[&nt_proof]);
+    let session_key = hmac_md5_segments(&ntlm_v2_hash_arr, &[&nt_proof]);
 
     // Prepare UTF-16LE strings
     let domain_utf16 = utf16le(&creds.domain);
@@ -399,7 +396,7 @@ fn build_type3_message_with_mic(
         domain_utf16.as_slice(),
         user_utf16.as_slice(),
         workstation_utf16.as_slice(),
-        session_key_bytes.as_slice(),
+        session_key.as_slice(),
     ] {
         let len = buf.len() as u16;
         buffers.extend_from_slice(&len.to_le_bytes()); // Length
@@ -425,7 +422,7 @@ fn build_type3_message_with_mic(
     message.extend_from_slice(&domain_utf16);
     message.extend_from_slice(&user_utf16);
     message.extend_from_slice(&workstation_utf16);
-    message.extend_from_slice(&session_key_bytes);
+    message.extend_from_slice(&session_key);
 
     // Calculate MIC if we have all three messages
     if let Some(type1) = type1_message {
@@ -435,7 +432,8 @@ fn build_type3_message_with_mic(
         mic_data.extend_from_slice(type2_message);
         mic_data.extend_from_slice(&message); // Type3 with zero MIC
 
-        let mic = hmac_md5_segments(&session_key_bytes, &[&mic_data]);
+        let mic = hmac_md5_segments(&session_key, &[&mic_data]);
+        mic_data.zeroize();
 
         debug!(
             "MIC calculation: type1_len={}, type2_len={}, type3_len={}, mic={}, mic_offset={}",
@@ -457,9 +455,6 @@ fn build_type3_message_with_mic(
     zeroize_bytes(&mut nt_hash);
     zeroize_bytes(&mut ntlm_v2_hash_arr);
     zeroize_bytes(&mut client_nonce);
-
-    let mut session_key = [0u8; 16];
-    session_key.copy_from_slice(&session_key_bytes);
 
     Ok(AuthenticateMessage {
         message,
@@ -519,16 +514,19 @@ fn hmac_md5_segments(key: &[u8], segments: &[&[u8]]) -> [u8; 16] {
     for segment in segments {
         inner.extend_from_slice(segment);
     }
-    let inner_hash = md5_hash(&inner);
+    let mut inner_hash = md5_hash(&inner);
+    inner.zeroize();
 
     let mut outer = Vec::with_capacity(64 + inner_hash.len());
     outer.extend_from_slice(&opad);
     outer.extend_from_slice(&inner_hash);
     let result = md5_hash(&outer);
+    outer.zeroize();
 
     zeroize_bytes(&mut key_block);
     zeroize_bytes(&mut ipad);
     zeroize_bytes(&mut opad);
+    zeroize_bytes(&mut inner_hash);
 
     result
 }
@@ -541,129 +539,7 @@ fn zeroize_bytes(bytes: &mut [u8]) {
 
 #[allow(clippy::ptr_arg)]
 fn zeroize_string(value: &mut String) {
-    unsafe {
-        let bytes = value.as_bytes_mut();
-        zeroize_bytes(bytes);
-    }
-}
-
-fn md4_hash(data: &[u8]) -> [u8; 16] {
-    let mut message = data.to_vec();
-    let bit_len = (message.len() as u64) * 8;
-    message.push(0x80);
-    while (message.len() % 64) != 56 {
-        message.push(0);
-    }
-    message.extend_from_slice(&bit_len.to_le_bytes());
-
-    let mut a = 0x67452301u32;
-    let mut b = 0xefcdab89u32;
-    let mut c = 0x98badcfeu32;
-    let mut d = 0x10325476u32;
-
-    for chunk in message.chunks(64) {
-        let mut x = [0u32; 16];
-        for i in 0..16 {
-            x[i] = u32::from_le_bytes(chunk[i * 4..i * 4 + 4].try_into().unwrap());
-        }
-
-        let (mut aa, mut bb, mut cc, mut dd) = (a, b, c, d);
-
-        ff(&mut aa, bb, cc, dd, x[0], 3);
-        ff(&mut dd, aa, bb, cc, x[1], 7);
-        ff(&mut cc, dd, aa, bb, x[2], 11);
-        ff(&mut bb, cc, dd, aa, x[3], 19);
-        ff(&mut aa, bb, cc, dd, x[4], 3);
-        ff(&mut dd, aa, bb, cc, x[5], 7);
-        ff(&mut cc, dd, aa, bb, x[6], 11);
-        ff(&mut bb, cc, dd, aa, x[7], 19);
-        ff(&mut aa, bb, cc, dd, x[8], 3);
-        ff(&mut dd, aa, bb, cc, x[9], 7);
-        ff(&mut cc, dd, aa, bb, x[10], 11);
-        ff(&mut bb, cc, dd, aa, x[11], 19);
-        ff(&mut aa, bb, cc, dd, x[12], 3);
-        ff(&mut dd, aa, bb, cc, x[13], 7);
-        ff(&mut cc, dd, aa, bb, x[14], 11);
-        ff(&mut bb, cc, dd, aa, x[15], 19);
-
-        gg(&mut aa, bb, cc, dd, x[0], 3);
-        gg(&mut dd, aa, bb, cc, x[4], 5);
-        gg(&mut cc, dd, aa, bb, x[8], 9);
-        gg(&mut bb, cc, dd, aa, x[12], 13);
-        gg(&mut aa, bb, cc, dd, x[1], 3);
-        gg(&mut dd, aa, bb, cc, x[5], 5);
-        gg(&mut cc, dd, aa, bb, x[9], 9);
-        gg(&mut bb, cc, dd, aa, x[13], 13);
-        gg(&mut aa, bb, cc, dd, x[2], 3);
-        gg(&mut dd, aa, bb, cc, x[6], 5);
-        gg(&mut cc, dd, aa, bb, x[10], 9);
-        gg(&mut bb, cc, dd, aa, x[14], 13);
-        gg(&mut aa, bb, cc, dd, x[3], 3);
-        gg(&mut dd, aa, bb, cc, x[7], 5);
-        gg(&mut cc, dd, aa, bb, x[11], 9);
-        gg(&mut bb, cc, dd, aa, x[15], 13);
-
-        hh(&mut aa, bb, cc, dd, x[0], 3);
-        hh(&mut dd, aa, bb, cc, x[8], 9);
-        hh(&mut cc, dd, aa, bb, x[4], 11);
-        hh(&mut bb, cc, dd, aa, x[12], 15);
-        hh(&mut aa, bb, cc, dd, x[2], 3);
-        hh(&mut dd, aa, bb, cc, x[10], 9);
-        hh(&mut cc, dd, aa, bb, x[6], 11);
-        hh(&mut bb, cc, dd, aa, x[14], 15);
-        hh(&mut aa, bb, cc, dd, x[1], 3);
-        hh(&mut dd, aa, bb, cc, x[9], 9);
-        hh(&mut cc, dd, aa, bb, x[5], 11);
-        hh(&mut bb, cc, dd, aa, x[13], 15);
-        hh(&mut aa, bb, cc, dd, x[3], 3);
-        hh(&mut dd, aa, bb, cc, x[11], 9);
-        hh(&mut cc, dd, aa, bb, x[7], 11);
-        hh(&mut bb, cc, dd, aa, x[15], 15);
-
-        a = a.wrapping_add(aa);
-        b = b.wrapping_add(bb);
-        c = c.wrapping_add(cc);
-        d = d.wrapping_add(dd);
-    }
-
-    let mut out = [0u8; 16];
-    out[..4].copy_from_slice(&a.to_le_bytes());
-    out[4..8].copy_from_slice(&b.to_le_bytes());
-    out[8..12].copy_from_slice(&c.to_le_bytes());
-    out[12..].copy_from_slice(&d.to_le_bytes());
-    out
-}
-
-fn f(x: u32, y: u32, z: u32) -> u32 {
-    (x & y) | ((!x) & z)
-}
-
-fn g(x: u32, y: u32, z: u32) -> u32 {
-    (x & y) | (x & z) | (y & z)
-}
-
-fn h(x: u32, y: u32, z: u32) -> u32 {
-    x ^ y ^ z
-}
-
-fn ff(a: &mut u32, b: u32, c: u32, d: u32, x: u32, s: u32) {
-    *a = a.wrapping_add(f(b, c, d)).wrapping_add(x).rotate_left(s);
-}
-
-fn gg(a: &mut u32, b: u32, c: u32, d: u32, x: u32, s: u32) {
-    *a = a
-        .wrapping_add(g(b, c, d))
-        .wrapping_add(x)
-        .wrapping_add(0x5a827999)
-        .rotate_left(s);
-}
-
-fn hh(a: &mut u32, b: u32, c: u32, d: u32, x: u32, s: u32) {
-    *a = a
-        .wrapping_add(h(b, c, d))
-        .wrapping_add(x)
-        .wrapping_add(0x6ed9eba1)
-        .rotate_left(s);
+    value.zeroize();
 }
 
 #[cfg(test)]
@@ -681,6 +557,8 @@ pub(crate) fn sample_type2() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_PASSWORD: &str = "Password";
 
     #[test]
     fn generate_client_nonce_is_randomized() {
@@ -719,7 +597,7 @@ mod tests {
     fn build_type3_matches_reference() {
         let creds = Credentials::new(
             "User".into(),
-            "Password".into(),
+            TEST_PASSWORD.into(),
             "Domain".into(),
             "COMPUTER".into(),
         );
@@ -728,16 +606,13 @@ mod tests {
             0xd8, 0x52,
         ];
         assert_eq!(
-            utf16le(creds.password.as_str()),
+            utf16le(TEST_PASSWORD),
             vec![
                 0x50, 0x00, 0x61, 0x00, 0x73, 0x00, 0x73, 0x00, 0x77, 0x00, 0x6f, 0x00, 0x72, 0x00,
                 0x64, 0x00,
             ]
         );
-        assert_eq!(
-            md4_hash(&utf16le(creds.password.as_str())),
-            expected_nt_hash
-        );
+        assert_eq!(compute_nt_hash(TEST_PASSWORD), expected_nt_hash);
         let challenge = parse_type2_message(&sample_type2()).unwrap();
         let client_nonce = [0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa];
         let timestamp = 0x00000001_6b5de5cd;

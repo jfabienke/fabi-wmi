@@ -2,6 +2,7 @@ use linux_wmi::{
     wmi_exec_method_json, wmi_exec_query_json, wmi_free_err, wmi_free_json, wmi_namespace_open,
     wmi_session_free, wmi_session_new, WmiSession,
 };
+use serde_json::Value;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
@@ -153,11 +154,14 @@ fn ffi_method_handles_null_params_pointer() {
             &mut err_ptr,
         )
     };
-    // ExecMethod is now unsupported and should return error
-    assert_eq!(rc, -1);
-    assert!(!err_ptr.is_null());
+    assert_eq!(rc, 0);
+    assert!(err_ptr.is_null());
     unsafe {
-        wmi_free_err(err_ptr);
+        let slice = std::slice::from_raw_parts(json_ptr, json_len);
+        let json = std::str::from_utf8(slice).unwrap();
+        let value: Value = serde_json::from_str(json).unwrap();
+        assert_eq!(value["Domain"], "NT AUTHORITY");
+        wmi_free_json(json_ptr, json_len);
         wmi_session_free(session_ptr);
     }
 }

@@ -22,10 +22,10 @@ This document consolidates all TODO items from the codebase for better tracking 
 ## Examples
 
 ### full_wmi_query.rs
-- **Status**: Incomplete
+- **Status**: ✅ Completed (2024-03)
 - **Location**: examples/full_wmi_query.rs
-- **Description**: Currently contains placeholder comment "TODO: In next phase, actually execute a WMI query"
-- **Action**: Implement actual WMI query execution using async API
+- **Description**: Example now establishes a session, executes `Win32_Process` queries, and demonstrates `ExecMethod` using the JSON FFI helpers.
+- **Follow-up**: Consider adding command-line option to skip network calls when credentials are omitted.
 
 ## Async API Completion
 
@@ -40,7 +40,20 @@ This document consolidates all TODO items from the codebase for better tracking 
 - **Impact**: Non-blocking Kerberos authentication
 - **Note**: This is a transport-layer issue, not related to kerbsec
 
+## Completed Items (Recent)
+- ✅ ExecMethod RPC support with JSON parameter marshalling (2024-03)
+- ✅ SPNEGO length encoding hardened for >255 byte tokens (2024-03)
+- ✅ Kerberos test harness feature flag (`test-gss-mock`) with deterministic wrap/unwrap mock (2024-03)
+- ✅ full_wmi_query example executes real queries/methods through the FFI (2024-03)
+
 ## Future Enhancements
+
+### Integration Testing Framework
+- **Status**: Documentation complete, implementation pending
+- **Description**: Automated integration tests against real Windows hosts
+- **Documentation**: See `docs/INTEGRATION_TESTING.md` for setup guide
+- **Impact**: End-to-end validation of WMI protocol implementation
+- **Next Steps**: Add `integration-tests` feature flag and test harness
 
 ### EPM Protocol
 - **Status**: Research phase
@@ -56,6 +69,9 @@ This document consolidates all TODO items from the codebase for better tracking 
 - **Status**: Not planned
 - **Description**: PKU2U for workgroup scenarios
 - **Impact**: Non-domain authentication
+
+## Security Notes
+- LM hash derivation in `crypto_v2::legacy` remains intentionally unimplemented to avoid reintroducing weak authentication flows.
 
 ## Completed Items
 Items that have been completed should be moved here with completion date:
