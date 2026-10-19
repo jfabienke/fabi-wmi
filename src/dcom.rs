@@ -43,6 +43,18 @@ pub enum DcomError {
     ServerUnavailable,
     #[error("Remote procedure call failed (0x800706BE)")]
     RemoteProcedureCallFailed,
+    #[error("Operation failed (hr={hr:#010x})")]
+    Hresult { hr: u32 },
+}
+
+/// Map a COM HRESULT / error_status_t to a `DcomError`, preserving the code.
+fn hresult_to_err(hr: u32) -> DcomError {
+    match hr {
+        0x8007_0005 => DcomError::AccessDenied,
+        0x8007_06BA => DcomError::ServerUnavailable,
+        0x8007_06BE => DcomError::RemoteProcedureCallFailed,
+        other => DcomError::Hresult { hr: other },
+    }
 }
 
 #[instrument(level = "debug", skip_all, fields(host))]
@@ -523,7 +535,7 @@ pub fn activate_wmi_dcom_anonymous(host: &str) -> Result<(u16, [u8; 8]), DcomErr
         response.len()
     );
 
-    let activation = parse_remote_activation_response(&response)?;
+    let activation = parse_remote_activation_response(&response, None)?;
     let port = activation.port().ok_or(DcomError::Protocol)?;
     Ok((port, activation.oxid))
 }
@@ -678,7 +690,7 @@ fn activate_wmi_dcom_with_auth(
         error!(%err, "RemoteActivation response rejected");
         DcomError::Protocol
     })?;
-    let activation = parse_remote_activation_response(&resp_pdu)?;
+    let activation = parse_remote_activation_response(&resp_pdu, Some(&iid_level1_login))?;
     let port = activation.port().ok_or_else(|| {
         error!("RemoteActivation response advertised no TCP binding");
         DcomError::Protocol
@@ -901,13 +913,15 @@ fn read_rpc_pdu(stream: &mut TcpStream) -> Result<Vec<u8>, DcomError> {
     Ok(pdu)
 }
 
-/// Parse RemoteActivation response and extract port and OXID from DUALSTRINGARRAY
 /// IActivation::RemoteActivation output (MS-DCOM 3.1.2.5.1.1).
 #[derive(Debug, Clone)]
 pub(crate) struct ActivationResponse {
     pub oxid: [u8; 8],
     /// IPID of the activated interface, read from the returned OBJREF_STANDARD.
     pub ipid: [u8; 16],
+    /// IPID of the OXID's IRemUnknown, needed later to release references.
+    #[allow(dead_code)] // consumed once reference release (IRemUnknown) is implemented
+    pub ipid_rem_unknown: [u8; 16],
     /// ncacn_ip_tcp bindings the server advertised, as (host, port). Under NAT
     /// these name the server's own view (e.g. DC01, 10.0.2.15); the caller keeps
     /// connecting to the address it dialed and only takes the port from here.
@@ -921,7 +935,10 @@ impl ActivationResponse {
     }
 }
 
-fn parse_remote_activation_response(pdu: &[u8]) -> Result<ActivationResponse, DcomError> {
+fn parse_remote_activation_response(
+    pdu: &[u8],
+    expected_iid: Option<&[u8; 16]>,
+) -> Result<ActivationResponse, DcomError> {
     if pdu.len() < 24 {
         return Err(DcomError::Protocol);
     }
@@ -939,11 +956,36 @@ fn parse_remote_activation_response(pdu: &[u8]) -> Result<ActivationResponse, Dc
             return Err(DcomError::Protocol);
         }
     }
-    parse_activation_stub(&pdu[24..])
+
+    // Trim to just the NDR stub: drop the 24-byte response header and, when the
+    // PDU is authenticated, the trailing auth padding, sec_trailer (8 bytes) and
+    // auth_value. error_status_t is then genuinely the last 4 bytes of the stub.
+    let frag_len = u16::from_le_bytes([pdu[8], pdu[9]]) as usize;
+    let auth_len = u16::from_le_bytes([pdu[10], pdu[11]]) as usize;
+    if frag_len != pdu.len() {
+        return Err(DcomError::Protocol);
+    }
+    let stub_end = if auth_len == 0 {
+        frag_len
+    } else {
+        let trailer_at = frag_len
+            .checked_sub(auth_len + 8)
+            .filter(|&at| at >= 24)
+            .ok_or(DcomError::Protocol)?;
+        let auth_pad = pdu[trailer_at + 2] as usize;
+        trailer_at
+            .checked_sub(auth_pad)
+            .filter(|&e| e >= 24)
+            .ok_or(DcomError::Protocol)?
+    };
+    parse_activation_stub(&pdu[24..stub_end], expected_iid)
 }
 
 /// Parse the NDR stub of a RemoteActivation response.
-fn parse_activation_stub(stub: &[u8]) -> Result<ActivationResponse, DcomError> {
+fn parse_activation_stub(
+    stub: &[u8],
+    expected_iid: Option<&[u8; 16]>,
+) -> Result<ActivationResponse, DcomError> {
     let mut c = Cursor::new(stub);
     let rd32 = |c: &mut Cursor<&[u8]>| {
         c.read_u32::<LittleEndian>()
@@ -953,6 +995,18 @@ fn parse_activation_stub(stub: &[u8]) -> Result<ActivationResponse, DcomError> {
         c.read_u16::<LittleEndian>()
             .map_err(|_| DcomError::Protocol)
     };
+
+    // The call's return value (error_status_t) is the last 4 bytes of the stub.
+    let ret = stub
+        .len()
+        .checked_sub(4)
+        .and_then(|o| stub.get(o..o + 4))
+        .ok_or(DcomError::Protocol)?;
+    let ret = u32::from_le_bytes([ret[0], ret[1], ret[2], ret[3]]);
+    if ret != 0 {
+        error!("RemoteActivation returned error_status_t=0x{:08x}", ret);
+        return Err(hresult_to_err(ret));
+    }
 
     // ORPCTHAT: flags, then a pointer to the extension array (null in practice).
     let _flags = rd32(&mut c)?;
@@ -969,10 +1023,11 @@ fn parse_activation_stub(stub: &[u8]) -> Result<ActivationResponse, DcomError> {
     if rd32(&mut c)? == 0 {
         return Err(DcomError::Protocol);
     }
-    let _max_count = rd32(&mut c)?;
+    // The conformant array's max_count must equal the struct's wNumEntries.
+    let max_count = rd32(&mut c)? as usize;
     let num_entries = rd16(&mut c)? as usize;
     let security_offset = rd16(&mut c)? as usize;
-    if security_offset > num_entries {
+    if max_count != num_entries || security_offset > num_entries {
         return Err(DcomError::Protocol);
     }
     let mut words = Vec::with_capacity(num_entries);
@@ -981,8 +1036,7 @@ fn parse_activation_stub(stub: &[u8]) -> Result<ActivationResponse, DcomError> {
     }
     let tcp_bindings = parse_string_bindings(&words[..security_offset]);
 
-    // phr is the only other field we check; the interface IPID is taken from the
-    // OBJREF below. NDR aligns the next field (ipidRemUnknown) to 4 bytes.
+    // NDR aligns the next field (ipidRemUnknown) to 4 bytes.
     let pos = c.position() as usize;
     c.set_position(((pos + 3) & !3) as u64);
     let mut ipid_rem_unknown = [0u8; 16];
@@ -993,13 +1047,15 @@ fn parse_activation_stub(stub: &[u8]) -> Result<ActivationResponse, DcomError> {
     let phr = rd32(&mut c)?;
     if phr != 0 {
         error!("RemoteActivation hr=0x{:08x}", phr);
-        return Err(DcomError::Protocol);
+        return Err(hresult_to_err(phr));
     }
 
-    // The activated interface comes back as an MInterfacePointer wrapping an
-    // OBJREF_STANDARD; its std.ipid is what later ORPC calls target. The OBJREF
-    // starts with the "MEOW" signature (MS-DCOM 2.2.18).
-    let ipid = find_objref_ipid(stub, &oxid)?;
+    // The activated interface comes back (in ppInterfaceData, after phr) as an
+    // MInterfacePointer wrapping an OBJREF_STANDARD; its std.ipid is what later
+    // ORPC calls target. The OBJREF starts with the "MEOW" signature (MS-DCOM
+    // 2.2.18). Scan only the bytes after phr so a "MEOW" inside the random OXID
+    // or ipidRemUnknown cannot be mistaken for it.
+    let ipid = find_objref_ipid(stub, c.position() as usize, &oxid, expected_iid)?;
 
     debug!(
         oxid = %hex::encode(oxid),
@@ -1010,6 +1066,7 @@ fn parse_activation_stub(stub: &[u8]) -> Result<ActivationResponse, DcomError> {
     Ok(ActivationResponse {
         oxid,
         ipid,
+        ipid_rem_unknown,
         tcp_bindings,
     })
 }
@@ -1050,29 +1107,52 @@ fn split_host_port(addr: &str) -> Option<(String, u16)> {
     (port > 0).then(|| (host.to_string(), port))
 }
 
-/// Locate the OBJREF_STANDARD by its "MEOW" signature and return std.ipid,
-/// verifying std.oxid matches the activation's OXID.
-fn find_objref_ipid(stub: &[u8], expected_oxid: &[u8; 8]) -> Result<[u8; 16], DcomError> {
+/// Locate the OBJREF_STANDARD (MS-DCOM 2.2.18) at or after `scan_from`, and
+/// return std.ipid. Verifies the signature region is OBJREF_STANDARD, that its
+/// IID matches `expected_iid` (when given), and that std.oxid matches the
+/// activation's OXID.
+fn find_objref_ipid(
+    stub: &[u8],
+    scan_from: usize,
+    expected_oxid: &[u8; 8],
+    expected_iid: Option<&[u8; 16]>,
+) -> Result<[u8; 16], DcomError> {
     // OBJREF layout: signature(4) flags(4) iid(16) then STDOBJREF
     // { flags(4) cPublicRefs(4) oxid(8) oid(8) ipid(16) }.
+    const FLAGS_OFFSET: usize = 4;
+    const IID_OFFSET: usize = 8;
     const OXID_OFFSET: usize = 4 + 4 + 16 + 4 + 4; // 32
     const IPID_OFFSET: usize = OXID_OFFSET + 8 + 8; // 48
-    let meow = stub
-        .windows(4)
-        .position(|w| w == b"MEOW")
+    const OBJREF_END: usize = IPID_OFFSET + 16; // 64
+    const OBJREF_STANDARD: u32 = 0x1;
+
+    let region = stub.get(scan_from..).ok_or(DcomError::Protocol)?;
+    let meow = scan_from
+        + region
+            .windows(4)
+            .position(|w| w == b"MEOW")
+            .ok_or(DcomError::Protocol)?;
+    let objref = stub
+        .get(meow..meow + OBJREF_END)
         .ok_or(DcomError::Protocol)?;
-    let oxid = stub
-        .get(meow + OXID_OFFSET..meow + OXID_OFFSET + 8)
-        .ok_or(DcomError::Protocol)?;
-    if oxid != expected_oxid {
+
+    let flags = u32::from_le_bytes(objref[FLAGS_OFFSET..FLAGS_OFFSET + 4].try_into().unwrap());
+    if flags != OBJREF_STANDARD {
+        warn!("OBJREF flags 0x{:08x} is not OBJREF_STANDARD", flags);
+        return Err(DcomError::Protocol);
+    }
+    if let Some(iid) = expected_iid {
+        if &objref[IID_OFFSET..IID_OFFSET + 16] != iid {
+            warn!("OBJREF IID does not match the activated interface");
+            return Err(DcomError::Protocol);
+        }
+    }
+    if &objref[OXID_OFFSET..OXID_OFFSET + 8] != expected_oxid {
         warn!("OBJREF oxid does not match activation oxid");
         return Err(DcomError::Protocol);
     }
-    let ipid_bytes = stub
-        .get(meow + IPID_OFFSET..meow + IPID_OFFSET + 16)
-        .ok_or(DcomError::Protocol)?;
     let mut ipid = [0u8; 16];
-    ipid.copy_from_slice(ipid_bytes);
+    ipid.copy_from_slice(&objref[IPID_OFFSET..IPID_OFFSET + 16]);
     Ok(ipid)
 }
 
@@ -1262,11 +1342,20 @@ mod tests {
     const WINDOWS_ACTIVATION_STUB: &[u8] =
         include_bytes!("testdata/remote_activation_response_stub.bin");
 
+    const IID_WBEM_LEVEL1_LOGIN: [u8; 16] = hex_literal::hex!("18ad09f36ad8d011a07500c04fb68820");
+    /// Byte offset of phr within WINDOWS_ACTIVATION_STUB (after the string array).
+    const PHR_OFFSET: usize = 388;
+
     #[test]
     fn parse_activation_stub_matches_windows_response() {
-        let r = parse_activation_stub(WINDOWS_ACTIVATION_STUB).unwrap();
+        let r =
+            parse_activation_stub(WINDOWS_ACTIVATION_STUB, Some(&IID_WBEM_LEVEL1_LOGIN)).unwrap();
         assert_eq!(hex::encode(r.oxid), "889959be75b91cd7");
         assert_eq!(hex::encode(r.ipid), "1a7c0000e8090000b541859917e7b564");
+        assert_eq!(
+            hex::encode(r.ipid_rem_unknown),
+            "00a40000e809000023bfdc109049aa7d"
+        );
         assert_eq!(
             r.tcp_bindings,
             vec![
@@ -1278,11 +1367,85 @@ mod tests {
     }
 
     #[test]
-    fn parse_activation_stub_rejects_nonzero_hresult() {
-        // Flip phr (at offset 388 in this stub) to E_ACCESSDENIED.
+    fn parse_activation_stub_rejects_nonzero_phr() {
         let mut stub = WINDOWS_ACTIVATION_STUB.to_vec();
-        stub[388..392].copy_from_slice(&0x8007_0005u32.to_le_bytes());
-        assert!(parse_activation_stub(&stub).is_err());
+        stub[PHR_OFFSET..PHR_OFFSET + 4].copy_from_slice(&0x8007_0005u32.to_le_bytes());
+        assert!(matches!(
+            parse_activation_stub(&stub, None),
+            Err(DcomError::AccessDenied)
+        ));
+    }
+
+    #[test]
+    fn parse_activation_stub_rejects_nonzero_return_value() {
+        let mut stub = WINDOWS_ACTIVATION_STUB.to_vec();
+        let n = stub.len();
+        stub[n - 4..].copy_from_slice(&0x0000_0005u32.to_le_bytes());
+        assert!(parse_activation_stub(&stub, None).is_err());
+    }
+
+    #[test]
+    fn parse_activation_stub_rejects_wrong_iid() {
+        let wrong = [0xAAu8; 16];
+        assert!(parse_activation_stub(WINDOWS_ACTIVATION_STUB, Some(&wrong)).is_err());
+    }
+
+    #[test]
+    fn parse_activation_stub_rejects_max_count_mismatch() {
+        // DUALSTRINGARRAY conformant max_count is at offset 20 (after 24-byte
+        // RPC header would be 44; here the stub has no RPC header).
+        let mut stub = WINDOWS_ACTIVATION_STUB.to_vec();
+        stub[20..24].copy_from_slice(&9999u32.to_le_bytes());
+        assert!(parse_activation_stub(&stub, None).is_err());
+    }
+
+    #[test]
+    fn parse_activation_stub_handles_truncation_without_panic() {
+        // Callers only ever pass a length-validated PDU, but a truncated buffer
+        // must never panic (it either errors or returns the data it could read).
+        for n in 0..WINDOWS_ACTIVATION_STUB.len() {
+            let _ = parse_activation_stub(&WINDOWS_ACTIVATION_STUB[..n], None);
+        }
+        // A prefix too short to hold the OBJREF cannot yield an IPID.
+        assert!(parse_activation_stub(&WINDOWS_ACTIVATION_STUB[..100], None).is_err());
+    }
+
+    /// Wrap a stub in a response PDU with a sec_trailer + auth_value, as the
+    /// sealed path delivers it after decryption.
+    fn authenticated_response_pdu(stub: &[u8], auth_value_len: usize) -> Vec<u8> {
+        let pad = (16 - stub.len() % 16) % 16;
+        let frag_len = 24 + stub.len() + pad + 8 + auth_value_len;
+        let mut pdu = vec![5, 0, 0x02, 0x03, 0x10, 0, 0, 0];
+        pdu.extend_from_slice(&(frag_len as u16).to_le_bytes());
+        pdu.extend_from_slice(&(auth_value_len as u16).to_le_bytes());
+        pdu.extend_from_slice(&3u32.to_le_bytes()); // call_id
+        pdu.extend_from_slice(&(stub.len() as u32).to_le_bytes()); // alloc_hint
+        pdu.extend_from_slice(&[0, 0, 0, 0]); // p_cont_id, cancel_count, reserved
+        pdu.extend_from_slice(stub);
+        pdu.extend(std::iter::repeat_n(0u8, pad));
+        pdu.extend_from_slice(&[0x0a, 0x06, pad as u8, 0, 0, 0, 0, 0]); // sec_trailer
+        pdu.extend(std::iter::repeat_n(0xFFu8, auth_value_len)); // auth_value
+        pdu
+    }
+
+    #[test]
+    fn parse_remote_activation_response_strips_auth_trailer() {
+        // The error_status_t check must read the real last stub word, not the
+        // trailing auth signature. Without trimming, the 0xFF auth bytes would
+        // look like a non-zero return value and this would wrongly fail.
+        let pdu = authenticated_response_pdu(WINDOWS_ACTIVATION_STUB, 16);
+        let r = parse_remote_activation_response(&pdu, Some(&IID_WBEM_LEVEL1_LOGIN)).unwrap();
+        assert_eq!(r.port(), Some(24158));
+        assert_eq!(hex::encode(r.ipid), "1a7c0000e8090000b541859917e7b564");
+    }
+
+    #[test]
+    fn parse_remote_activation_response_rejects_fault_pdu() {
+        // ptype=0x03 (fault), status E_ACCESSDENIED at offset 24.
+        let mut pdu = vec![5, 0, 0x03, 0x03, 0x10, 0, 0, 0, 32, 0, 0, 0, 1, 0, 0, 0];
+        pdu.extend_from_slice(&[0u8; 8]); // alloc_hint, cancel_count, reserved
+        pdu.extend_from_slice(&0x8007_0005u32.to_le_bytes());
+        assert!(parse_remote_activation_response(&pdu, None).is_err());
     }
 
     #[test]
