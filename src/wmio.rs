@@ -267,6 +267,15 @@ fn parse_class_part(wmio: &[u8], start: usize) -> Result<ClassPart, WmioError> {
     })
 }
 
+/// Decode every object returned by an IEnumWbemClassObject::Next response into
+/// one JSON object per row — the entry point the WMI client calls on each batch.
+pub(crate) fn decode_next_response(stub: &[u8]) -> Result<Vec<serde_json::Value>, WmioError> {
+    parse_next_response(stub)?
+        .iter()
+        .map(|blob| decode_object(&blob.data))
+        .collect()
+}
+
 /// Decode one WMIO instance object into a JSON object of its property values.
 /// Only plain CIM instances (no decoration, no per-property qualifiers) are
 /// handled so far, and only CIM_STRING values; other CIM types error rather
@@ -430,6 +439,14 @@ mod tests {
                 ("Name", CIM_STRING, 12),
             ]
         );
+    }
+
+    #[test]
+    fn decode_next_response_returns_one_row_per_object() {
+        let rows = decode_next_response(NEXT_RESULT).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["Name"], "DC01");
+        assert_eq!(rows[0]["Domain"], "test.local");
     }
 
     #[test]
