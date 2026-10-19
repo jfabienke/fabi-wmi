@@ -9,6 +9,24 @@
 #![allow(dead_code)]
 
 use byteorder::{LittleEndian, WriteBytesExt};
+use thiserror::Error;
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub(crate) enum WmiProtoError {
+    #[error("malformed WMI response stub")]
+    Malformed,
+    #[error("response returned an unexpected interface")]
+    WrongInterface,
+    #[error("WMI call failed (hr={0:#010x})")]
+    Hresult(u32),
+}
+
+/// IID of IWbemServices (returned by IWbemLevel1Login::NTLMLogin).
+pub(crate) const IID_IWBEM_SERVICES: [u8; 16] =
+    hex_literal::hex!("99dc56958c82cf11a37e00aa003240c7");
+/// IID of IEnumWbemClassObject (returned by IWbemServices::ExecQuery).
+pub(crate) const IID_IENUM_WBEM_CLASS_OBJECT: [u8; 16] =
+    hex_literal::hex!("e147790231d7ce11a357000000000001");
 
 /// COMVERSION used by current Windows: 5.7.
 const COMVERSION: [u8; 4] = [5, 0, 7, 0];
@@ -116,6 +134,46 @@ pub(crate) fn encode_enum_next(causality_id: &[u8; 16], timeout: i32, count: u32
     buf
 }
 
+/// Parse a response whose [out] parameter is an interface pointer (NTLMLogin,
+/// ExecQuery): confirm the call's HRESULT (last 4 bytes) is success, locate the
+/// returned OBJREF_STANDARD by its "MEOW" signature, check it is standard and
+/// carries `expected_iid`, and return its std.ipid for subsequent ORPC calls.
+pub(crate) fn parse_interface_response(
+    stub: &[u8],
+    expected_iid: &[u8; 16],
+) -> Result<[u8; 16], WmiProtoError> {
+    const FLAGS_OFF: usize = 4;
+    const IID_OFF: usize = 8;
+    const IPID_OFF: usize = 48; // sig(4)+flags(4)+iid(16)+std{flags(4)+crefs(4)+oxid(8)+oid(8)}
+    const OBJREF_END: usize = IPID_OFF + 16;
+    const OBJREF_STANDARD: u32 = 1;
+
+    let hr = stub
+        .len()
+        .checked_sub(4)
+        .and_then(|o| stub.get(o..o + 4))
+        .ok_or(WmiProtoError::Malformed)?;
+    let hr = u32::from_le_bytes(hr.try_into().unwrap());
+    if hr != 0 {
+        return Err(WmiProtoError::Hresult(hr));
+    }
+
+    let meow = stub
+        .windows(4)
+        .position(|w| w == b"MEOW")
+        .ok_or(WmiProtoError::Malformed)?;
+    let objref = stub
+        .get(meow..meow + OBJREF_END)
+        .ok_or(WmiProtoError::Malformed)?;
+    if u32::from_le_bytes(objref[FLAGS_OFF..FLAGS_OFF + 4].try_into().unwrap()) != OBJREF_STANDARD {
+        return Err(WmiProtoError::Malformed);
+    }
+    if &objref[IID_OFF..IID_OFF + 16] != expected_iid {
+        return Err(WmiProtoError::WrongInterface);
+    }
+    Ok(objref[IPID_OFF..IPID_OFF + 16].try_into().unwrap())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,6 +234,40 @@ mod tests {
         let cid: [u8; 16] = NEXT_STUB[12..28].try_into().unwrap();
         let stub = encode_enum_next(&cid, WBEM_INFINITE, 1);
         assert_eq!(stub, NEXT_STUB);
+    }
+
+    const NTLMLOGIN_RESP: &[u8] = include_bytes!("testdata/ntlmlogin_response_stub.bin");
+    const EXECQUERY_RESP: &[u8] = include_bytes!("testdata/execquery_response_stub.bin");
+
+    #[test]
+    fn parse_interface_response_extracts_iwbemservices_ipid() {
+        let ipid = parse_interface_response(NTLMLOGIN_RESP, &IID_IWBEM_SERVICES).unwrap();
+        assert_eq!(hex::encode(ipid), "0c7000007c060000b7af6bab62096d93");
+    }
+
+    #[test]
+    fn parse_interface_response_extracts_ienum_ipid() {
+        let ipid = parse_interface_response(EXECQUERY_RESP, &IID_IENUM_WBEM_CLASS_OBJECT).unwrap();
+        assert_eq!(hex::encode(ipid), "159c00007c060000b632e12bd5007b97");
+    }
+
+    #[test]
+    fn parse_interface_response_rejects_wrong_iid() {
+        assert_eq!(
+            parse_interface_response(NTLMLOGIN_RESP, &IID_IENUM_WBEM_CLASS_OBJECT),
+            Err(WmiProtoError::WrongInterface)
+        );
+    }
+
+    #[test]
+    fn parse_interface_response_rejects_failure_hresult() {
+        let mut stub = NTLMLOGIN_RESP.to_vec();
+        let n = stub.len();
+        stub[n - 4..].copy_from_slice(&0x8004_1001u32.to_le_bytes()); // WBEM_E_FAILED
+        assert_eq!(
+            parse_interface_response(&stub, &IID_IWBEM_SERVICES),
+            Err(WmiProtoError::Hresult(0x8004_1001))
+        );
     }
 
     #[test]
