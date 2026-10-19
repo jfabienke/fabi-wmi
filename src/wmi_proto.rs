@@ -103,6 +103,19 @@ pub(crate) fn encode_exec_query(
     buf
 }
 
+/// WBEM_INFINITE: wait indefinitely for the next objects.
+pub(crate) const WBEM_INFINITE: i32 = -1;
+
+/// Encode the IEnumWbemClassObject::Next (opnum 4) request stub (MS-WMI
+/// 3.1.4.4.3): ORPCTHIS, lTimeout, uCount. The [out] objects take no input.
+pub(crate) fn encode_enum_next(causality_id: &[u8; 16], timeout: i32, count: u32) -> Vec<u8> {
+    let mut buf = Vec::new();
+    encode_orpcthis(&mut buf, causality_id);
+    buf.write_i32::<LittleEndian>(timeout).unwrap();
+    buf.write_u32::<LittleEndian>(count).unwrap();
+    buf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,6 +166,16 @@ mod tests {
             *b = 0;
         }
         assert_eq!(stub, expected);
+    }
+
+    /// IEnumWbemClassObject::Next request stub impacket sent and the DC accepted.
+    const NEXT_STUB: &[u8] = include_bytes!("testdata/next_request_stub.bin");
+
+    #[test]
+    fn encode_enum_next_matches_windows_reference() {
+        let cid: [u8; 16] = NEXT_STUB[12..28].try_into().unwrap();
+        let stub = encode_enum_next(&cid, WBEM_INFINITE, 1);
+        assert_eq!(stub, NEXT_STUB);
     }
 
     #[test]
