@@ -27,6 +27,8 @@ const NTLMSSP_SIGNATURE: &[u8; 8] = b"NTLMSSP\0";
 ///
 /// See: [MS-NLMP] §3.2.5.1.2, Table 3 "Negotiate Flags"
 const NEGOTIATE_FLAGS: u32 = 0xE289_8235;
+/// NTLMSSP VERSION (MS-NLMP 2.2.2.10): Windows 10.0, build 0, NTLMSSP_REVISION_W2K3.
+const NTLM_VERSION: [u8; 8] = [0x0A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0F];
 
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct Credentials {
@@ -234,11 +236,11 @@ fn build_type3_message(
     forced_timestamp: Option<u64>,
 ) -> Result<AuthenticateMessage, AuthError> {
     let username_upper = creds.username.to_uppercase();
-    let domain_upper = creds.domain.to_uppercase();
 
     let mut nt_hash = compute_nt_hash(creds.password.as_str());
 
-    let mut identity = utf16le(&(username_upper.clone() + &domain_upper));
+    // NTOWFv2 (MS-NLMP 3.3.2): uppercase the user name only, never the domain.
+    let mut identity = utf16le(&(username_upper.clone() + &creds.domain));
     let ntlm_v2_hash = hmac_md5_segments(&nt_hash, &[&identity]);
     zeroize_bytes(&mut identity);
 
@@ -250,10 +252,13 @@ fn build_type3_message(
         generate_client_nonce()
     };
 
-    let timestamp = forced_timestamp.unwrap_or_else(current_filetime);
+    // MS-NLMP 3.1.5.1.2: echo the server's MsvAvTimestamp when the challenge has one.
+    let timestamp = forced_timestamp
+        .or_else(|| av_timestamp(&challenge.target_info))
+        .unwrap_or_else(current_filetime);
     let mut blob = Vec::new();
-    blob.extend_from_slice(&0x0101_0000u32.to_le_bytes());
-    blob.extend_from_slice(&0u32.to_le_bytes());
+    blob.extend_from_slice(&[0x01, 0x01, 0x00, 0x00]); // RespType, HiRespType, Reserved1
+    blob.extend_from_slice(&0u32.to_le_bytes()); // Reserved2
     blob.extend_from_slice(&timestamp.to_le_bytes());
     blob.extend_from_slice(&client_nonce);
     blob.extend_from_slice(&0u32.to_le_bytes());
@@ -332,11 +337,11 @@ fn build_type3_message_with_mic(
     forced_timestamp: Option<u64>,
 ) -> Result<AuthenticateMessage, AuthError> {
     let username_upper = creds.username.to_uppercase();
-    let domain_upper = creds.domain.to_uppercase();
 
     let mut nt_hash = compute_nt_hash(creds.password.as_str());
 
-    let mut identity = utf16le(&(username_upper.clone() + &domain_upper));
+    // NTOWFv2 (MS-NLMP 3.3.2): uppercase the user name only, never the domain.
+    let mut identity = utf16le(&(username_upper.clone() + &creds.domain));
     let ntlm_v2_hash = hmac_md5_segments(&nt_hash, &[&identity]);
     zeroize_bytes(&mut identity);
 
@@ -348,12 +353,15 @@ fn build_type3_message_with_mic(
         generate_client_nonce()
     };
 
-    let timestamp = forced_timestamp.unwrap_or_else(current_filetime);
+    // MS-NLMP 3.1.5.1.2: echo the server's MsvAvTimestamp when the challenge has one.
+    let timestamp = forced_timestamp
+        .or_else(|| av_timestamp(&challenge.target_info))
+        .unwrap_or_else(current_filetime);
 
     // Build the NTLMv2 blob
     let mut blob = Vec::new();
-    blob.extend_from_slice(&0x0101_0000u32.to_le_bytes()); // RespType and HiRespType
-    blob.extend_from_slice(&0u32.to_le_bytes()); // Reserved1
+    blob.extend_from_slice(&[0x01, 0x01, 0x00, 0x00]); // RespType, HiRespType, Reserved1
+    blob.extend_from_slice(&0u32.to_le_bytes()); // Reserved2
     blob.extend_from_slice(&timestamp.to_le_bytes());
     blob.extend_from_slice(&client_nonce);
     blob.extend_from_slice(&0u32.to_le_bytes()); // Reserved2
@@ -388,7 +396,8 @@ fn build_type3_message_with_mic(
 
     // Build buffer descriptors
     let mut buffers = Vec::with_capacity(6 * 8);
-    let mut offset = 80u32; // Start after header (64 bytes) + MIC (16 bytes)
+    // NEGOTIATE_VERSION is set, so the fixed header is 64 bytes + Version (8) + MIC (16).
+    let mut offset = 88u32;
 
     for buf in [
         lm_response.as_slice(),
@@ -411,6 +420,7 @@ fn build_type3_message_with_mic(
     message.extend_from_slice(&3u32.to_le_bytes()); // Type 3
     message.extend_from_slice(&buffers); // 6 buffer descriptors (48 bytes)
     message.extend_from_slice(&NEGOTIATE_FLAGS.to_le_bytes()); // Flags (4 bytes)
+    message.extend_from_slice(&NTLM_VERSION); // Version (8 bytes)
 
     // Add 16-byte placeholder for MIC (will be calculated and replaced)
     let mic_offset = message.len();
@@ -470,8 +480,24 @@ fn utf16le(value: &str) -> Vec<u8> {
         .collect::<Vec<u8>>()
 }
 
+/// MsvAvTimestamp (AvId 7) from a CHALLENGE_MESSAGE TargetInfo, if present.
+fn av_timestamp(target_info: &[u8]) -> Option<u64> {
+    let mut rest = target_info;
+    while rest.len() >= 4 {
+        let id = u16::from_le_bytes([rest[0], rest[1]]);
+        let len = u16::from_le_bytes([rest[2], rest[3]]) as usize;
+        let value = rest.get(4..4 + len)?;
+        match id {
+            0 => return None,
+            7 if len == 8 => return Some(u64::from_le_bytes(value.try_into().ok()?)),
+            _ => rest = &rest[4 + len..],
+        }
+    }
+    None
+}
+
 fn current_filetime() -> u64 {
-    const WINDOWS_TICK: u64 = 10_000;
+    const WINDOWS_TICK: u64 = 10_000_000; // 100ns intervals per second
     const SEC_TO_UNIX_EPOCH: u64 = 11_644_473_600;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -557,6 +583,7 @@ pub(crate) fn sample_type2() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hex_literal::hex;
 
     const TEST_PASSWORD: &str = "Password";
 
@@ -790,5 +817,79 @@ mod tests {
 
         let creds = Credentials::new("user".into(), String::new(), String::new(), "wkst".into());
         assert!(matches!(creds.validate(), Err(AuthError::Creds)));
+    }
+
+    fn security_buffer(message: &[u8], field: usize) -> &[u8] {
+        let at = 12 + 8 * field;
+        let len = u16::from_le_bytes([message[at], message[at + 1]]) as usize;
+        let off = u32::from_le_bytes(message[at + 4..at + 8].try_into().unwrap()) as usize;
+        &message[off..off + len]
+    }
+
+    /// MS-NLMP 4.2.4 (NTLMv2 Authentication) published test vectors.
+    #[test]
+    fn type3_matches_ms_nlmp_ntlmv2_test_vectors() {
+        let creds = Credentials::new(
+            "User".into(),
+            "Password".into(),
+            "Domain".into(),
+            "COMPUTER".into(),
+        );
+        let challenge = ChallengeMessage {
+            flags: NEGOTIATE_FLAGS,
+            server_challenge: hex!("0123456789abcdef"),
+            target_info: hex!(
+                "02000c0044006f006d00610069006e00"
+                "01000c005300650072007600650072000000 0000"
+            )
+            .to_vec(),
+        };
+        let auth =
+            build_type3_message_with_mic(&creds, &challenge, None, &[], Some([0xaa; 8]), Some(0))
+                .unwrap();
+        let msg = &auth.message;
+
+        // Header: Version at 64, MIC at 72, payload from 88.
+        assert_eq!(&msg[64..72], &NTLM_VERSION);
+        assert_eq!(
+            u32::from_le_bytes(msg[16..20].try_into().unwrap()),
+            88,
+            "LmChallengeResponse offset"
+        );
+
+        let nt = security_buffer(msg, 1);
+        assert_eq!(
+            &nt[..16],
+            &hex!("68cd0ab851e51c96aabc927bebef6a1c"),
+            "NTProofStr"
+        );
+        assert_eq!(
+            &nt[16..20],
+            &[0x01, 0x01, 0x00, 0x00],
+            "RespType/HiRespType"
+        );
+        assert_eq!(
+            security_buffer(msg, 0),
+            &hex!("86c35097ac9cec102554764a57cccc19aaaaaaaaaaaaaaaa"),
+            "LMv2 response"
+        );
+        assert_eq!(
+            auth.session_key,
+            hex!("8de40ccadbc14a82f15cb0ad0de95ca3"),
+            "SessionBaseKey"
+        );
+    }
+
+    #[test]
+    fn av_timestamp_reads_msv_av_timestamp() {
+        let info = hex!("07000800 4a268755e95fdd01 00000000");
+        assert_eq!(av_timestamp(&info), Some(0x01dd5fe95587264a));
+        assert_eq!(av_timestamp(&hex!("00000000")), None);
+    }
+
+    #[test]
+    fn current_filetime_is_after_2020() {
+        // 2020-01-01T00:00:00Z as FILETIME
+        assert!(current_filetime() > 132_223_104_000_000_000);
     }
 }

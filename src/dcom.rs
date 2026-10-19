@@ -197,10 +197,10 @@ fn resolve_oxid_with_auth(
     })?;
 
     stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(RPC_IO_TIMEOUT))
         .map_err(|_| DcomError::Connect)?;
     stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
+        .set_write_timeout(Some(RPC_IO_TIMEOUT))
         .map_err(|_| DcomError::Connect)?;
 
     // IObjectExporter UUID
@@ -407,10 +407,10 @@ pub fn activate_wmi_dcom_anonymous(host: &str) -> Result<(u16, [u8; 8]), DcomErr
     })?;
 
     stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(RPC_IO_TIMEOUT))
         .map_err(|_| DcomError::Connect)?;
     stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
+        .set_write_timeout(Some(RPC_IO_TIMEOUT))
         .map_err(|_| DcomError::Connect)?;
 
     let scm_uuid: [u8; 16] = hex_literal::hex!("a0 01 00 00 00 00 00 00 c0 00 00 00 00 00 00 46");
@@ -630,10 +630,10 @@ fn activate_wmi_dcom_with_auth(
     })?;
 
     stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(RPC_IO_TIMEOUT))
         .map_err(|_| DcomError::Connect)?;
     stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
+        .set_write_timeout(Some(RPC_IO_TIMEOUT))
         .map_err(|_| DcomError::Connect)?;
 
     let scm_uuid: [u8; 16] = hex_literal::hex!("a0 01 00 00 00 00 00 00 c0 00 00 00 00 00 00 46");
@@ -692,7 +692,9 @@ fn activate_wmi_dcom_with_auth(
     Ok((port, oxid))
 }
 
-use crate::transport::{AUTH_TYPE_NTLM, AUTH_TYPE_SPNEGO};
+use crate::transport::{
+    write_context_list, AUTH_TYPE_NTLM, AUTH_TYPE_SPNEGO, DATA_REP, RPC_IO_TIMEOUT,
+};
 const AUTH_LEVEL_PRIVACY: u8 = 0x06; // Packet Privacy for encrypted communication
 const MAX_XMIT_RECV: u16 = 0x10B8;
 
@@ -701,16 +703,7 @@ fn build_scm_bind_pdu(call_id: u32, abstract_syntax: &[u8; 16], negotiate: &[u8]
     body.write_u16::<LittleEndian>(MAX_XMIT_RECV).unwrap();
     body.write_u16::<LittleEndian>(MAX_XMIT_RECV).unwrap();
     body.write_u32::<LittleEndian>(0).unwrap();
-    body.write_u8(1).unwrap();
-    body.write_u8(0).unwrap();
-    body.write_u16::<LittleEndian>(0).unwrap();
-    body.write_u8(1).unwrap();
-    body.write_u8(0).unwrap();
-    body.extend_from_slice(abstract_syntax);
-    body.write_u16::<LittleEndian>(0).unwrap();
-    body.write_u16::<LittleEndian>(0).unwrap();
-    body.extend_from_slice(&hex_literal::hex!("045d888aeb1cc9119fe808002b104860"));
-    body.write_u32::<LittleEndian>(2).unwrap();
+    write_context_list(&mut body, 0, abstract_syntax);
 
     let auth_len = if negotiate.is_empty() {
         0
@@ -765,16 +758,7 @@ fn build_scm_alter_context_pdu(
     body.write_u16::<LittleEndian>(MAX_XMIT_RECV).unwrap();
     body.write_u16::<LittleEndian>(MAX_XMIT_RECV).unwrap();
     body.write_u32::<LittleEndian>(0).unwrap();
-    body.write_u8(1).unwrap();
-    body.write_u8(0).unwrap();
-    body.write_u16::<LittleEndian>(context_id).unwrap();
-    body.write_u8(1).unwrap();
-    body.write_u8(0).unwrap();
-    body.extend_from_slice(abstract_syntax);
-    body.write_u16::<LittleEndian>(0).unwrap();
-    body.write_u16::<LittleEndian>(0).unwrap();
-    body.extend_from_slice(&hex_literal::hex!("045d888aeb1cc9119fe808002b104860"));
-    body.write_u32::<LittleEndian>(2).unwrap();
+    write_context_list(&mut body, context_id, abstract_syntax);
 
     // Wrap NTLM in SPNEGO for modern Windows compatibility
     let (auth_blob, auth_type) =
@@ -1129,7 +1113,7 @@ fn build_anonymous_bind_pdu(call_id: u32, interface_uuid: &[u8; 16]) -> Vec<u8> 
     pdu.write_u8(0).unwrap(); // version minor
     pdu.write_u8(0x0B).unwrap(); // ptype: BIND
     pdu.write_u8(0x03).unwrap(); // flags: first+last fragment
-    pdu.write_u32::<LittleEndian>(0x10000000).unwrap(); // data representation (little-endian)
+    pdu.extend_from_slice(&DATA_REP);
 
     // Fragment length (will update later)
     let frag_len_offset = pdu.len();
@@ -1146,21 +1130,7 @@ fn build_anonymous_bind_pdu(call_id: u32, interface_uuid: &[u8; 16]) -> Vec<u8> 
     pdu.write_u16::<LittleEndian>(0x10B8).unwrap(); // max_recv_frag
     pdu.write_u32::<LittleEndian>(0).unwrap(); // assoc_group
 
-    // Context list
-    pdu.write_u8(1).unwrap(); // num_ctx_items
-    pdu.write_u8(0).unwrap(); // reserved
-    pdu.write_u16::<LittleEndian>(0).unwrap(); // context_id = 0
-    pdu.write_u8(1).unwrap(); // num_trans_items
-    pdu.write_u8(0).unwrap(); // reserved
-
-    // Abstract syntax (interface UUID)
-    pdu.extend_from_slice(interface_uuid);
-    pdu.write_u16::<LittleEndian>(0).unwrap(); // interface version major
-    pdu.write_u16::<LittleEndian>(0).unwrap(); // interface version minor
-
-    // Transfer syntax (NDR)
-    pdu.extend_from_slice(&hex_literal::hex!("045d888aeb1cc9119fe808002b104860")); // NDR UUID
-    pdu.write_u32::<LittleEndian>(2).unwrap(); // NDR version 2.0
+    write_context_list(&mut pdu, 0, interface_uuid);
 
     // NO auth trailer for anonymous bind
 
@@ -1182,7 +1152,7 @@ fn build_anonymous_request_pdu(call_id: u32, context_id: u16, opnum: u16, stub: 
     pdu.write_u8(0).unwrap(); // version minor
     pdu.write_u8(0x00).unwrap(); // ptype: REQUEST
     pdu.write_u8(0x03).unwrap(); // flags: first+last fragment
-    pdu.write_u32::<LittleEndian>(0x10000000).unwrap(); // data representation
+    pdu.extend_from_slice(&DATA_REP);
 
     // Fragment length (will update later)
     let frag_len_offset = pdu.len();
@@ -1508,5 +1478,41 @@ mod tests {
         assert!(result.is_ok(), "Should parse DUALSTRINGARRAY successfully");
         let (_, port) = result.unwrap();
         assert_eq!(port, 5000, "Should extract port 5000 from UTF-16 string");
+    }
+
+    /// First 72 bytes of the IRemoteSCMActivator bind impacket 0.13.1 sent to a
+    /// Windows Server 2022 DC (accepted with bind_ack): header + p_cont_list.
+    /// frag_length/auth_length (bytes 8..12) belong to its NTLM trailer.
+    const IMPACKET_SCM_BIND_PREFIX: [u8; 72] = hex_literal::hex!(
+        "05000b03100000007000200001000000b810b81000000000"
+        "0100000000000100a001000000000000c000000000000046"
+        "00000000045d888aeb1cc9119fe808002b10486002000000"
+    );
+    const IREMOTESCMACTIVATOR: [u8; 16] = hex_literal::hex!("a001000000000000c000000000000046");
+
+    fn assert_matches_windows_bind(pdu: &[u8]) {
+        assert_eq!(&pdu[..8], &IMPACKET_SCM_BIND_PREFIX[..8], "header/drep");
+        assert_eq!(
+            &pdu[12..72],
+            &IMPACKET_SCM_BIND_PREFIX[12..],
+            "call_id/context list"
+        );
+        let frag_len = u16::from_le_bytes([pdu[8], pdu[9]]) as usize;
+        assert_eq!(frag_len, pdu.len(), "frag_length must equal PDU size");
+    }
+
+    #[test]
+    fn anonymous_bind_matches_windows_accepted_bind() {
+        let pdu = build_anonymous_bind_pdu(1, &IREMOTESCMACTIVATOR);
+        assert_eq!(pdu.len(), 72);
+        assert_matches_windows_bind(&pdu);
+    }
+
+    #[test]
+    fn authenticated_bind_matches_windows_accepted_bind() {
+        let pdu = build_scm_bind_pdu(1, &IREMOTESCMACTIVATOR, b"NTLMSSP\0\x01\0\0\0");
+        assert_matches_windows_bind(&pdu);
+        // Context list ends 4-aligned, so the sec_trailer follows with no padding.
+        assert_eq!(pdu[74], 0, "auth_pad_length");
     }
 }

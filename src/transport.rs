@@ -62,6 +62,32 @@ pub trait RpcTransport: Send {
     }
 }
 
+/// Packed drep (MS-RPCE 2.2.2.1 / C706 14.1): little-endian integers, ASCII, IEEE floats.
+/// Wire bytes `10 00 00 00`; write with `extend_from_slice`, never as an integer.
+pub(crate) const DATA_REP: [u8; 4] = [0x10, 0x00, 0x00, 0x00];
+
+/// Socket read/write timeout for RPC exchanges. Windows can take >5s to answer
+/// the first bind (seen: 5.3s from Server 2022 behind QEMU user-mode NAT).
+pub(crate) const RPC_IO_TIMEOUT: Duration = Duration::from_secs(30);
+
+const NDR_TRANSFER_SYNTAX: [u8; 16] = hex_literal::hex!("045d888aeb1cc9119fe808002b104860");
+
+/// Write a bind/alter_context `p_cont_list_t` with one presentation context
+/// (C706 12.6.3.1): abstract syntax version 0.0, transfer syntax NDR 2.0.
+pub(crate) fn write_context_list(buf: &mut Vec<u8>, context_id: u16, abstract_syntax: &[u8; 16]) {
+    buf.write_u8(1).unwrap(); // n_context_elem
+    buf.write_u8(0).unwrap(); // reserved
+    buf.write_u16::<LittleEndian>(0).unwrap(); // reserved2
+    buf.write_u16::<LittleEndian>(context_id).unwrap(); // p_cont_id
+    buf.write_u8(1).unwrap(); // n_transfer_syn
+    buf.write_u8(0).unwrap(); // reserved
+    buf.extend_from_slice(abstract_syntax);
+    buf.write_u16::<LittleEndian>(0).unwrap(); // abstract syntax version major
+    buf.write_u16::<LittleEndian>(0).unwrap(); // abstract syntax version minor
+    buf.extend_from_slice(&NDR_TRANSFER_SYNTAX);
+    buf.write_u32::<LittleEndian>(2).unwrap(); // NDR version 2
+}
+
 /// Build an RPC request PDU using the provided call/context identifiers and stub payload.
 pub(crate) fn build_request_pdu(call_id: u32, context_id: u16, opnum: u16, stub: &[u8]) -> Vec<u8> {
     let mut body = Vec::new();
@@ -77,7 +103,7 @@ pub(crate) fn build_request_pdu(call_id: u32, context_id: u16, opnum: u16, stub:
     pdu.write_u8(0).unwrap(); // minor version
     pdu.write_u8(0x00).unwrap(); // ptype=request
     pdu.write_u8(0x03).unwrap(); // flags first|last
-    pdu.write_u32::<LittleEndian>(0x10_00_00_00).unwrap(); // data rep LE
+    pdu.extend_from_slice(&DATA_REP);
     pdu.write_u16::<LittleEndian>(frag_len).unwrap();
     pdu.write_u16::<LittleEndian>(0).unwrap(); // auth_len (no auth yet)
     pdu.write_u32::<LittleEndian>(call_id).unwrap();
@@ -509,8 +535,8 @@ impl RealRpcTransport {
             .ok_or_else(|| TransportError::Failure("Failed to resolve address".into()))?;
 
         let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))?;
-        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_read_timeout(Some(RPC_IO_TIMEOUT))?;
+        stream.set_write_timeout(Some(RPC_IO_TIMEOUT))?;
 
         // Create Kerberos client
         let mut auth = KerberosClient::new(host, config.clone(), creds)
@@ -695,18 +721,12 @@ impl RealRpcTransport {
         body.write_u16::<LittleEndian>(MAX_XMIT_RECV).unwrap();
         body.write_u16::<LittleEndian>(MAX_XMIT_RECV).unwrap();
         body.write_u32::<LittleEndian>(0).unwrap(); // association group
-        body.write_u8(1).unwrap(); // number of context items
-        body.write_u8(0).unwrap(); // alignment padding
-        body.write_u16::<LittleEndian>(0).unwrap(); // context ID
-        body.write_u8(1).unwrap(); // number of transfer syntaxes
-        body.write_u8(0).unwrap();
-        // Abstract syntax: IRemoteSCMActivator {000001a0-0000-0000-C000-000000000046}
-        body.extend_from_slice(&hex_literal::hex!("a001000000000000c000000000000046"));
-        body.write_u16::<LittleEndian>(0).unwrap(); // version major
-        body.write_u16::<LittleEndian>(0).unwrap(); // version minor
-                                                    // Transfer syntax: NDR
-        body.extend_from_slice(&hex_literal::hex!("045d888aeb1cc9119fe808002b104860"));
-        body.write_u32::<LittleEndian>(2).unwrap(); // version 2.0
+                                                    // Abstract syntax: IRemoteSCMActivator {000001a0-0000-0000-C000-000000000046}
+        write_context_list(
+            &mut body,
+            0,
+            &hex_literal::hex!("a001000000000000c000000000000046"),
+        );
 
         let pad = (4 - (body.len() % 4)) % 4;
         body.extend(std::iter::repeat_n(0u8, pad));
@@ -716,7 +736,6 @@ impl RealRpcTransport {
         body.push(pad as u8);
         body.push(0);
         body.write_u32::<LittleEndian>(0).unwrap(); // auth context id
-        body.extend(std::iter::repeat_n(0u8, pad));
         body.extend_from_slice(&auth_blob);
 
         let frag_len = (16 + body.len()) as u16;
@@ -727,7 +746,7 @@ impl RealRpcTransport {
         pdu.write_u8(0).unwrap();
         pdu.write_u8(0x0B).unwrap(); // bind
         pdu.write_u8(0x03).unwrap();
-        pdu.write_u32::<LittleEndian>(0x10_00_00_00).unwrap();
+        pdu.extend_from_slice(&DATA_REP);
         pdu.write_u16::<LittleEndian>(frag_len).unwrap();
         pdu.write_u16::<LittleEndian>(auth_len).unwrap();
         pdu.write_u32::<LittleEndian>(call_id).unwrap();
@@ -752,16 +771,11 @@ impl RealRpcTransport {
         body.write_u16::<LittleEndian>(MAX_XMIT_RECV).unwrap();
         body.write_u16::<LittleEndian>(MAX_XMIT_RECV).unwrap();
         body.write_u32::<LittleEndian>(0).unwrap();
-        body.write_u8(1).unwrap();
-        body.write_u8(0).unwrap();
-        body.write_u16::<LittleEndian>(context_id).unwrap();
-        body.write_u8(1).unwrap();
-        body.write_u8(0).unwrap();
-        body.extend_from_slice(&hex_literal::hex!("a001000000000000c000000000000046"));
-        body.write_u16::<LittleEndian>(0).unwrap();
-        body.write_u16::<LittleEndian>(0).unwrap();
-        body.extend_from_slice(&hex_literal::hex!("045d888aeb1cc9119fe808002b104860"));
-        body.write_u32::<LittleEndian>(2).unwrap();
+        write_context_list(
+            &mut body,
+            context_id,
+            &hex_literal::hex!("a001000000000000c000000000000046"),
+        );
 
         let pad = (4 - (body.len() % 4)) % 4;
         body.extend(std::iter::repeat_n(0u8, pad));
@@ -771,7 +785,6 @@ impl RealRpcTransport {
         body.push(pad as u8);
         body.push(0);
         body.write_u32::<LittleEndian>(0).unwrap();
-        body.extend(std::iter::repeat_n(0u8, pad));
         body.extend_from_slice(&auth_blob);
 
         let frag_len = (16 + body.len()) as u16;
@@ -782,7 +795,7 @@ impl RealRpcTransport {
         pdu.write_u8(0).unwrap();
         pdu.write_u8(0x0E).unwrap(); // alter_context
         pdu.write_u8(0x03).unwrap();
-        pdu.write_u32::<LittleEndian>(0x10_00_00_00).unwrap();
+        pdu.extend_from_slice(&DATA_REP);
         pdu.write_u16::<LittleEndian>(frag_len).unwrap();
         pdu.write_u16::<LittleEndian>(auth_len).unwrap();
         pdu.write_u32::<LittleEndian>(call_id).unwrap();
@@ -968,9 +981,10 @@ impl RealRpcTransport {
         let _version = cursor.read_u8()?;
         let _minor = cursor.read_u8()?;
         let ptype = cursor.read_u8()?;
-        if ptype != 0x0D {
+        // alter_context_resp is PTYPE 15 (C706 12.6.4); 13 is bind_nak.
+        if ptype != 0x0F {
             return Err(TransportError::Failure(format!(
-                "Unexpected PDU type in alter_ack: 0x{ptype:02x} (expected 0x0D)"
+                "Unexpected PDU type in alter_ack: 0x{ptype:02x} (expected 0x0F)"
             )));
         }
         cursor.read_u8()?; // flags
@@ -2131,10 +2145,21 @@ mod tests {
         }
     }
 
+    /// alter_context_resp from Windows Server 2022 after a successful NTLMv2
+    /// AUTHENTICATE in alter_context (note: 8-byte sec_trailer, auth_length 0).
+    #[test]
+    fn parse_alter_ack_accepts_windows_alter_context_resp() {
+        let pdu = hex!(
+            "05000f03100000004000000002000000b810b810bf520000000000000100000000000000"
+            "045d888aeb1cc9119fe808002b104860020000000a06000000000000"
+        );
+        RealRpcTransport::parse_alter_ack(&pdu).expect("Windows alter_context_resp");
+    }
+
     #[test]
     fn parse_alter_ack_accepts_valid_response() {
         let mut pdu = Vec::new();
-        pdu.extend_from_slice(&[5, 0, 0x0D, 0x03]); // version, minor, alter_ack, flags
+        pdu.extend_from_slice(&[5, 0, 0x0F, 0x03]); // version, minor, alter_context_resp, flags
         pdu.extend_from_slice(&[0x10, 0x00, 0x00, 0x00]); // data rep
         pdu.extend_from_slice(&[44, 0]); // frag_len
         pdu.extend_from_slice(&[0, 0]); // auth_len = 0 for stub
@@ -2158,7 +2183,7 @@ mod tests {
     #[test]
     fn parse_alter_ack_rejects_on_failure() {
         let mut pdu = Vec::new();
-        pdu.extend_from_slice(&[5, 0, 0x0D, 0x03]); // version, minor, alter_ack, flags
+        pdu.extend_from_slice(&[5, 0, 0x0F, 0x03]); // version, minor, alter_context_resp, flags
         pdu.extend_from_slice(&[0x10, 0x00, 0x00, 0x00]); // data rep
         pdu.extend_from_slice(&[44, 0]); // frag_len
         pdu.extend_from_slice(&[0, 0]); // auth_len
@@ -2236,7 +2261,7 @@ mod tests {
         assert_eq!(pdu[1], 0);
         assert_eq!(pdu[2], 0x0B);
         assert_eq!(pdu[3], 0x03);
-        assert_eq!(&pdu[4..8], &[0x00, 0x00, 0x00, 0x10]);
+        assert_eq!(&pdu[4..8], &[0x10, 0x00, 0x00, 0x00]);
 
         let frag_len = u16::from_le_bytes([pdu[8], pdu[9]]);
         assert_eq!(frag_len as usize, pdu.len());
@@ -2261,7 +2286,8 @@ mod tests {
         cursor.read_u32::<LittleEndian>().unwrap(); // assoc group
         let num_context_items = cursor.read_u8().unwrap();
         assert_eq!(num_context_items, 1);
-        cursor.read_u8().unwrap(); // pad
+        cursor.read_u8().unwrap(); // reserved
+        cursor.read_u16::<LittleEndian>().unwrap(); // reserved2
         let context_id = cursor.read_u16::<LittleEndian>().unwrap();
         assert_eq!(context_id, 0);
 
@@ -2321,7 +2347,7 @@ mod tests {
         assert_eq!(pdu[1], 0);
         assert_eq!(pdu[2], 0x0E);
         assert_eq!(pdu[3], 0x03);
-        assert_eq!(&pdu[4..8], &[0x00, 0x00, 0x00, 0x10]);
+        assert_eq!(&pdu[4..8], &[0x10, 0x00, 0x00, 0x00]);
 
         let call_id = u32::from_le_bytes([pdu[12], pdu[13], pdu[14], pdu[15]]);
         assert_eq!(call_id, 9);
@@ -2331,7 +2357,8 @@ mod tests {
         cursor.read_u16::<LittleEndian>().unwrap();
         cursor.read_u32::<LittleEndian>().unwrap();
         assert_eq!(cursor.read_u8().unwrap(), 1);
-        cursor.read_u8().unwrap();
+        cursor.read_u8().unwrap(); // reserved
+        cursor.read_u16::<LittleEndian>().unwrap(); // reserved2
         assert_eq!(cursor.read_u16::<LittleEndian>().unwrap(), 0x1234);
         assert_eq!(cursor.read_u8().unwrap(), 1);
         cursor.read_u8().unwrap();
