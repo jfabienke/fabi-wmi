@@ -89,7 +89,15 @@ pub(crate) fn write_context_list(buf: &mut Vec<u8>, context_id: u16, abstract_sy
 }
 
 const AUTH_LEVEL_PKT_PRIVACY: u8 = 0x06;
+// Consumed by the WMI connection path as it is built out.
+#[allow(dead_code)]
+const AUTH_LEVEL_PKT_INTEGRITY: u8 = 0x05;
+#[allow(dead_code)]
+const PFC_OBJECT_UUID: u8 = 0x80;
 const REQUEST_HEADER_LEN: usize = 24; // common header (16) + alloc_hint, p_cont_id, opnum
+                                      // With PFC_OBJECT_UUID the request header carries a 16-byte object UUID (IPID).
+#[allow(dead_code)]
+const REQUEST_HEADER_WITH_OBJECT_LEN: usize = REQUEST_HEADER_LEN + 16;
 const RESPONSE_HEADER_LEN: usize = 24; // common header (16) + alloc_hint, p_cont_id, cancel_count, reserved
 const SEC_TRAILER_LEN: usize = 8;
 
@@ -127,6 +135,57 @@ pub(crate) fn build_sealed_request_pdu(
     let (body, trailer) = rest.split_at_mut(trailer_at - REQUEST_HEADER_LEN);
     let auth_value = auth
         .seal_rpc(head, body, trailer)
+        .map_err(|err| TransportError::Failure(err.to_string()))?;
+    if auth_value.len() != auth_value_len {
+        return Err(TransportError::Failure(format!(
+            "unexpected auth_value length {}",
+            auth_value.len()
+        )));
+    }
+    pdu.extend_from_slice(&auth_value);
+    Ok(pdu)
+}
+
+/// Build a request PDU at RPC_C_AUTHN_LEVEL_PKT_INTEGRITY that targets an ORPC
+/// object: PFC_OBJECT_UUID is set and the 16-byte IPID follows opnum. The stub
+/// stays cleartext (signed, not encrypted); the auth_value is the NTLM MAC over
+/// header, stub, padding and sec_trailer.
+#[allow(dead_code)]
+pub(crate) fn build_signed_request_pdu(
+    auth: &mut dyn AuthProvider,
+    call_id: u32,
+    context_id: u16,
+    opnum: u16,
+    object_ipid: &[u8; 16],
+    stub: &[u8],
+    auth_context_id: u32,
+) -> Result<Vec<u8>, TransportError> {
+    let pad = (4 - stub.len() % 4) % 4;
+    let auth_value_len = 16usize;
+    let frag_len =
+        REQUEST_HEADER_WITH_OBJECT_LEN + stub.len() + pad + SEC_TRAILER_LEN + auth_value_len;
+
+    let mut pdu = Vec::with_capacity(frag_len);
+    pdu.extend_from_slice(&[5, 0, 0x00, 0x03 | PFC_OBJECT_UUID]); // request, first|last|object
+    pdu.extend_from_slice(&DATA_REP);
+    pdu.write_u16::<LittleEndian>(frag_len as u16).unwrap();
+    pdu.write_u16::<LittleEndian>(auth_value_len as u16)
+        .unwrap();
+    pdu.write_u32::<LittleEndian>(call_id).unwrap();
+    pdu.write_u32::<LittleEndian>(stub.len() as u32).unwrap(); // alloc_hint
+    pdu.write_u16::<LittleEndian>(context_id).unwrap();
+    pdu.write_u16::<LittleEndian>(opnum).unwrap();
+    pdu.extend_from_slice(object_ipid);
+    pdu.extend_from_slice(stub);
+    pdu.extend(std::iter::repeat_n(0u8, pad));
+    let trailer_at = pdu.len();
+    pdu.extend_from_slice(&[AUTH_TYPE_NTLM, AUTH_LEVEL_PKT_INTEGRITY, pad as u8, 0]);
+    pdu.write_u32::<LittleEndian>(auth_context_id).unwrap();
+
+    let (head, rest) = pdu.split_at_mut(REQUEST_HEADER_WITH_OBJECT_LEN);
+    let (body, trailer) = rest.split_at_mut(trailer_at - REQUEST_HEADER_WITH_OBJECT_LEN);
+    let auth_value = auth
+        .sign_rpc(head, body, trailer)
         .map_err(|err| TransportError::Failure(err.to_string()))?;
     if auth_value.len() != auth_value_len {
         return Err(TransportError::Failure(format!(

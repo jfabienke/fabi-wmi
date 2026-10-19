@@ -122,6 +122,59 @@ impl AuthProvider for SspiNtlmClient {
         Ok(signature.to_vec())
     }
 
+    fn sign_rpc(
+        &mut self,
+        header: &[u8],
+        stub: &[u8],
+        sec_trailer: &[u8],
+    ) -> Result<Vec<u8>, AuthError> {
+        // Integrity level: every data buffer is READONLY, so sspi signs the
+        // whole message without encrypting the stub.
+        let mut header = header.to_vec();
+        let mut stub = stub.to_vec();
+        let mut sec_trailer = sec_trailer.to_vec();
+        let mut signature = [0u8; SIGNATURE_LEN];
+        let mut message = [
+            SecurityBufferRef::data_buf(&mut header)
+                .with_flags(SecurityBufferFlags::SECBUFFER_READONLY_WITH_CHECKSUM),
+            SecurityBufferRef::data_buf(&mut stub)
+                .with_flags(SecurityBufferFlags::SECBUFFER_READONLY_WITH_CHECKSUM),
+            SecurityBufferRef::data_buf(&mut sec_trailer)
+                .with_flags(SecurityBufferFlags::SECBUFFER_READONLY_WITH_CHECKSUM),
+            SecurityBufferRef::token_buf(&mut signature),
+        ];
+        self.ntlm
+            .encrypt_message(EncryptionFlags::empty(), &mut message)
+            .map_err(sspi_error)?;
+        Ok(signature.to_vec())
+    }
+
+    fn verify_rpc(
+        &mut self,
+        header: &[u8],
+        stub: &[u8],
+        sec_trailer: &[u8],
+        auth_value: &[u8],
+    ) -> Result<(), AuthError> {
+        let mut header = header.to_vec();
+        let mut stub = stub.to_vec();
+        let mut sec_trailer = sec_trailer.to_vec();
+        let mut signature = auth_value.to_vec();
+        let mut message = [
+            SecurityBufferRef::data_buf(&mut header)
+                .with_flags(SecurityBufferFlags::SECBUFFER_READONLY_WITH_CHECKSUM),
+            SecurityBufferRef::data_buf(&mut stub)
+                .with_flags(SecurityBufferFlags::SECBUFFER_READONLY_WITH_CHECKSUM),
+            SecurityBufferRef::data_buf(&mut sec_trailer)
+                .with_flags(SecurityBufferFlags::SECBUFFER_READONLY_WITH_CHECKSUM),
+            SecurityBufferRef::token_buf(&mut signature),
+        ];
+        self.ntlm
+            .decrypt_message(&mut message)
+            .map_err(sspi_error)?;
+        Ok(())
+    }
+
     fn unseal_rpc(
         &mut self,
         header: &[u8],
@@ -172,7 +225,9 @@ fn local_workstation_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::{build_sealed_request_pdu, unseal_response_pdu};
+    use crate::transport::{
+        build_sealed_request_pdu, build_signed_request_pdu, unseal_response_pdu,
+    };
     use sspi::ServerRequestFlags;
 
     struct Server {
@@ -241,6 +296,26 @@ mod tests {
                 SecurityBufferRef::token_buf(auth_value),
             ];
             self.ntlm.decrypt_message(&mut message).unwrap();
+        }
+
+        /// Verify a signed (integrity) request: 40-byte object header, cleartext
+        /// stub, all data buffers READONLY.
+        fn verify_signed_request(&mut self, pdu: &mut [u8]) -> Result<(), sspi::Error> {
+            let auth_len = u16::from_le_bytes([pdu[10], pdu[11]]) as usize;
+            let trailer_at = pdu.len() - auth_len - 8;
+            let (head, rest) = pdu.split_at_mut(40);
+            let (body, tail) = rest.split_at_mut(trailer_at - 40);
+            let (trailer, auth_value) = tail.split_at_mut(8);
+            let mut message = [
+                SecurityBufferRef::data_buf(head)
+                    .with_flags(SecurityBufferFlags::SECBUFFER_READONLY_WITH_CHECKSUM),
+                SecurityBufferRef::data_buf(body)
+                    .with_flags(SecurityBufferFlags::SECBUFFER_READONLY_WITH_CHECKSUM),
+                SecurityBufferRef::data_buf(trailer)
+                    .with_flags(SecurityBufferFlags::SECBUFFER_READONLY_WITH_CHECKSUM),
+                SecurityBufferRef::token_buf(auth_value),
+            ];
+            self.ntlm.decrypt_message(&mut message).map(|_| ())
         }
 
         /// Build a sealed response PDU carrying `stub`.
@@ -315,6 +390,35 @@ mod tests {
             let plain = unseal_response_pdu(&mut client, &reply).unwrap();
             assert_eq!(&plain[24..24 + 18], b"response stub data");
         }
+    }
+
+    #[test]
+    fn signed_request_pdu_verifies_and_keeps_stub_cleartext() {
+        let (mut client, mut server) = authenticated_pair();
+        let ipid = [0x11u8; 16];
+        let stub = b"ORPCTHIS and NTLMLogin stub bytes".to_vec();
+
+        let mut pdu = build_signed_request_pdu(&mut client, 2, 0, 6, &ipid, &stub, 0).unwrap();
+        // Integrity: the stub travels in cleartext right after the 40-byte header.
+        assert_eq!(pdu[3] & 0x80, 0x80, "PFC_OBJECT_UUID set");
+        assert_eq!(&pdu[24..40], &ipid, "object IPID present");
+        assert_eq!(&pdu[40..40 + stub.len()], &stub[..], "stub is cleartext");
+        let sec_trailer_at = pdu.len() - 16 - 8;
+        assert_eq!(pdu[sec_trailer_at + 1], 0x05, "auth_level = PKT_INTEGRITY");
+
+        server
+            .verify_signed_request(&mut pdu)
+            .expect("signature verifies");
+    }
+
+    #[test]
+    fn tampered_signed_request_is_rejected() {
+        let (mut client, mut server) = authenticated_pair();
+        let mut pdu =
+            build_signed_request_pdu(&mut client, 2, 0, 6, &[0x11; 16], b"stub data here!!", 0)
+                .unwrap();
+        pdu[40] ^= 0x01; // flip a cleartext stub byte
+        assert!(server.verify_signed_request(&mut pdu).is_err());
     }
 
     #[test]

@@ -183,6 +183,28 @@ pub trait AuthProvider: Send {
     ) -> Result<(), AuthError> {
         Err(AuthError::Protection("provider cannot unseal".into()))
     }
+
+    /// Sign an RPC PDU at packet-integrity level: the stub stays cleartext; the
+    /// returned auth_value signs `header || stub || sec_trailer`.
+    fn sign_rpc(
+        &mut self,
+        _header: &[u8],
+        _stub: &[u8],
+        _sec_trailer: &[u8],
+    ) -> Result<Vec<u8>, AuthError> {
+        Err(AuthError::Protection("provider cannot sign".into()))
+    }
+
+    /// Verify the signature of a received packet-integrity PDU.
+    fn verify_rpc(
+        &mut self,
+        _header: &[u8],
+        _stub: &[u8],
+        _sec_trailer: &[u8],
+        _auth_value: &[u8],
+    ) -> Result<(), AuthError> {
+        Err(AuthError::Protection("provider cannot verify".into()))
+    }
 }
 
 impl AuthProvider for NtlmV2Client {
