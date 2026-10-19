@@ -101,6 +101,18 @@ const REQUEST_HEADER_WITH_OBJECT_LEN: usize = REQUEST_HEADER_LEN + 16;
 const RESPONSE_HEADER_LEN: usize = 24; // common header (16) + alloc_hint, p_cont_id, cancel_count, reserved
 const SEC_TRAILER_LEN: usize = 8;
 
+/// Reject a PDU whose fragment length would not fit the 16-bit frag_length
+/// field. (Staying within the bind-negotiated max_xmit — i.e. request
+/// fragmentation for large stubs — is enforced by the caller once it exists.)
+fn check_frag_len(frag_len: usize) -> Result<(), TransportError> {
+    if frag_len > u16::MAX as usize {
+        return Err(TransportError::Failure(format!(
+            "request PDU too large for a single fragment: {frag_len} bytes"
+        )));
+    }
+    Ok(())
+}
+
 /// Build a request PDU protected at RPC_C_AUTHN_LEVEL_PKT_PRIVACY: the stub is
 /// padded to a 16-byte multiple and encrypted; header and sec_trailer are signed.
 pub(crate) fn build_sealed_request_pdu(
@@ -114,6 +126,7 @@ pub(crate) fn build_sealed_request_pdu(
     let pad = (16 - stub.len() % 16) % 16;
     let auth_value_len = 16usize;
     let frag_len = REQUEST_HEADER_LEN + stub.len() + pad + SEC_TRAILER_LEN + auth_value_len;
+    check_frag_len(frag_len)?;
 
     let mut pdu = Vec::with_capacity(frag_len);
     pdu.extend_from_slice(&[5, 0, 0x00, 0x03]); // version, minor, request, first|last
@@ -164,6 +177,7 @@ pub(crate) fn build_signed_request_pdu(
     let auth_value_len = 16usize;
     let frag_len =
         REQUEST_HEADER_WITH_OBJECT_LEN + stub.len() + pad + SEC_TRAILER_LEN + auth_value_len;
+    check_frag_len(frag_len)?;
 
     let mut pdu = Vec::with_capacity(frag_len);
     pdu.extend_from_slice(&[5, 0, 0x00, 0x03 | PFC_OBJECT_UUID]); // request, first|last|object
@@ -2200,6 +2214,12 @@ fn reassemble_fragments(fragments: Vec<Vec<u8>>) -> Result<Vec<u8>, TransportErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn check_frag_len_rejects_overflow() {
+        assert!(check_frag_len(u16::MAX as usize).is_ok());
+        assert!(check_frag_len(u16::MAX as usize + 1).is_err());
+    }
 
     #[test]
     fn parse_response_pdu_rejects_auth_overflow() {

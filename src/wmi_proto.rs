@@ -4,8 +4,8 @@
 //! goes inside a DCE/RPC request. Framing, object UUID and auth live in the
 //! transport layer.
 //!
-// Encoders are validated by golden tests now and consumed by the WMI
-// connection path as it is built out.
+//! Encoders are validated by golden tests and consumed by the WMI connection
+//! path as it is built out.
 #![allow(dead_code)]
 
 use byteorder::{LittleEndian, WriteBytesExt};
@@ -31,6 +31,11 @@ pub(crate) const IID_IENUM_WBEM_CLASS_OBJECT: [u8; 16] =
 /// COMVERSION used by current Windows: 5.7.
 const COMVERSION: [u8; 4] = [5, 0, 7, 0];
 
+/// Base NDR referent id for the first unique pointer in a stub. The exact
+/// value is immaterial to the server as long as referents are non-zero and
+/// distinct within a call; later pointers use REFERENT_BASE + 4*n.
+const REFERENT_BASE: u32 = 0x0002_0000;
+
 /// Encode an ORPCTHIS header (MS-DCOM 2.2.13.1): COMVERSION, flags, reserved,
 /// causality id, and a null extensions pointer. 32 bytes.
 pub(crate) fn encode_orpcthis(buf: &mut Vec<u8>, causality_id: &[u8; 16]) {
@@ -52,6 +57,7 @@ fn align4(buf: &mut Vec<u8>, fill: u8) {
 /// conformant+varying wide string (referent, max_count, offset, actual_count,
 /// UTF-16LE chars incl. NUL), then pad to a 4-byte boundary.
 fn encode_wstr_ptr(buf: &mut Vec<u8>, referent: u32, s: &str) {
+    debug_assert!(referent != 0, "a unique-pointer referent must be non-zero");
     let mut units: Vec<u16> = s.encode_utf16().collect();
     units.push(0); // NUL
     let count = units.len() as u32;
@@ -69,15 +75,10 @@ fn encode_wstr_ptr(buf: &mut Vec<u8>, referent: u32, s: &str) {
 /// 3.1.4.1): ORPCTHIS, wszNetworkResource (the namespace), null
 /// wszPreferredLocale, lFlags, null pCtx. The [out] ppNamespace takes no input.
 ///
-/// `namespace_referent` is any non-zero NDR referent id for the string pointer.
-pub(crate) fn encode_ntlm_login(
-    causality_id: &[u8; 16],
-    namespace: &str,
-    namespace_referent: u32,
-) -> Vec<u8> {
+pub(crate) fn encode_ntlm_login(causality_id: &[u8; 16], namespace: &str) -> Vec<u8> {
     let mut buf = Vec::new();
     encode_orpcthis(&mut buf, causality_id);
-    encode_wstr_ptr(&mut buf, namespace_referent, namespace);
+    encode_wstr_ptr(&mut buf, REFERENT_BASE, namespace);
     buf.write_u32::<LittleEndian>(0).unwrap(); // wszPreferredLocale: null ptr
     buf.write_u32::<LittleEndian>(0).unwrap(); // lFlags
     buf.write_u32::<LittleEndian>(0).unwrap(); // pCtx: null ptr
@@ -86,9 +87,13 @@ pub(crate) fn encode_ntlm_login(
 
 /// Encode a `BSTR` [in] parameter: a unique pointer to a FLAGGED_WORD_BLOB
 /// (MS-OAUT 2.2.23.2 / 2.2.23.1 wire form) — referent, max_count, cBytes,
-/// clSize, then UTF-16LE data incl. NUL — then pad to a 4-byte boundary. All
-/// three counts include the terminator, matching what Windows accepts here.
+/// clSize, then UTF-16LE data incl. NUL — then pad to a 4-byte boundary.
+///
+/// All three counts include the terminating NUL here, matching the reference
+/// capture Windows accepted (MS-OAUT defines cBytes/clSize over the data; the
+/// WMI server tolerates counting the NUL).
 fn encode_bstr(buf: &mut Vec<u8>, referent: u32, s: &str) {
+    debug_assert!(referent != 0, "a unique-pointer referent must be non-zero");
     let mut units: Vec<u16> = s.encode_utf16().collect();
     units.push(0); // NUL
     let count = units.len() as u32;
@@ -105,17 +110,11 @@ fn encode_bstr(buf: &mut Vec<u8>, referent: u32, s: &str) {
 /// Encode the IWbemServices::ExecQuery (opnum 20) request stub (MS-WMI
 /// 3.1.4.3.18): ORPCTHIS, strQueryLanguage ("WQL"), strQuery (the WQL),
 /// lFlags, null pCtx. The [out] ppEnum takes no input.
-pub(crate) fn encode_exec_query(
-    causality_id: &[u8; 16],
-    wql: &str,
-    lflags: u32,
-    lang_referent: u32,
-    query_referent: u32,
-) -> Vec<u8> {
+pub(crate) fn encode_exec_query(causality_id: &[u8; 16], wql: &str, lflags: u32) -> Vec<u8> {
     let mut buf = Vec::new();
     encode_orpcthis(&mut buf, causality_id);
-    encode_bstr(&mut buf, lang_referent, "WQL");
-    encode_bstr(&mut buf, query_referent, wql);
+    encode_bstr(&mut buf, REFERENT_BASE, "WQL");
+    encode_bstr(&mut buf, REFERENT_BASE + 4, wql);
     buf.write_u32::<LittleEndian>(lflags).unwrap();
     buf.write_u32::<LittleEndian>(0).unwrap(); // pCtx: null ptr
     buf
@@ -158,13 +157,27 @@ pub(crate) fn parse_interface_response(
         return Err(WmiProtoError::Hresult(hr));
     }
 
-    let meow = stub
-        .windows(4)
-        .position(|w| w == b"MEOW")
-        .ok_or(WmiProtoError::Malformed)?;
-    let objref = stub
-        .get(meow..meow + OBJREF_END)
-        .ok_or(WmiProtoError::Malformed)?;
+    // The OBJREF sits inside an MInterfacePointer wrapper (referent, max_count,
+    // ulCntData) that follows ORPCTHAT. Scan past ORPCTHAT (>= 8 bytes) so a
+    // "MEOW" in its flags/extensions pointer cannot be mistaken for the OBJREF.
+    const ORPCTHAT_MIN: usize = 8;
+    let scan = stub.get(ORPCTHAT_MIN..).ok_or(WmiProtoError::Malformed)?;
+    let meow = ORPCTHAT_MIN
+        + scan
+            .windows(4)
+            .position(|w| w == b"MEOW")
+            .ok_or(WmiProtoError::Malformed)?;
+    // Validate the MInterfacePointer: max_count and ulCntData (the 8 bytes
+    // before the OBJREF) must agree and bound the OBJREF within the stub.
+    if meow < 8 {
+        return Err(WmiProtoError::Malformed);
+    }
+    let max_count = u32::from_le_bytes(stub[meow - 8..meow - 4].try_into().unwrap()) as usize;
+    let cnt_data = u32::from_le_bytes(stub[meow - 4..meow].try_into().unwrap()) as usize;
+    if max_count != cnt_data || cnt_data < OBJREF_END || meow + cnt_data > stub.len() {
+        return Err(WmiProtoError::Malformed);
+    }
+    let objref = &stub[meow..meow + OBJREF_END];
     if u32::from_le_bytes(objref[FLAGS_OFF..FLAGS_OFF + 4].try_into().unwrap()) != OBJREF_STANDARD {
         return Err(WmiProtoError::Malformed);
     }
@@ -182,22 +195,45 @@ mod tests {
     /// to a Windows Server 2022 DC (cleartext, accepted). Non-sensitive.
     const NTLMLOGIN_STUB: &[u8] = include_bytes!("testdata/ntlmlogin_request_stub.bin");
 
+    /// Zero the given byte ranges in a copy so bytes that are arbitrary on the
+    /// wire (referent ids, NDR pad) don't affect a byte-for-byte comparison.
+    fn mask(bytes: &[u8], ranges: &[std::ops::Range<usize>]) -> Vec<u8> {
+        let mut v = bytes.to_vec();
+        for r in ranges {
+            v[r.clone()].fill(0);
+        }
+        v
+    }
+
     #[test]
     fn encode_ntlm_login_matches_windows_reference() {
-        // The causality id and string referent are caller-chosen opaque ids;
-        // take the reference's so the comparison is byte-exact.
+        // The causality id is a caller-chosen opaque id; take the reference's.
         let cid: [u8; 16] = NTLMLOGIN_STUB[12..28].try_into().unwrap();
-        let referent = u32::from_le_bytes(NTLMLOGIN_STUB[32..36].try_into().unwrap());
+        let stub = encode_ntlm_login(&cid, "//./root/cimv2");
 
-        let stub = encode_ntlm_login(&cid, "//./root/cimv2", referent);
+        // The string referent (32..36) and the one pad region (78..80) are
+        // arbitrary on the wire; compare everything else byte-for-byte.
+        let masked = [32..36, 78..80];
+        assert_eq!(mask(&stub, &masked), mask(NTLMLOGIN_STUB, &masked));
+        assert_eq!(
+            &stub[32..36],
+            &REFERENT_BASE.to_le_bytes(),
+            "non-zero referent"
+        );
+    }
 
-        // The one pad byte region (after the 15-wchar string) is arbitrary on
-        // the wire; impacket fills 0xBF, we fill 0x00. Normalize before compare.
-        let mut expected = NTLMLOGIN_STUB.to_vec();
-        for b in &mut expected[78..80] {
-            *b = 0;
-        }
-        assert_eq!(stub, expected);
+    #[test]
+    fn encode_ntlm_login_empty_namespace_is_well_formed() {
+        // ORPCTHIS(32) + wstr{referent,max,off,act = 16}{just NUL = 2}{pad 2}
+        // + locale(4) + lFlags(4) + pCtx(4)
+        let stub = encode_ntlm_login(&[0; 16], "");
+        assert_eq!(stub.len(), 32 + 16 + 2 + 2 + 12);
+        assert_eq!(&stub[32..36], &REFERENT_BASE.to_le_bytes());
+        assert_eq!(
+            &stub[36..40],
+            &1u32.to_le_bytes(),
+            "max_count = 1 (just NUL)"
+        );
     }
 
     /// IWbemServices::ExecQuery request stub impacket sent and the DC accepted.
@@ -206,24 +242,18 @@ mod tests {
     #[test]
     fn encode_exec_query_matches_windows_reference() {
         let cid: [u8; 16] = EXECQUERY_STUB[12..28].try_into().unwrap();
-        let lang_ref = u32::from_le_bytes(EXECQUERY_STUB[32..36].try_into().unwrap());
-        // strQuery referent follows the WQL BSTR (16-byte header + "WQL\0" = 8).
-        let query_ref = u32::from_le_bytes(EXECQUERY_STUB[56..60].try_into().unwrap());
-
         let stub = encode_exec_query(
             &cid,
             "SELECT Name, Domain, Manufacturer, Model FROM Win32_ComputerSystem",
             0,
-            lang_ref,
-            query_ref,
         );
 
-        // Two pad bytes after strQuery (offset 206..208) are arbitrary.
-        let mut expected = EXECQUERY_STUB.to_vec();
-        for b in &mut expected[206..208] {
-            *b = 0;
-        }
-        assert_eq!(stub, expected);
+        // Mask the two BSTR referents (32..36, and 56..60 after the "WQL\0"
+        // BSTR) and the two pad bytes after strQuery (206..208).
+        let masked = [32..36, 56..60, 206..208];
+        assert_eq!(mask(&stub, &masked), mask(EXECQUERY_STUB, &masked));
+        assert_eq!(&stub[32..36], &REFERENT_BASE.to_le_bytes());
+        assert_eq!(&stub[56..60], &(REFERENT_BASE + 4).to_le_bytes());
     }
 
     /// IEnumWbemClassObject::Next request stub impacket sent and the DC accepted.
@@ -267,6 +297,34 @@ mod tests {
         assert_eq!(
             parse_interface_response(&stub, &IID_IWBEM_SERVICES),
             Err(WmiProtoError::Hresult(0x8004_1001))
+        );
+    }
+
+    #[test]
+    fn parse_interface_response_rejects_inconsistent_wrapper() {
+        // Corrupt the MInterfacePointer max_count (8 bytes before MEOW) so it
+        // disagrees with ulCntData; the structural check must reject it.
+        let meow = NTLMLOGIN_RESP
+            .windows(4)
+            .position(|w| w == b"MEOW")
+            .unwrap();
+        let mut stub = NTLMLOGIN_RESP.to_vec();
+        stub[meow - 8..meow - 4].copy_from_slice(&0x9999u32.to_le_bytes());
+        assert_eq!(
+            parse_interface_response(&stub, &IID_IWBEM_SERVICES),
+            Err(WmiProtoError::Malformed)
+        );
+    }
+
+    #[test]
+    fn parse_interface_response_rejects_meow_in_orpcthat() {
+        // "MEOW" inside the ORPCTHAT header must not be taken for the OBJREF.
+        let mut stub = vec![0u8; 24];
+        stub[0..4].copy_from_slice(b"MEOW"); // in ORPCTHAT flags
+                                             // valid tail HRESULT 0 is already zero
+        assert_eq!(
+            parse_interface_response(&stub, &IID_IWBEM_SERVICES),
+            Err(WmiProtoError::Malformed)
         );
     }
 
