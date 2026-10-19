@@ -317,15 +317,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_interface_response_rejects_meow_in_orpcthat() {
-        // "MEOW" inside the ORPCTHAT header must not be taken for the OBJREF.
-        let mut stub = vec![0u8; 24];
-        stub[0..4].copy_from_slice(b"MEOW"); // in ORPCTHAT flags
-                                             // valid tail HRESULT 0 is already zero
-        assert_eq!(
-            parse_interface_response(&stub, &IID_IWBEM_SERVICES),
-            Err(WmiProtoError::Malformed)
-        );
+    fn parse_interface_response_ignores_meow_in_orpcthat() {
+        // A stray "MEOW" in the ORPCTHAT header (offset 0) must not shadow the
+        // real OBJREF further on: the parser still returns the true IPID.
+        let mut stub = NTLMLOGIN_RESP.to_vec();
+        stub[0..4].copy_from_slice(b"MEOW"); // ORPCTHAT flags
+        let ipid = parse_interface_response(&stub, &IID_IWBEM_SERVICES).unwrap();
+        assert_eq!(hex::encode(ipid), "0c7000007c060000b7af6bab62096d93");
     }
 
     #[test]
