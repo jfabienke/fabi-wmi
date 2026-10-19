@@ -27,6 +27,7 @@ const NTLMSSP_SIGNATURE: &[u8; 8] = b"NTLMSSP\0";
 ///
 /// See: [MS-NLMP] §3.2.5.1.2, Table 3 "Negotiate Flags"
 const NEGOTIATE_FLAGS: u32 = 0xE289_8235;
+pub(crate) const NTLMSSP_NEGOTIATE_KEY_EXCH: u32 = 0x4000_0000;
 /// NTLMSSP VERSION (MS-NLMP 2.2.2.10): Windows 10.0, build 0, NTLMSSP_REVISION_W2K3.
 const NTLM_VERSION: [u8; 8] = [0x0A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0F];
 
@@ -141,6 +142,7 @@ impl NtlmV2Client {
             &challenge,
             self.type1_message.as_deref(),
             challenge_bytes,
+            None,
             None,
             None,
         )?;
@@ -335,6 +337,7 @@ fn build_type3_message_with_mic(
     type2_message: &[u8],
     forced_client_nonce: Option<[u8; 8]>,
     forced_timestamp: Option<u64>,
+    forced_exported_session_key: Option<[u8; 16]>,
 ) -> Result<AuthenticateMessage, AuthError> {
     let username_upper = creds.username.to_uppercase();
 
@@ -386,8 +389,21 @@ fn build_type3_message_with_mic(
     lm_response.extend_from_slice(&lm_proof);
     lm_response.extend_from_slice(&client_nonce);
 
-    // Calculate session key
-    let session_key = hmac_md5_segments(&ntlm_v2_hash_arr, &[&nt_proof]);
+    // SessionBaseKey; for NTLMv2 it is also the KeyExchangeKey (MS-NLMP 3.4.5.1).
+    let mut session_base_key = hmac_md5_segments(&ntlm_v2_hash_arr, &[&nt_proof]);
+
+    // With KEY_EXCH the client picks a random ExportedSessionKey and sends it
+    // RC4-encrypted under the KeyExchangeKey (MS-NLMP 3.1.5.1.2).
+    let key_exch = challenge.flags & NEGOTIATE_FLAGS & NTLMSSP_NEGOTIATE_KEY_EXCH != 0;
+    let (session_key, encrypted_session_key) = if key_exch {
+        let exported = forced_exported_session_key.unwrap_or_else(generate_session_key);
+        let mut encrypted = exported;
+        crate::crypto::rc4_encrypt(&session_base_key, &mut encrypted);
+        (exported, encrypted.to_vec())
+    } else {
+        (session_base_key, Vec::new())
+    };
+    zeroize_bytes(&mut session_base_key);
 
     // Prepare UTF-16LE strings
     let domain_utf16 = utf16le(&creds.domain);
@@ -405,7 +421,7 @@ fn build_type3_message_with_mic(
         domain_utf16.as_slice(),
         user_utf16.as_slice(),
         workstation_utf16.as_slice(),
-        session_key.as_slice(),
+        encrypted_session_key.as_slice(),
     ] {
         let len = buf.len() as u16;
         buffers.extend_from_slice(&len.to_le_bytes()); // Length
@@ -432,11 +448,11 @@ fn build_type3_message_with_mic(
     message.extend_from_slice(&domain_utf16);
     message.extend_from_slice(&user_utf16);
     message.extend_from_slice(&workstation_utf16);
-    message.extend_from_slice(&session_key);
+    message.extend_from_slice(&encrypted_session_key);
 
     // Calculate MIC if we have all three messages
     if let Some(type1) = type1_message {
-        // MIC = HMAC-MD5(session_key, concatenation of Type1, Type2, and Type3 with zero MIC)
+        // MIC = HMAC-MD5(ExportedSessionKey, Type1 || Type2 || Type3 with zero MIC)
         let mut mic_data = Vec::new();
         mic_data.extend_from_slice(type1);
         mic_data.extend_from_slice(type2_message);
@@ -494,6 +510,12 @@ fn av_timestamp(target_info: &[u8]) -> Option<u64> {
         }
     }
     None
+}
+
+fn generate_session_key() -> [u8; 16] {
+    let mut key = [0u8; 16];
+    OsRng.fill_bytes(&mut key);
+    key
 }
 
 fn current_filetime() -> u64 {
@@ -845,7 +867,15 @@ mod tests {
             .to_vec(),
         };
         let auth =
-            build_type3_message_with_mic(&creds, &challenge, None, &[], Some([0xaa; 8]), Some(0))
+            build_type3_message_with_mic(
+                &creds,
+                &challenge,
+                None,
+                &[],
+                Some([0xaa; 8]),
+                Some(0),
+                Some([0x55; 16]),
+            )
                 .unwrap();
         let msg = &auth.message;
 
@@ -873,11 +903,14 @@ mod tests {
             &hex!("86c35097ac9cec102554764a57cccc19aaaaaaaaaaaaaaaa"),
             "LMv2 response"
         );
+        // SessionBaseKey 8de40ccadbc14a82f15cb0ad0de95ca3 encrypts the
+        // RandomSessionKey (55..55) into the EncryptedRandomSessionKey.
         assert_eq!(
-            auth.session_key,
-            hex!("8de40ccadbc14a82f15cb0ad0de95ca3"),
-            "SessionBaseKey"
+            security_buffer(msg, 5),
+            &hex!("c5dad2544fc9799094ce1ce90bc9d03e"),
+            "EncryptedRandomSessionKey"
         );
+        assert_eq!(auth.session_key, [0x55; 16], "ExportedSessionKey");
     }
 
     #[test]
