@@ -20,7 +20,8 @@ mod rpc;
 pub mod spnego;
 mod sspi_ntlm;
 mod transport; // Used internally by dcom and lib
-mod wmi; // Re-exported types below
+mod wmi;
+mod wmi_proto; // Re-exported types below
 
 // Test support infrastructure
 #[cfg(any(test, feature = "test-support"))]
