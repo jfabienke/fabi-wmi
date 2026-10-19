@@ -164,8 +164,10 @@ fn encoded_string(heap: &[u8], off: usize) -> Result<String, WmioError> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PropertyDesc {
     pub name: String,
-    /// CIM type with the array/inherited flags masked off.
+    /// CIM base type with the array/inherited flags masked off.
     pub cim_type: u16,
+    /// Whether the property is an array (CIM type flag 0x2000).
+    pub is_array: bool,
     /// Declaration order, used to index the NdTable null/default bits.
     pub order: usize,
     /// Byte offset of this property's value within the ValueTable.
@@ -183,9 +185,23 @@ pub(crate) struct ClassPart {
     pub encoding_length: usize,
 }
 
-/// CIM types we decode so far (MS-WMIO 2.2.7). Flags 0x2000 (array) and 0x4000
-/// (BYREF)/inherited are masked off by the caller.
+/// CIM base types (MS-WMIO 2.2.7). Flags 0x2000 (array) and 0x4000 (BYREF)/
+/// inherited are masked off by the caller.
+pub(crate) const CIM_SINT16: u16 = 2;
+pub(crate) const CIM_SINT32: u16 = 3;
+pub(crate) const CIM_REAL32: u16 = 4;
+pub(crate) const CIM_REAL64: u16 = 5;
 pub(crate) const CIM_STRING: u16 = 8;
+pub(crate) const CIM_BOOLEAN: u16 = 11;
+pub(crate) const CIM_SINT8: u16 = 16;
+pub(crate) const CIM_UINT8: u16 = 17;
+pub(crate) const CIM_UINT16: u16 = 18;
+pub(crate) const CIM_UINT32: u16 = 19;
+pub(crate) const CIM_SINT64: u16 = 20;
+pub(crate) const CIM_UINT64: u16 = 21;
+pub(crate) const CIM_DATETIME: u16 = 101;
+pub(crate) const CIM_REFERENCE: u16 = 102;
+pub(crate) const CIM_CHAR16: u16 = 103;
 
 /// Parse a CLASS_PART (MS-WMIO 2.2.15) at `start` within the WMIO blob.
 fn parse_class_part(wmio: &[u8], start: usize) -> Result<ClassPart, WmioError> {
@@ -238,6 +254,7 @@ fn parse_class_part(wmio: &[u8], start: usize) -> Result<ClassPart, WmioError> {
         properties.push(PropertyDesc {
             name,
             cim_type: (raw_type & 0x1fff) as u16,
+            is_array: raw_type & 0x2000 != 0,
             order,
             value_table_offset,
         });
@@ -295,6 +312,7 @@ pub(crate) fn decode_object(wmio: &[u8]) -> Result<serde_json::Value, WmioError>
         } else {
             decode_value(
                 p.cim_type,
+                p.is_array,
                 wmio,
                 value_table_start + p.value_table_offset,
                 instance_heap,
@@ -305,24 +323,56 @@ pub(crate) fn decode_object(wmio: &[u8]) -> Result<serde_json::Value, WmioError>
     Ok(serde_json::Value::Object(map))
 }
 
+/// Read a fixed-size little-endian value from the ValueTable.
+fn vt_bytes<const N: usize>(wmio: &[u8], at: usize) -> Result<[u8; N], WmioError> {
+    wmio.get(at..at + N)
+        .map(|s| s.try_into().unwrap())
+        .ok_or(WmioError::Malformed)
+}
+
+fn json_f64(v: f64) -> serde_json::Value {
+    serde_json::Number::from_f64(v).map_or(serde_json::Value::Null, serde_json::Value::Number)
+}
+
 /// Decode one property value given its CIM type. `value_at` is the byte offset
-/// of the value within the WMIO blob's ValueTable.
+/// of the value within the WMIO blob's ValueTable. Numeric/boolean/char values
+/// are stored inline; string/datetime/reference values are heap references.
 fn decode_value(
     cim_type: u16,
+    is_array: bool,
     wmio: &[u8],
     value_at: usize,
     instance_heap: &[u8],
 ) -> Result<serde_json::Value, WmioError> {
-    match cim_type {
-        CIM_STRING => {
-            let heap_ref = rd_u32(wmio, value_at)? as usize;
-            Ok(serde_json::Value::String(encoded_string(
-                instance_heap,
-                heap_ref,
-            )?))
-        }
-        other => Err(WmioError::UnsupportedType(other)),
+    use serde_json::Value;
+    if is_array {
+        // Arrays are a heap reference to an array block; decoding is a later step.
+        return Err(WmioError::UnsupportedType(0x2000 | cim_type));
     }
+    let v = match cim_type {
+        CIM_BOOLEAN => Value::Bool(u16::from_le_bytes(vt_bytes(wmio, value_at)?) != 0),
+        CIM_SINT8 => Value::from(i8::from_le_bytes(vt_bytes(wmio, value_at)?)),
+        CIM_UINT8 => Value::from(u8::from_le_bytes(vt_bytes(wmio, value_at)?)),
+        CIM_SINT16 => Value::from(i16::from_le_bytes(vt_bytes(wmio, value_at)?)),
+        CIM_UINT16 => Value::from(u16::from_le_bytes(vt_bytes(wmio, value_at)?)),
+        CIM_SINT32 => Value::from(i32::from_le_bytes(vt_bytes(wmio, value_at)?)),
+        CIM_UINT32 => Value::from(u32::from_le_bytes(vt_bytes(wmio, value_at)?)),
+        CIM_SINT64 => Value::from(i64::from_le_bytes(vt_bytes(wmio, value_at)?)),
+        CIM_UINT64 => Value::from(u64::from_le_bytes(vt_bytes(wmio, value_at)?)),
+        CIM_REAL32 => json_f64(f32::from_le_bytes(vt_bytes(wmio, value_at)?) as f64),
+        CIM_REAL64 => json_f64(f64::from_le_bytes(vt_bytes(wmio, value_at)?)),
+        CIM_CHAR16 => {
+            let c = u16::from_le_bytes(vt_bytes(wmio, value_at)?);
+            Value::String(String::from_utf16_lossy(&[c]))
+        }
+        // Heap-referenced scalars: the ValueTable holds a 4-byte heap offset.
+        CIM_STRING | CIM_DATETIME | CIM_REFERENCE => {
+            let heap_ref = rd_u32(wmio, value_at)? as usize;
+            Value::String(encoded_string(instance_heap, heap_ref)?)
+        }
+        other => return Err(WmioError::UnsupportedType(other)),
+    };
+    Ok(v)
 }
 
 #[cfg(test)]
@@ -394,6 +444,52 @@ mod tests {
                 "Model": "Standard PC (Q35 + ICH9, 2009)",
                 "Name": "DC01",
             })
+        );
+    }
+
+    fn decode_scalar(cim_type: u16, bytes: &[u8]) -> serde_json::Value {
+        decode_value(cim_type, false, bytes, 0, &[]).unwrap()
+    }
+
+    #[test]
+    fn decode_value_handles_inline_scalars() {
+        use serde_json::json;
+        assert_eq!(decode_scalar(CIM_BOOLEAN, &[0xff, 0xff]), json!(true));
+        assert_eq!(decode_scalar(CIM_BOOLEAN, &[0x00, 0x00]), json!(false));
+        assert_eq!(decode_scalar(CIM_SINT8, &[0xfe]), json!(-2));
+        assert_eq!(decode_scalar(CIM_UINT8, &[0xfe]), json!(254));
+        assert_eq!(
+            decode_scalar(CIM_SINT16, &0i16.wrapping_sub(5).to_le_bytes()),
+            json!(-5)
+        );
+        assert_eq!(
+            decode_scalar(CIM_UINT32, &4_000_000_000u32.to_le_bytes()),
+            json!(4_000_000_000u64)
+        );
+        assert_eq!(
+            decode_scalar(CIM_SINT32, &(-1_000_000i32).to_le_bytes()),
+            json!(-1_000_000)
+        );
+        assert_eq!(
+            decode_scalar(CIM_UINT64, &u64::MAX.to_le_bytes()),
+            json!(u64::MAX)
+        );
+        assert_eq!(decode_scalar(CIM_REAL64, &1.5f64.to_le_bytes()), json!(1.5));
+        assert_eq!(
+            decode_scalar(CIM_CHAR16, &(b'Z' as u16).to_le_bytes()),
+            json!("Z")
+        );
+    }
+
+    #[test]
+    fn decode_value_rejects_arrays_and_unknown_types() {
+        assert_eq!(
+            decode_value(CIM_STRING, true, &[0; 4], 0, &[]),
+            Err(WmioError::UnsupportedType(0x2008))
+        );
+        assert_eq!(
+            decode_value(0x63, false, &[0; 8], 0, &[]),
+            Err(WmioError::UnsupportedType(0x63))
         );
     }
 
