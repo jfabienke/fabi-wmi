@@ -3,11 +3,6 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use nom::{
-    bytes::complete::take,
-    number::complete::{le_u16, le_u32},
-    IResult,
-};
 use thiserror::Error;
 use tracing::{debug, error, info, instrument, trace, warn};
 
@@ -528,22 +523,9 @@ pub fn activate_wmi_dcom_anonymous(host: &str) -> Result<(u16, [u8; 8]), DcomErr
         response.len()
     );
 
-    // Parse the response to extract port and OXID
-    let (_remaining, port) = parse_dualstringarray_port(&response).map_err(|e| {
-        error!("Failed to parse DUALSTRINGARRAY: {:?}", e);
-        DcomError::Protocol
-    })?;
-
-    // Extract OXID from response (first 8 bytes after ORPCTHAT and HRESULT)
-    let oxid = if response.len() >= 32 {
-        let mut oxid_bytes = [0u8; 8];
-        oxid_bytes.copy_from_slice(&response[24..32]);
-        oxid_bytes
-    } else {
-        [0u8; 8]
-    };
-
-    Ok((port, oxid))
+    let activation = parse_remote_activation_response(&response)?;
+    let port = activation.port().ok_or(DcomError::Protocol)?;
+    Ok((port, activation.oxid))
 }
 
 /// Activate WMI via DCOM (IRemoteSCMActivator::RemoteActivation)
@@ -696,14 +678,19 @@ fn activate_wmi_dcom_with_auth(
         error!(%err, "RemoteActivation response rejected");
         DcomError::Protocol
     })?;
-    let (port, oxid) = parse_remote_activation_response(&resp_pdu)?;
+    let activation = parse_remote_activation_response(&resp_pdu)?;
+    let port = activation.port().ok_or_else(|| {
+        error!("RemoteActivation response advertised no TCP binding");
+        DcomError::Protocol
+    })?;
     info!(
-        "DCOM activation successful, WMI port={}, OXID={}",
+        "DCOM activation successful, WMI port={}, OXID={}, IPID={}",
         port,
-        hex::encode(oxid)
+        hex::encode(activation.oxid),
+        hex::encode(activation.ipid)
     );
 
-    Ok((port, oxid))
+    Ok((port, activation.oxid))
 }
 
 use crate::transport::{
@@ -915,183 +902,178 @@ fn read_rpc_pdu(stream: &mut TcpStream) -> Result<Vec<u8>, DcomError> {
 }
 
 /// Parse RemoteActivation response and extract port and OXID from DUALSTRINGARRAY
-fn parse_remote_activation_response(pdu: &[u8]) -> Result<(u16, [u8; 8]), DcomError> {
+/// IActivation::RemoteActivation output (MS-DCOM 3.1.2.5.1.1).
+#[derive(Debug, Clone)]
+pub(crate) struct ActivationResponse {
+    pub oxid: [u8; 8],
+    /// IPID of the activated interface, read from the returned OBJREF_STANDARD.
+    pub ipid: [u8; 16],
+    /// ncacn_ip_tcp bindings the server advertised, as (host, port). Under NAT
+    /// these name the server's own view (e.g. DC01, 10.0.2.15); the caller keeps
+    /// connecting to the address it dialed and only takes the port from here.
+    pub tcp_bindings: Vec<(String, u16)>,
+}
+
+impl ActivationResponse {
+    /// The WMI port to connect to (all advertised bindings share one endpoint).
+    pub fn port(&self) -> Option<u16> {
+        self.tcp_bindings.first().map(|&(_, port)| port)
+    }
+}
+
+fn parse_remote_activation_response(pdu: &[u8]) -> Result<ActivationResponse, DcomError> {
     if pdu.len() < 24 {
         return Err(DcomError::Protocol);
     }
-
-    let ptype = pdu[2];
-    if ptype == 0x03 {
-        // fault
-        if pdu.len() >= 28 {
-            let status = u32::from_le_bytes([pdu[24], pdu[25], pdu[26], pdu[27]]);
-            error!("RPC fault: 0x{:08x}", status);
+    match pdu[2] {
+        0x02 => {}
+        0x03 => {
+            if pdu.len() >= 28 {
+                let status = u32::from_le_bytes([pdu[24], pdu[25], pdu[26], pdu[27]]);
+                error!("RPC fault: 0x{:08x}", status);
+            }
+            return Err(DcomError::Protocol);
         }
-        return Err(DcomError::Protocol);
-    }
-
-    if ptype != 0x02 {
-        // response
-        return Err(DcomError::Protocol);
-    }
-
-    // Skip RPC header to stub data
-    let stub_data = &pdu[24..];
-
-    // Use nom to parse the response, now also extracting OXID
-    match parse_activation_response(stub_data) {
-        Ok((_, (port, oxid))) => {
-            debug!(
-                "Extracted WMI port={} and OXID={:?}",
-                port,
-                hex::encode(oxid)
-            );
-            Ok((port, oxid))
-        }
-        Err(_) => {
-            warn!("Failed to parse activation response fully, using defaults");
-            Ok((135, [0u8; 8]))
+        other => {
+            warn!("unexpected PDU type 0x{:02x} in activation response", other);
+            return Err(DcomError::Protocol);
         }
     }
+    parse_activation_stub(&pdu[24..])
 }
 
-/// Parse ORPCTHAT header fully
-fn parse_orpcthat(input: &[u8]) -> IResult<&[u8], (u32, u32, Vec<u8>)> {
-    // Parse ORPCTHAT flags
-    let (input, flags) = le_u32(input)?;
-
-    // Check for extensions
-    let (input, extensions) = if flags & 0x02 != 0 {
-        // Extensions present
-        let (input, ext_size) = le_u32(input)?;
-        let (input, ext_data) = take(ext_size)(input)?;
-        (input, ext_data.to_vec())
-    } else {
-        (input, Vec::new())
+/// Parse the NDR stub of a RemoteActivation response.
+fn parse_activation_stub(stub: &[u8]) -> Result<ActivationResponse, DcomError> {
+    let mut c = Cursor::new(stub);
+    let rd32 = |c: &mut Cursor<&[u8]>| {
+        c.read_u32::<LittleEndian>()
+            .map_err(|_| DcomError::Protocol)
+    };
+    let rd16 = |c: &mut Cursor<&[u8]>| {
+        c.read_u16::<LittleEndian>()
+            .map_err(|_| DcomError::Protocol)
     };
 
-    // Extract causality ID from flags (context field)
-    let causality_id = flags >> 16; // Upper 16 bits often used for context
-
-    Ok((input, (flags, causality_id, extensions)))
-}
-
-/// Parse activation response to extract both port and OXID
-fn parse_activation_response(input: &[u8]) -> IResult<&[u8], (u16, [u8; 8])> {
-    // Parse ORPCTHAT header fully
-    let (input, (_flags, _causality_id, _extensions)) = parse_orpcthat(input)?;
-
-    // Parse HRESULT
-    let (input, hresult) = le_u32(input)?;
-    if hresult != 0 {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Verify,
-        )));
+    // ORPCTHAT: flags, then a pointer to the extension array (null in practice).
+    let _flags = rd32(&mut c)?;
+    if rd32(&mut c)? != 0 {
+        warn!("ORPCTHAT carries extensions; unsupported");
+        return Err(DcomError::Protocol);
     }
 
-    // Extract OXID (8 bytes)
-    let (input, oxid_bytes) = take(8usize)(input)?;
+    // pOxid, passed by value.
     let mut oxid = [0u8; 8];
-    oxid.copy_from_slice(oxid_bytes);
+    c.read_exact(&mut oxid).map_err(|_| DcomError::Protocol)?;
 
-    // Skip pOxidBindings pointer (4), ipidRemUnknown (16), dwAuthnHint (4)
-    let (input, _) = take(24usize)(input)?;
+    // ppdsaOxidBindings: a unique pointer to a DUALSTRINGARRAY (MS-DCOM 2.2.19.1).
+    if rd32(&mut c)? == 0 {
+        return Err(DcomError::Protocol);
+    }
+    let _max_count = rd32(&mut c)?;
+    let num_entries = rd16(&mut c)? as usize;
+    let security_offset = rd16(&mut c)? as usize;
+    if security_offset > num_entries {
+        return Err(DcomError::Protocol);
+    }
+    let mut words = Vec::with_capacity(num_entries);
+    for _ in 0..num_entries {
+        words.push(rd16(&mut c)?);
+    }
+    let tcp_bindings = parse_string_bindings(&words[..security_offset]);
 
-    // Continue to parse DUALSTRINGARRAY for port
-    let (input, port) = parse_dualstringarray_port_inner(input)?;
-
-    Ok((input, (port, oxid)))
-}
-
-/// Parse DUALSTRINGARRAY to extract TCP port using nom (keeping old function for compatibility)
-#[allow(dead_code)]
-fn parse_dualstringarray_port(input: &[u8]) -> IResult<&[u8], u16> {
-    // Parse ORPCTHAT header fully
-    let (input, (_flags, _causality_id, _extensions)) = parse_orpcthat(input)?;
-
-    // Skip to DUALSTRINGARRAY after HRESULT, OXID, etc
-    let (input, hresult) = le_u32(input)?;
-    if hresult != 0 {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Verify,
-        )));
+    // phr is the only other field we check; the interface IPID is taken from the
+    // OBJREF below. NDR aligns the next field (ipidRemUnknown) to 4 bytes.
+    let pos = c.position() as usize;
+    c.set_position(((pos + 3) & !3) as u64);
+    let mut ipid_rem_unknown = [0u8; 16];
+    c.read_exact(&mut ipid_rem_unknown)
+        .map_err(|_| DcomError::Protocol)?;
+    let _authn_hint = rd32(&mut c)?;
+    let _com_version = rd32(&mut c)?; // COMVERSION { major: u16, minor: u16 }
+    let phr = rd32(&mut c)?;
+    if phr != 0 {
+        error!("RemoteActivation hr=0x{:08x}", phr);
+        return Err(DcomError::Protocol);
     }
 
-    // Skip OXID (8 bytes), pOxidBindings pointer (4), ipidRemUnknown (16), dwAuthnHint (4)
-    let (input, _) = take(32usize)(input)?;
+    // The activated interface comes back as an MInterfacePointer wrapping an
+    // OBJREF_STANDARD; its std.ipid is what later ORPC calls target. The OBJREF
+    // starts with the "MEOW" signature (MS-DCOM 2.2.18).
+    let ipid = find_objref_ipid(stub, &oxid)?;
 
-    parse_dualstringarray_port_inner(input)
+    debug!(
+        oxid = %hex::encode(oxid),
+        ipid = %hex::encode(ipid),
+        ?tcp_bindings,
+        "parsed RemoteActivation response"
+    );
+    Ok(ActivationResponse {
+        oxid,
+        ipid,
+        tcp_bindings,
+    })
 }
 
-/// Inner function to parse DUALSTRINGARRAY for port (UTF-16 strings)
-fn parse_dualstringarray_port_inner(input: &[u8]) -> IResult<&[u8], u16> {
-    // Skip pServerVersion pointer
-    let (input, server_version_ptr) = le_u32(input)?;
-    let input = if server_version_ptr != 0 {
-        let (input, _) = take(4usize)(input)?; // skip version
-        input
-    } else {
-        input
-    };
-
-    // Parse DUALSTRINGARRAY header
-    let (input, string_binding_size) = le_u16(input)?;
-    let (input, _security_binding_size) = le_u16(input)?;
-
-    // Parse string bindings (UTF-16LE)
-    let (input, bindings) = take(string_binding_size * 2)(input)?;
-
-    // Convert UTF-16LE to string
-    let utf16_units: Vec<u16> = bindings
-        .chunks_exact(2)
-        .map(|ch| u16::from_le_bytes([ch[0], ch[1]]))
-        .collect();
-    let bindings_str = String::from_utf16_lossy(&utf16_units);
-
-    // Split on null terminator to get individual bindings
-    let binding_strings: Vec<&str> = bindings_str.split('\0').filter(|s| !s.is_empty()).collect();
-
-    // Find TCP binding (starts with "ncacn_ip_tcp:")
-    for binding in &binding_strings {
-        if binding.starts_with("ncacn_ip_tcp:") {
-            // Extract port from [port] at end of binding string
-            if let Some(start) = binding.rfind('[') {
-                if let Some(end) = binding[start + 1..].find(']') {
-                    let port_str = &binding[start + 1..start + 1 + end];
-                    if let Ok(port) = port_str.parse::<u16>() {
-                        // Accept any non-zero port for testing (5000 is not in ephemeral range)
-                        if port > 0 {
-                            return Ok((input, port));
-                        }
-                    }
-                }
+/// Parse STRINGBINDING entries (MS-DCOM 2.2.19.3): each is a u16 tower id
+/// followed by a NUL-terminated UTF-16LE address; a lone 0x0000 ends the list.
+fn parse_string_bindings(words: &[u16]) -> Vec<(String, u16)> {
+    const TOWER_NCACN_IP_TCP: u16 = 0x0007;
+    let mut bindings = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        let tower_id = words[i];
+        i += 1;
+        if tower_id == 0 {
+            break;
+        }
+        let start = i;
+        while i < words.len() && words[i] != 0 {
+            i += 1;
+        }
+        let name = String::from_utf16_lossy(&words[start..i]);
+        if i < words.len() {
+            i += 1; // consume NUL
+        }
+        if tower_id == TOWER_NCACN_IP_TCP {
+            if let Some(pair) = split_host_port(&name) {
+                bindings.push(pair);
             }
         }
     }
+    bindings
+}
 
-    // If no TCP binding found with bracket notation, try tower format fallback
-    // Some implementations use binary tower format
-    let mut cursor = std::io::Cursor::new(bindings);
-    while cursor.position() < bindings.len() as u64 - 2 {
-        let tower_id = cursor.read_u16::<LittleEndian>().unwrap_or(0);
-        if tower_id == 0x07 {
-            // TCP tower ID
-            // Skip IP components and read port
-            let current_pos = cursor.position();
-            if current_pos + 10 < bindings.len() as u64 {
-                cursor.set_position(current_pos + 10);
-                let port = cursor.read_u16::<LittleEndian>().unwrap_or(0);
-                // Accept any valid port > 1024 for compatibility
-                if port > 1024 {
-                    return Ok((input, port));
-                }
-            }
-        }
+/// Split a "host[port]" network address into its parts.
+fn split_host_port(addr: &str) -> Option<(String, u16)> {
+    let (host, rest) = addr.split_once('[')?;
+    let port = rest.strip_suffix(']')?.parse::<u16>().ok()?;
+    (port > 0).then(|| (host.to_string(), port))
+}
+
+/// Locate the OBJREF_STANDARD by its "MEOW" signature and return std.ipid,
+/// verifying std.oxid matches the activation's OXID.
+fn find_objref_ipid(stub: &[u8], expected_oxid: &[u8; 8]) -> Result<[u8; 16], DcomError> {
+    // OBJREF layout: signature(4) flags(4) iid(16) then STDOBJREF
+    // { flags(4) cPublicRefs(4) oxid(8) oid(8) ipid(16) }.
+    const OXID_OFFSET: usize = 4 + 4 + 16 + 4 + 4; // 32
+    const IPID_OFFSET: usize = OXID_OFFSET + 8 + 8; // 48
+    let meow = stub
+        .windows(4)
+        .position(|w| w == b"MEOW")
+        .ok_or(DcomError::Protocol)?;
+    let oxid = stub
+        .get(meow + OXID_OFFSET..meow + OXID_OFFSET + 8)
+        .ok_or(DcomError::Protocol)?;
+    if oxid != expected_oxid {
+        warn!("OBJREF oxid does not match activation oxid");
+        return Err(DcomError::Protocol);
     }
-
-    Ok((input, 135)) // Default fallback to port 135
+    let ipid_bytes = stub
+        .get(meow + IPID_OFFSET..meow + IPID_OFFSET + 16)
+        .ok_or(DcomError::Protocol)?;
+    let mut ipid = [0u8; 16];
+    ipid.copy_from_slice(ipid_bytes);
+    Ok(ipid)
 }
 
 /// Build an anonymous RPC bind PDU (no authentication)
@@ -1177,70 +1159,6 @@ fn build_anonymous_request_pdu(call_id: u32, context_id: u16, opnum: u16, stub: 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_oxid_extraction_from_activation_response() {
-        // Mock RemoteActivation response with ORPCTHAT and OXID
-        let mut stub = Vec::new();
-
-        // ORPCTHAT header
-        stub.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]); // flags (no extensions)
-
-        // HRESULT (success)
-        stub.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
-
-        // OXID (8 bytes) - test pattern
-        stub.extend_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
-
-        // Skip rest of response for test
-        stub.extend_from_slice(&[0x00; 24]); // pOxidBindings, ipidRemUnknown, dwAuthnHint
-        stub.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // pServerVersion (null)
-
-        // Minimal DUALSTRINGARRAY with proper format
-        stub.extend_from_slice(&[0x08, 0x00]); // string_binding_size (8 words = 16 bytes)
-        stub.extend_from_slice(&[0x00, 0x00]); // security_binding_size
-                                               // String bindings (16 bytes)
-        stub.extend_from_slice(&[0x07, 0x00]); // TCP tower ID
-        stub.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // IP part 1
-        stub.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // IP part 2
-        stub.extend_from_slice(&[0x00, 0x00]); // padding
-        stub.extend_from_slice(&[0x87, 0x13]); // Port 5000 (0x1387)
-        stub.extend_from_slice(&[0x00, 0x00]); // terminator
-
-        let result = parse_activation_response(&stub);
-        assert!(result.is_ok());
-        let (_, (port, oxid)) = result.unwrap();
-        // Port extraction uses heuristics - may find 5000 or default to 135
-        // The important thing is we get a valid port (non-zero)
-        assert!(port > 0);
-        assert_eq!(oxid, [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
-    }
-
-    #[test]
-    fn test_orpcthat_extension_parsing() {
-        // Test with extensions present
-        let mut input = Vec::new();
-        input.extend_from_slice(&[0x02, 0x00, 0x00, 0x00]); // flags with extension bit
-        input.extend_from_slice(&[0x08, 0x00, 0x00, 0x00]); // extension size = 8
-        input.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22]); // extension data
-
-        let result = parse_orpcthat(&input);
-        assert!(result.is_ok());
-        let (_, (flags, _causality_id, extensions)) = result.unwrap();
-        assert_eq!(flags, 0x02);
-        assert_eq!(extensions.len(), 8);
-        assert_eq!(extensions[0], 0xAA);
-
-        // Test without extensions
-        let mut input2 = Vec::new();
-        input2.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]); // flags without extension bit
-
-        let result2 = parse_orpcthat(&input2);
-        assert!(result2.is_ok());
-        let (_, (flags, _causality_id, extensions)) = result2.unwrap();
-        assert_eq!(flags, 0x01);
-        assert_eq!(extensions.len(), 0);
-    }
 
     #[test]
     fn test_auth_level_privacy_in_bind_pdu() {
@@ -1338,55 +1256,44 @@ mod tests {
         assert_eq!(stub.len(), 102);
     }
 
+    /// Decrypted IActivation::RemoteActivation response captured from a Windows
+    /// Server 2022 DC activating CLSID_WbemLevel1Login (behind QEMU user-mode
+    /// NAT, so it advertises its internal names). Non-sensitive protocol data.
+    const WINDOWS_ACTIVATION_STUB: &[u8] =
+        include_bytes!("testdata/remote_activation_response_stub.bin");
+
     #[test]
-    fn test_dualstringarray_utf16_parsing() {
-        // Test that DUALSTRINGARRAY is parsed as UTF-16LE strings
-        // Build a complete RemoteActivation response stub
-        let mut stub = Vec::new();
+    fn parse_activation_stub_matches_windows_response() {
+        let r = parse_activation_stub(WINDOWS_ACTIVATION_STUB).unwrap();
+        assert_eq!(hex::encode(r.oxid), "889959be75b91cd7");
+        assert_eq!(hex::encode(r.ipid), "1a7c0000e8090000b541859917e7b564");
+        assert_eq!(
+            r.tcp_bindings,
+            vec![
+                ("DC01".to_string(), 24158),
+                ("10.0.2.15".to_string(), 24158),
+            ]
+        );
+        assert_eq!(r.port(), Some(24158));
+    }
 
-        // ORPCTHAT header (no extensions)
-        stub.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]); // flags (no extensions)
+    #[test]
+    fn parse_activation_stub_rejects_nonzero_hresult() {
+        // Flip phr (at offset 388 in this stub) to E_ACCESSDENIED.
+        let mut stub = WINDOWS_ACTIVATION_STUB.to_vec();
+        stub[388..392].copy_from_slice(&0x8007_0005u32.to_le_bytes());
+        assert!(parse_activation_stub(&stub).is_err());
+    }
 
-        // HRESULT (success)
-        stub.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
-
-        // OXID (8 bytes) - test pattern
-        stub.extend_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
-
-        // pOxidBindings pointer (non-null to indicate DUALSTRINGARRAY follows)
-        stub.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]);
-
-        // ipidRemUnknown (16 bytes)
-        stub.extend_from_slice(&[0x00; 16]);
-
-        // dwAuthnHint
-        stub.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
-
-        // pServerVersion pointer (null)
-        stub.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
-
-        // Now the actual DUALSTRINGARRAY
-        // Create a DUALSTRINGARRAY with UTF-16LE "ncacn_ip_tcp:192.168.1.1[5000]"
-        let binding = "ncacn_ip_tcp:192.168.1.1[5000]";
-        let utf16: Vec<u16> = binding.encode_utf16().collect();
-
-        // DUALSTRINGARRAY header
-        // Size is in 16-bit words, not bytes. Need 2 extra words for double null termination
-        stub.extend_from_slice(&((utf16.len() + 2) as u16).to_le_bytes()); // string binding size in words
-        stub.extend_from_slice(&[0x00, 0x00]); // security binding size
-
-        // UTF-16LE string binding
-        for unit in &utf16 {
-            stub.extend_from_slice(&unit.to_le_bytes());
-        }
-        stub.extend_from_slice(&[0x00, 0x00]); // null terminator for this binding
-        stub.extend_from_slice(&[0x00, 0x00]); // end of all string bindings (double null)
-
-        // Parse it
-        let result = parse_dualstringarray_port(&stub);
-        assert!(result.is_ok(), "Should parse DUALSTRINGARRAY successfully");
-        let (_, port) = result.unwrap();
-        assert_eq!(port, 5000, "Should extract port 5000 from UTF-16 string");
+    #[test]
+    fn split_host_port_parses_binding() {
+        assert_eq!(split_host_port("DC01[24158]"), Some(("DC01".into(), 24158)));
+        assert_eq!(
+            split_host_port("10.0.2.15[24158]"),
+            Some(("10.0.2.15".into(), 24158))
+        );
+        assert_eq!(split_host_port("no-port"), None);
+        assert_eq!(split_host_port("host[0]"), None);
     }
 
     /// First 72 bytes of the IRemoteSCMActivator bind impacket 0.13.1 sent to a
