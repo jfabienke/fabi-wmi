@@ -17,6 +17,10 @@ pub(crate) enum WmioError {
     NotWbemObject,
     #[error("bad WMIO signature {0:#010x}")]
     BadSignature(u32),
+    #[error("WMIO object has an unsupported shape (decoration or per-property qualifiers)")]
+    Unsupported,
+    #[error("CIM type {0:#06x} not yet decoded")]
+    UnsupportedType(u16),
 }
 
 const OBJREF_SIGNATURE: &[u8; 4] = b"MEOW";
@@ -162,6 +166,8 @@ pub(crate) struct PropertyDesc {
     pub name: String,
     /// CIM type with the array/inherited flags masked off.
     pub cim_type: u16,
+    /// Declaration order, used to index the NdTable null/default bits.
+    pub order: usize,
     /// Byte offset of this property's value within the ValueTable.
     pub value_table_offset: usize,
 }
@@ -220,11 +226,19 @@ fn parse_class_part(wmio: &[u8], start: usize) -> Result<ClassPart, WmioError> {
     for (name_ref, info_ref) in lookups {
         let name = encoded_string(heap, name_ref)?;
         // PropertyInfo: Type(4), DeclarationOrder(2), ValueTableOffset(4), ...
+        // PropertyInfo: Type(4), DeclarationOrder(2), ValueTableOffset(4), ...
         let raw_type = rd_u32(heap, info_ref)?;
+        let order = u16::from_le_bytes(
+            heap.get(info_ref + 4..info_ref + 6)
+                .ok_or(WmioError::Malformed)?
+                .try_into()
+                .unwrap(),
+        ) as usize;
         let value_table_offset = rd_u32(heap, info_ref + 6)? as usize;
         properties.push(PropertyDesc {
             name,
             cim_type: (raw_type & 0x1fff) as u16,
+            order,
             value_table_offset,
         });
     }
@@ -234,6 +248,81 @@ fn parse_class_part(wmio: &[u8], start: usize) -> Result<ClassPart, WmioError> {
         nd_value_table_len,
         encoding_length,
     })
+}
+
+/// Decode one WMIO instance object into a JSON object of its property values.
+/// Only plain CIM instances (no decoration, no per-property qualifiers) are
+/// handled so far, and only CIM_STRING values; other CIM types error rather
+/// than return a wrong or silently-null value.
+pub(crate) fn decode_object(wmio: &[u8]) -> Result<serde_json::Value, WmioError> {
+    let header = parse_object_header(wmio)?;
+    if !header.is_instance || header.has_decoration {
+        return Err(WmioError::Unsupported);
+    }
+    let class = parse_class_part(wmio, header.body_offset)?;
+
+    // InstanceType: EncodingLength(4), InstanceFlags(1), InstanceClassName(4),
+    // then NdTable + ValueTable, InstanceQualifierSet, InstanceHeap.
+    let instance_start = header.body_offset + class.encoding_length;
+    let nd_value_table_start = instance_start + 9;
+    let nd_size = (class.properties.len().saturating_sub(1)) / 4 + 1;
+    let value_table_start = nd_value_table_start + nd_size;
+    let nd_table = wmio
+        .get(nd_value_table_start..nd_value_table_start + nd_size)
+        .ok_or(WmioError::Malformed)?;
+
+    // InstanceQualifierSet = QualifierSet (length-prefixed) + a 1-byte
+    // InstancePropQualifierSet flag (2 would carry per-property qualifiers).
+    let after_nd_value_table = nd_value_table_start + class.nd_value_table_len;
+    let qualifier_set_len = rd_u32(wmio, after_nd_value_table)? as usize;
+    let prop_qual_flag = *wmio
+        .get(after_nd_value_table + qualifier_set_len)
+        .ok_or(WmioError::Malformed)?;
+    if prop_qual_flag == 2 {
+        return Err(WmioError::Unsupported);
+    }
+    let heap_start = after_nd_value_table + qualifier_set_len + 1;
+    let heap_len = (rd_u32(wmio, heap_start)? & 0x7fff_ffff) as usize;
+    let instance_heap = wmio
+        .get(heap_start + 4..heap_start + 4 + heap_len)
+        .ok_or(WmioError::Malformed)?;
+
+    let mut map = serde_json::Map::with_capacity(class.properties.len());
+    for p in &class.properties {
+        let nd = (nd_table[p.order / 4] >> (2 * (p.order % 4))) & 0b11;
+        let value = if nd & 0b01 != 0 {
+            serde_json::Value::Null // NULL / default
+        } else {
+            decode_value(
+                p.cim_type,
+                wmio,
+                value_table_start + p.value_table_offset,
+                instance_heap,
+            )?
+        };
+        map.insert(p.name.clone(), value);
+    }
+    Ok(serde_json::Value::Object(map))
+}
+
+/// Decode one property value given its CIM type. `value_at` is the byte offset
+/// of the value within the WMIO blob's ValueTable.
+fn decode_value(
+    cim_type: u16,
+    wmio: &[u8],
+    value_at: usize,
+    instance_heap: &[u8],
+) -> Result<serde_json::Value, WmioError> {
+    match cim_type {
+        CIM_STRING => {
+            let heap_ref = rd_u32(wmio, value_at)? as usize;
+            Ok(serde_json::Value::String(encoded_string(
+                instance_heap,
+                heap_ref,
+            )?))
+        }
+        other => Err(WmioError::UnsupportedType(other)),
+    }
 }
 
 #[cfg(test)]
@@ -290,6 +379,21 @@ mod tests {
                 ("Model", CIM_STRING, 8),
                 ("Name", CIM_STRING, 12),
             ]
+        );
+    }
+
+    #[test]
+    fn decode_object_produces_the_query_row_json() {
+        let blobs = parse_next_response(NEXT_RESULT).unwrap();
+        let value = decode_object(&blobs[0].data).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "Domain": "test.local",
+                "Manufacturer": "QEMU",
+                "Model": "Standard PC (Q35 + ICH9, 2009)",
+                "Name": "DC01",
+            })
         );
     }
 
