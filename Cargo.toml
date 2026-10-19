@@ -57,14 +57,13 @@ deadpool-runtime = { version = "0.1", optional = true }
 
 # Security dependencies
 zeroize = { version = "1.7", features = ["derive"] }
+# Pure-Rust SSPI (Devolutions sspi-rs): NTLM handshake and message sealing on all platforms
+sspi = { version = "0.23", default-features = false }
 
 # Platform-specific dependencies
 [target.'cfg(unix)'.dependencies]
 # Internal kerbsec library v0.2.0 with runtime-configurable GSS flags
 kerbsec = { path = "../kerbsec", version = "0.2.0", features = ["dns", "runtime", "trace", "ccache", "channel-bindings", "channel-bindings-rustls", "iov"], optional = true }
-
-[target.'cfg(windows)'.dependencies]
-sspi = { version = "0.12", optional = true }
 
 [features]
 default = ["kerberos"]

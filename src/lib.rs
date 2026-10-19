@@ -18,6 +18,7 @@ mod ndr;
 mod pool;
 mod rpc;
 pub mod spnego;
+mod sspi_ntlm;
 mod transport; // Used internally by dcom and lib
 mod wmi; // Re-exported types below
 

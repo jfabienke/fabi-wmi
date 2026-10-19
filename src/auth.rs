@@ -18,6 +18,8 @@ pub enum AuthError {
     Creds,
     #[error("Type2 message invalid")]
     InvalidType2,
+    #[error("RPC message protection unavailable: {0}")]
+    Protection(String),
 }
 
 const NTLMSSP_SIGNATURE: &[u8; 8] = b"NTLMSSP\0";
@@ -158,6 +160,29 @@ pub trait AuthProvider: Send {
     fn negotiate(&mut self) -> Result<Vec<u8>, AuthError>;
     fn respond(&mut self, challenge: &[u8]) -> Result<Vec<u8>, AuthError>;
     fn session_key(&self) -> Option<&[u8]>;
+
+    /// Protect an RPC PDU at packet-privacy level: encrypt `stub` in place and
+    /// return the auth_value signing `header || stub || sec_trailer` (plaintext).
+    fn seal_rpc(
+        &mut self,
+        _header: &[u8],
+        _stub: &mut [u8],
+        _sec_trailer: &[u8],
+    ) -> Result<Vec<u8>, AuthError> {
+        Err(AuthError::Protection("provider cannot seal".into()))
+    }
+
+    /// Reverse of [`seal_rpc`](Self::seal_rpc) for a received PDU: decrypt
+    /// `stub` in place and verify `auth_value`.
+    fn unseal_rpc(
+        &mut self,
+        _header: &[u8],
+        _stub: &mut [u8],
+        _sec_trailer: &[u8],
+        _auth_value: &[u8],
+    ) -> Result<(), AuthError> {
+        Err(AuthError::Protection("provider cannot unseal".into()))
+    }
 }
 
 impl AuthProvider for NtlmV2Client {
@@ -866,17 +891,16 @@ mod tests {
             )
             .to_vec(),
         };
-        let auth =
-            build_type3_message_with_mic(
-                &creds,
-                &challenge,
-                None,
-                &[],
-                Some([0xaa; 8]),
-                Some(0),
-                Some([0x55; 16]),
-            )
-                .unwrap();
+        let auth = build_type3_message_with_mic(
+            &creds,
+            &challenge,
+            None,
+            &[],
+            Some([0xaa; 8]),
+            Some(0),
+            Some([0x55; 16]),
+        )
+        .unwrap();
         let msg = &auth.message;
 
         // Header: Version at 64, MIC at 72, payload from 88.

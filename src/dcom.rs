@@ -602,7 +602,11 @@ pub fn activate_wmi_dcom(host: &str, creds: &Credentials) -> Result<(u16, [u8; 8
 
     // Fall back to NTLM
     debug!("Using NTLM authentication for DCOM activation");
-    let ntlm_client = NtlmV2Client::new(creds.clone()).map_err(|_| DcomError::Protocol)?;
+    let ntlm_client = crate::sspi_ntlm::SspiNtlmClient::new(creds, &format!("host/{host}"))
+        .map_err(|err| {
+            error!(%err, "failed to set up NTLM client");
+            DcomError::Protocol
+        })?;
     activate_wmi_dcom_with_auth(host, Box::new(ntlm_client))
 }
 
@@ -636,7 +640,8 @@ fn activate_wmi_dcom_with_auth(
         .set_write_timeout(Some(RPC_IO_TIMEOUT))
         .map_err(|_| DcomError::Connect)?;
 
-    let scm_uuid: [u8; 16] = hex_literal::hex!("a0 01 00 00 00 00 00 00 c0 00 00 00 00 00 00 46");
+    // IActivation {4d9f4ab8-7d1c-11cf-861e-0020af6e7c57}: RemoteActivation is opnum 0.
+    let scm_uuid: [u8; 16] = hex_literal::hex!("b84a9f4d1c7dcf11861e0020af6e7c57");
 
     // Step 1: Bind with auth type 1 (negotiate)
     let negotiate_token = auth_client.negotiate().map_err(|_| DcomError::Protocol)?;
@@ -673,15 +678,24 @@ fn activate_wmi_dcom_with_auth(
     })?;
     debug!("SCM security context established");
 
-    let clsid_wmi = hex_literal::hex!("11 f8 90 45 3a 1d d0 11 89 1f 00 aa 00 4b 2e 24");
-    let iid_locator = hex_literal::hex!("87 a6 12 dc 7f 73 cf 11 88 4d 00 aa 00 4b 2e 24");
-    let stub = build_remote_activation_stub(&clsid_wmi, &iid_locator)?;
-    let req_pdu = build_request_pdu(3, context_id, 4, &stub)?; // opnum=4
+    // MS-WMI 3.2.3: activate CLSID_WbemLevel1Login for IID_IWbemLevel1Login.
+    let clsid_level1_login = hex_literal::hex!("5ef0c38b6bd8d011a07500c04fb68820");
+    let iid_level1_login = hex_literal::hex!("18ad09f36ad8d011a07500c04fb68820");
+    let stub = build_remote_activation_stub(&clsid_level1_login, &iid_level1_login)?;
+    let req_pdu = build_sealed_request_pdu(auth_client.as_mut(), 3, context_id, 0, &stub, 0)
+        .map_err(|err| {
+            error!(%err, "failed to seal RemoteActivation");
+            DcomError::Protocol
+        })?;
 
     debug!("Sending RemoteActivation, len={}", req_pdu.len());
     stream.write_all(&req_pdu).map_err(|_| DcomError::Send)?;
 
     let resp_pdu = read_rpc_pdu(&mut stream)?;
+    let resp_pdu = unseal_response_pdu(auth_client.as_mut(), &resp_pdu).map_err(|err| {
+        error!(%err, "RemoteActivation response rejected");
+        DcomError::Protocol
+    })?;
     let (port, oxid) = parse_remote_activation_response(&resp_pdu)?;
     info!(
         "DCOM activation successful, WMI port={}, OXID={}",
@@ -693,7 +707,8 @@ fn activate_wmi_dcom_with_auth(
 }
 
 use crate::transport::{
-    write_context_list, AUTH_TYPE_NTLM, AUTH_TYPE_SPNEGO, DATA_REP, RPC_IO_TIMEOUT,
+    build_sealed_request_pdu, unseal_response_pdu, write_context_list, AUTH_TYPE_NTLM,
+    AUTH_TYPE_SPNEGO, DATA_REP, RPC_IO_TIMEOUT,
 };
 const AUTH_LEVEL_PRIVACY: u8 = 0x06; // Packet Privacy for encrypted communication
 const MAX_XMIT_RECV: u16 = 0x10B8;
@@ -800,63 +815,40 @@ fn build_scm_alter_context_pdu(
 }
 
 /// Build RemoteActivation request stub with proper NDR encoding
+/// IActivation::RemoteActivation request stub (MS-DCOM 3.1.2.5.1.1), NDR20.
 fn build_remote_activation_stub(clsid: &[u8; 16], iid: &[u8; 16]) -> Result<Vec<u8>, DcomError> {
+    const RPC_C_IMP_LEVEL_IMPERSONATE: u32 = 3;
+    const PROTSEQ_NCACN_IP_TCP: u16 = 0x0007;
+    const UNIQUE_REFERENT: u32 = 0x0002_0000;
+
     let mut stub = Vec::new();
 
-    // ORPCTHIS header
-    stub.write_u32::<LittleEndian>(0x00000001)
-        .map_err(|_| DcomError::Protocol)?; // version
-    stub.write_u32::<LittleEndian>(0)
-        .map_err(|_| DcomError::Protocol)?; // flags
-    stub.write_u32::<LittleEndian>(0)
-        .map_err(|_| DcomError::Protocol)?; // reserved1
-    stub.extend_from_slice(&[0u8; 16]); // causality ID
-    stub.write_u32::<LittleEndian>(0)
-        .map_err(|_| DcomError::Protocol)?; // no extensions
+    // ORPCTHIS (MS-DCOM 2.2.13.1)
+    stub.extend_from_slice(&[5, 0, 7, 0]); // COMVERSION 5.7
+    stub.write_u32::<LittleEndian>(0).unwrap(); // flags
+    stub.write_u32::<LittleEndian>(0).unwrap(); // reserved1
+    stub.extend_from_slice(uuid::Uuid::new_v4().as_bytes()); // cid (causality ID)
+    stub.write_u32::<LittleEndian>(0).unwrap(); // extensions: null
 
-    // RemoteActivation parameters
-    stub.extend_from_slice(clsid); // CLSID
-    stub.write_u32::<LittleEndian>(0)
-        .map_err(|_| DcomError::Protocol)?; // pwszObjectName (null)
-    stub.write_u32::<LittleEndian>(0)
-        .map_err(|_| DcomError::Protocol)?; // pObjectStorage (null)
-    stub.write_u32::<LittleEndian>(2)
-        .map_err(|_| DcomError::Protocol)?; // ClientImpLevel = IDENTIFY
-    stub.write_u32::<LittleEndian>(0)
-        .map_err(|_| DcomError::Protocol)?; // Mode
-    stub.write_u32::<LittleEndian>(1)
-        .map_err(|_| DcomError::Protocol)?; // Interfaces count
+    stub.extend_from_slice(clsid); // Clsid
+    stub.write_u32::<LittleEndian>(0).unwrap(); // pwszObjectName: null
+    stub.write_u32::<LittleEndian>(0).unwrap(); // pObjectStorage: null
+    stub.write_u32::<LittleEndian>(RPC_C_IMP_LEVEL_IMPERSONATE)
+        .unwrap(); // ClientImpLevel
+    stub.write_u32::<LittleEndian>(0).unwrap(); // Mode
+    stub.write_u32::<LittleEndian>(1).unwrap(); // Interfaces
 
-    // IID array pointer (non-null unique pointer)
-    stub.write_u32::<LittleEndian>(0x00000001)
-        .map_err(|_| DcomError::Protocol)?; // pointer referent
+    // [unique, size_is(Interfaces)] IID* pIIDs: referent, then conformant array
+    stub.write_u32::<LittleEndian>(UNIQUE_REFERENT).unwrap();
+    stub.write_u32::<LittleEndian>(1).unwrap(); // max_count
+    stub.extend_from_slice(iid);
 
-    // Conformant array of IIDs
-    stub.write_u32::<LittleEndian>(1)
-        .map_err(|_| DcomError::Protocol)?; // max_count
-    stub.write_u32::<LittleEndian>(0)
-        .map_err(|_| DcomError::Protocol)?; // offset
-    stub.write_u32::<LittleEndian>(1)
-        .map_err(|_| DcomError::Protocol)?; // actual_count
-    stub.extend_from_slice(iid); // IID data
-
-    // cRequestedProtseqs
-    stub.write_u16::<LittleEndian>(1)
-        .map_err(|_| DcomError::Protocol)?; // requesting 1 protocol
-
-    // Protocol sequence array pointer (non-null unique pointer)
-    stub.write_u32::<LittleEndian>(0x00000002)
-        .map_err(|_| DcomError::Protocol)?; // pointer referent
-
-    // Conformant array of protocol sequences
-    stub.write_u32::<LittleEndian>(1)
-        .map_err(|_| DcomError::Protocol)?; // max_count
-    stub.write_u32::<LittleEndian>(0)
-        .map_err(|_| DcomError::Protocol)?; // offset
-    stub.write_u32::<LittleEndian>(1)
-        .map_err(|_| DcomError::Protocol)?; // actual_count
-    stub.write_u16::<LittleEndian>(0x07)
-        .map_err(|_| DcomError::Protocol)?; // ncacn_ip_tcp
+    // [size_is(cRequestedProtseqs)] unsigned short aRequestedProtseqs[]: inline conformant array
+    stub.write_u16::<LittleEndian>(1).unwrap(); // cRequestedProtseqs
+    stub.extend_from_slice(&[0, 0]); // align max_count to 4
+    stub.write_u32::<LittleEndian>(1).unwrap(); // max_count
+    stub.write_u16::<LittleEndian>(PROTSEQ_NCACN_IP_TCP)
+        .unwrap();
 
     Ok(stub)
 }
@@ -1316,117 +1308,34 @@ mod tests {
     }
 
     #[test]
-    fn test_remote_activation_stub_ndr_encoding() {
-        // Test that RemoteActivation stub uses proper NDR conformant arrays
-        let clsid = [
-            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE,
-            0xFF, 0x00,
-        ];
-        let iid = [
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x46,
-        ]; // IID_IUnknown
+    fn remote_activation_stub_matches_ms_dcom_ndr_layout() {
+        let clsid = hex_literal::hex!("5ef0c38b6bd8d011a07500c04fb68820");
+        let iid = hex_literal::hex!("18ad09f36ad8d011a07500c04fb68820");
         let stub = build_remote_activation_stub(&clsid, &iid).unwrap();
 
-        // ORPCTHIS is: version(4) + flags(4) + reserved1(4) + causality(16) + extensions(4) = 32 bytes
-        let offset = 32;
-
-        // The CLSID starts after ORPCTHIS
-        assert!(stub.len() >= offset + 16, "Stub should contain CLSID");
-        let stub_clsid = &stub[offset..offset + 16];
-        assert_eq!(stub_clsid, &clsid, "CLSID should match");
-
-        // Then pwszObjectName pointer (null)
-        let string_ptr = u32::from_le_bytes([
-            stub[offset + 16],
-            stub[offset + 17],
-            stub[offset + 18],
-            stub[offset + 19],
-        ]);
+        assert_eq!(&stub[0..4], &[5, 0, 7, 0], "ORPCTHIS COMVERSION 5.7");
+        assert_eq!(&stub[4..12], &[0; 8], "flags, reserved1");
+        // stub[12..28] is the random causality ID
+        assert_eq!(&stub[28..32], &[0; 4], "extensions: null");
+        assert_eq!(&stub[32..48], &clsid);
+        let words: Vec<u32> = stub[48..72]
+            .chunks(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        // pwszObjectName, pObjectStorage, ClientImpLevel, Mode, Interfaces, pIIDs referent
+        assert_eq!(&words[..5], &[0, 0, 3, 0, 1]);
+        assert_ne!(words[5], 0, "pIIDs referent");
+        assert_eq!(&stub[72..76], &1u32.to_le_bytes(), "pIIDs max_count");
+        assert_eq!(&stub[76..92], &iid);
+        assert_eq!(&stub[92..94], &1u16.to_le_bytes(), "cRequestedProtseqs");
+        assert_eq!(&stub[94..96], &[0, 0], "alignment");
         assert_eq!(
-            string_ptr, 0,
-            "String pointer should be null for default activation"
+            &stub[96..100],
+            &1u32.to_le_bytes(),
+            "aRequestedProtseqs max_count"
         );
-
-        // Then pObjectStorage pointer (null)
-        let storage_ptr = u32::from_le_bytes([
-            stub[offset + 20],
-            stub[offset + 21],
-            stub[offset + 22],
-            stub[offset + 23],
-        ]);
-        assert_eq!(storage_ptr, 0, "Storage pointer should be null");
-
-        // Then ClientImpLevel
-        let imp_level = u32::from_le_bytes([
-            stub[offset + 24],
-            stub[offset + 25],
-            stub[offset + 26],
-            stub[offset + 27],
-        ]);
-        assert_eq!(imp_level, 2, "Impersonation level should be IDENTIFY (2)");
-
-        // Then Mode
-        let mode = u32::from_le_bytes([
-            stub[offset + 28],
-            stub[offset + 29],
-            stub[offset + 30],
-            stub[offset + 31],
-        ]);
-        assert_eq!(mode, 0, "Mode should be 0");
-
-        // Then Interfaces count
-        let req_count = u32::from_le_bytes([
-            stub[offset + 32],
-            stub[offset + 33],
-            stub[offset + 34],
-            stub[offset + 35],
-        ]);
-        assert_eq!(req_count, 1, "Should request 1 interface");
-
-        // Then IID array pointer (non-null unique pointer)
-        let iid_ptr = u32::from_le_bytes([
-            stub[offset + 36],
-            stub[offset + 37],
-            stub[offset + 38],
-            stub[offset + 39],
-        ]);
-        assert_ne!(iid_ptr, 0, "IID array pointer should be non-null");
-
-        // Then conformant array header for IIDs
-        let iid_array_offset = offset + 40;
-        if stub.len() > iid_array_offset + 12 {
-            // Should have max_count = 1
-            let max_count = u32::from_le_bytes([
-                stub[iid_array_offset],
-                stub[iid_array_offset + 1],
-                stub[iid_array_offset + 2],
-                stub[iid_array_offset + 3],
-            ]);
-            assert_eq!(max_count, 1, "IID array max_count should be 1");
-
-            // Offset should be 0
-            let arr_offset = u32::from_le_bytes([
-                stub[iid_array_offset + 4],
-                stub[iid_array_offset + 5],
-                stub[iid_array_offset + 6],
-                stub[iid_array_offset + 7],
-            ]);
-            assert_eq!(arr_offset, 0, "IID array offset should be 0");
-
-            // Actual count should be 1
-            let actual = u32::from_le_bytes([
-                stub[iid_array_offset + 8],
-                stub[iid_array_offset + 9],
-                stub[iid_array_offset + 10],
-                stub[iid_array_offset + 11],
-            ]);
-            assert_eq!(actual, 1, "IID array actual_count should be 1");
-
-            // Then the IID itself
-            let stub_iid = &stub[iid_array_offset + 12..iid_array_offset + 28];
-            assert_eq!(stub_iid, &iid, "IID should match");
-        }
+        assert_eq!(&stub[100..102], &7u16.to_le_bytes(), "ncacn_ip_tcp");
+        assert_eq!(stub.len(), 102);
     }
 
     #[test]
