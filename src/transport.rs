@@ -197,6 +197,60 @@ pub(crate) fn build_signed_request_pdu(
     Ok(pdu)
 }
 
+/// Verify one packet-integrity response fragment and return its cleartext stub
+/// (without the NDR pad). Fault PDUs become an error carrying the status.
+#[allow(dead_code)]
+pub(crate) fn verify_signed_response_pdu(
+    auth: &mut dyn AuthProvider,
+    pdu: &[u8],
+) -> Result<Vec<u8>, TransportError> {
+    if pdu.len() < RESPONSE_HEADER_LEN + 4 {
+        return Err(TransportError::Failure("response PDU too short".into()));
+    }
+    let ptype = pdu[2];
+    if ptype == 0x03 {
+        let status = u32::from_le_bytes(pdu[24..28].try_into().unwrap());
+        return Err(TransportError::Failure(format!("RPC fault 0x{status:08x}")));
+    }
+    if ptype != 0x02 {
+        return Err(TransportError::Failure(format!(
+            "unexpected PDU type 0x{ptype:02x}, expected response"
+        )));
+    }
+    let frag_len = u16::from_le_bytes([pdu[8], pdu[9]]) as usize;
+    let auth_len = u16::from_le_bytes([pdu[10], pdu[11]]) as usize;
+    if frag_len != pdu.len() || auth_len == 0 {
+        return Err(TransportError::Failure(
+            "response is not an authenticated PDU".into(),
+        ));
+    }
+    let trailer_at = frag_len
+        .checked_sub(auth_len + SEC_TRAILER_LEN)
+        .filter(|&at| at >= RESPONSE_HEADER_LEN)
+        .ok_or_else(|| TransportError::Failure("bad auth_length in response".into()))?;
+    let pad = pdu[trailer_at + 2] as usize;
+    let stub_end = trailer_at
+        .checked_sub(pad)
+        .filter(|&e| e >= RESPONSE_HEADER_LEN)
+        .ok_or_else(|| TransportError::Failure("bad auth_pad in response".into()))?;
+
+    // The stub stays cleartext; verify_rpc only checks the signature.
+    auth.verify_rpc(
+        &pdu[..RESPONSE_HEADER_LEN],
+        &pdu[RESPONSE_HEADER_LEN..trailer_at],
+        &pdu[trailer_at..trailer_at + SEC_TRAILER_LEN],
+        &pdu[frag_len - auth_len..],
+    )
+    .map_err(|err| TransportError::Failure(err.to_string()))?;
+    Ok(pdu[RESPONSE_HEADER_LEN..stub_end].to_vec())
+}
+
+/// True if this fragment is the last of a response (PFC_LAST).
+#[allow(dead_code)]
+pub(crate) fn is_last_fragment(pdu: &[u8]) -> bool {
+    pdu.len() > 3 && pdu[3] & 0x02 != 0
+}
+
 /// Verify and decrypt a packet-privacy response PDU, returning it with the stub
 /// in plaintext (same layout). Fault PDUs become an error carrying the status.
 pub(crate) fn unseal_response_pdu(

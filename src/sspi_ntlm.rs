@@ -227,6 +227,7 @@ mod tests {
     use super::*;
     use crate::transport::{
         build_sealed_request_pdu, build_signed_request_pdu, unseal_response_pdu,
+        verify_signed_response_pdu,
     };
     use sspi::ServerRequestFlags;
 
@@ -345,6 +346,35 @@ mod tests {
                 .unwrap();
             [head, body, trailer, signature.to_vec()].concat()
         }
+
+        /// Build a signed (integrity) response PDU carrying a cleartext `stub`.
+        fn signed_response(&mut self, call_id: u32, stub: &[u8]) -> Vec<u8> {
+            let pad = (4 - stub.len() % 4) % 4;
+            let frag_len = 24 + stub.len() + pad + 8 + 16;
+            let mut head = vec![5, 0, 0x02, 0x03, 0x10, 0, 0, 0];
+            head.extend_from_slice(&(frag_len as u16).to_le_bytes());
+            head.extend_from_slice(&16u16.to_le_bytes());
+            head.extend_from_slice(&call_id.to_le_bytes());
+            head.extend_from_slice(&(stub.len() as u32).to_le_bytes());
+            head.extend_from_slice(&[0, 0, 0, 0]);
+            let mut body = stub.to_vec();
+            body.extend(std::iter::repeat_n(0u8, pad));
+            let mut trailer = vec![0x0a, 0x05, pad as u8, 0, 0, 0, 0, 0];
+            let mut signature = [0u8; 16];
+            let mut message = [
+                SecurityBufferRef::data_buf(&mut head)
+                    .with_flags(SecurityBufferFlags::SECBUFFER_READONLY_WITH_CHECKSUM),
+                SecurityBufferRef::data_buf(&mut body)
+                    .with_flags(SecurityBufferFlags::SECBUFFER_READONLY_WITH_CHECKSUM),
+                SecurityBufferRef::data_buf(&mut trailer)
+                    .with_flags(SecurityBufferFlags::SECBUFFER_READONLY_WITH_CHECKSUM),
+                SecurityBufferRef::token_buf(&mut signature),
+            ];
+            self.ntlm
+                .encrypt_message(EncryptionFlags::empty(), &mut message)
+                .unwrap();
+            [head, body, trailer, signature.to_vec()].concat()
+        }
     }
 
     fn authenticated_pair() -> (SspiNtlmClient, Server) {
@@ -409,6 +439,31 @@ mod tests {
         server
             .verify_signed_request(&mut pdu)
             .expect("signature verifies");
+    }
+
+    #[test]
+    fn signed_response_verifies_and_returns_cleartext_stub() {
+        let (mut client, mut server) = authenticated_pair();
+        // Client sends a request first so the server's recv seq is aligned.
+        let mut req =
+            build_signed_request_pdu(&mut client, 2, 0, 6, &[0x11; 16], b"login", 0).unwrap();
+        server.verify_signed_request(&mut req).unwrap();
+
+        let stub = b"ORPCTHAT + IWbemServices OBJREF + HRESULT".to_vec();
+        let reply = server.signed_response(2, &stub);
+        let out = verify_signed_response_pdu(&mut client, &reply).unwrap();
+        assert_eq!(out, stub);
+    }
+
+    #[test]
+    fn tampered_signed_response_is_rejected() {
+        let (mut client, mut server) = authenticated_pair();
+        let mut req =
+            build_signed_request_pdu(&mut client, 2, 0, 6, &[0x11; 16], b"login", 0).unwrap();
+        server.verify_signed_request(&mut req).unwrap();
+        let mut reply = server.signed_response(2, b"response stub data");
+        reply[24] ^= 0x01; // flip a cleartext stub byte
+        assert!(verify_signed_response_pdu(&mut client, &reply).is_err());
     }
 
     #[test]
