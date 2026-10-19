@@ -66,6 +66,43 @@ pub(crate) fn encode_ntlm_login(
     buf
 }
 
+/// Encode a `BSTR` [in] parameter: a unique pointer to a FLAGGED_WORD_BLOB
+/// (MS-OAUT 2.2.23.2 / 2.2.23.1 wire form) — referent, max_count, cBytes,
+/// clSize, then UTF-16LE data incl. NUL — then pad to a 4-byte boundary. All
+/// three counts include the terminator, matching what Windows accepts here.
+fn encode_bstr(buf: &mut Vec<u8>, referent: u32, s: &str) {
+    let mut units: Vec<u16> = s.encode_utf16().collect();
+    units.push(0); // NUL
+    let count = units.len() as u32;
+    buf.write_u32::<LittleEndian>(referent).unwrap();
+    buf.write_u32::<LittleEndian>(count).unwrap(); // max_count
+    buf.write_u32::<LittleEndian>(count * 2).unwrap(); // cBytes
+    buf.write_u32::<LittleEndian>(count).unwrap(); // clSize
+    for u in units {
+        buf.write_u16::<LittleEndian>(u).unwrap();
+    }
+    align4(buf, 0);
+}
+
+/// Encode the IWbemServices::ExecQuery (opnum 20) request stub (MS-WMI
+/// 3.1.4.3.18): ORPCTHIS, strQueryLanguage ("WQL"), strQuery (the WQL),
+/// lFlags, null pCtx. The [out] ppEnum takes no input.
+pub(crate) fn encode_exec_query(
+    causality_id: &[u8; 16],
+    wql: &str,
+    lflags: u32,
+    lang_referent: u32,
+    query_referent: u32,
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+    encode_orpcthis(&mut buf, causality_id);
+    encode_bstr(&mut buf, lang_referent, "WQL");
+    encode_bstr(&mut buf, query_referent, wql);
+    buf.write_u32::<LittleEndian>(lflags).unwrap();
+    buf.write_u32::<LittleEndian>(0).unwrap(); // pCtx: null ptr
+    buf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,6 +124,32 @@ mod tests {
         // the wire; impacket fills 0xBF, we fill 0x00. Normalize before compare.
         let mut expected = NTLMLOGIN_STUB.to_vec();
         for b in &mut expected[78..80] {
+            *b = 0;
+        }
+        assert_eq!(stub, expected);
+    }
+
+    /// IWbemServices::ExecQuery request stub impacket sent and the DC accepted.
+    const EXECQUERY_STUB: &[u8] = include_bytes!("testdata/execquery_request_stub.bin");
+
+    #[test]
+    fn encode_exec_query_matches_windows_reference() {
+        let cid: [u8; 16] = EXECQUERY_STUB[12..28].try_into().unwrap();
+        let lang_ref = u32::from_le_bytes(EXECQUERY_STUB[32..36].try_into().unwrap());
+        // strQuery referent follows the WQL BSTR (16-byte header + "WQL\0" = 8).
+        let query_ref = u32::from_le_bytes(EXECQUERY_STUB[56..60].try_into().unwrap());
+
+        let stub = encode_exec_query(
+            &cid,
+            "SELECT Name, Domain, Manufacturer, Model FROM Win32_ComputerSystem",
+            0,
+            lang_ref,
+            query_ref,
+        );
+
+        // Two pad bytes after strQuery (offset 206..208) are arbitrary.
+        let mut expected = EXECQUERY_STUB.to_vec();
+        for b in &mut expected[206..208] {
             *b = 0;
         }
         assert_eq!(stub, expected);
