@@ -8,72 +8,33 @@ name = "linux_wmi"
 crate-type = ["cdylib", "rlib"]
 
 [[example]]
-name = "test_connect"
-path = "examples/test_connect.rs"
-
-[[example]]
-name = "dcom_activation"
-path = "examples/dcom_activation.rs"
-
-[[example]]
-name = "wmi_probe"
-path = "examples/wmi_probe.rs"
-
-[[example]]
-name = "test_kerberos"
-path = "examples/test_kerberos.rs"
-required-features = ["kerberos"]
-
-[[example]]
-name = "dce_rpc_kerberos"
-path = "examples/dce_rpc_kerberos.rs"
-required-features = ["kerberos"]
+name = "wmi_query"
+path = "examples/wmi_query.rs"
 
 [dependencies]
+byteorder = "1.5"
+hex = "0.4"
+hex-literal = "0.4"
+libc = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-libc = "0.2"
-uuid = { version = "1.10", features = ["v4", "serde"] }
 thiserror = "1.0"
-byteorder = "1.5"
-socket2 = "0.5"
-
-# Cryptographic dependencies (RustCrypto ecosystem)
-md4 = "0.10"            # MD4 for NTLM (legacy compatibility)
-md5 = "0.7"             # MD5 for NTLM (legacy compatibility)
-hmac = "0.12"           # HMAC implementation
-digest = "0.10"         # Trait-based crypto abstraction
-hex-literal = "0.4"
-hex = "0.4"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "time"] }
-nom = "7.1"
-rc4 = "0.1"
-rand = "0.8"
-tokio = { version = "1.36", features = ["rt-multi-thread", "net", "time", "macros", "io-util"], optional = true }
-async-trait = { version = "0.1", optional = true }
-deadpool = { version = "0.12", features = ["managed", "rt_tokio_1"], optional = true }
-deadpool-runtime = { version = "0.1", optional = true }
-
-# Security dependencies
+uuid = { version = "1.10", features = ["v4"] }
 zeroize = { version = "1.7", features = ["derive"] }
-# Pure-Rust SSPI (Devolutions sspi-rs): NTLM handshake and message sealing on all platforms
+# Pure-Rust SSPI (Devolutions sspi-rs): NTLM handshake and RPC message protection
 sspi = { version = "0.23", default-features = false }
 
-# Platform-specific dependencies
 [target.'cfg(unix)'.dependencies]
-# Internal kerbsec library v0.2.0 with runtime-configurable GSS flags
+# Kerberos via the system GSS-API (internal kerbsec crate)
 kerbsec = { path = "../kerbsec", version = "0.2.0", features = ["dns", "runtime", "trace", "ccache", "channel-bindings", "channel-bindings-rustls", "iov"], optional = true }
 
 [features]
 default = ["kerberos"]
-async = ["tokio", "async-trait", "deadpool", "deadpool-runtime"]
-test-support = []
 kerberos = ["kerbsec"]
+# In-process stub backend for the C ABI (LINUX_WMI_USE_STUB=1)
+test-support = []
 test-gss-mock = []
 
 [dev-dependencies]
-proptest = "1.4"
-mockall = "0.13"
-criterion = "0.5"
-loom = { version = "0.7", features = ["checkpoint"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

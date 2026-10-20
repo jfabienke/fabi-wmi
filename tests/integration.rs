@@ -2,13 +2,11 @@ use linux_wmi::{
     wmi_exec_method_json, wmi_exec_query_json, wmi_free_err, wmi_free_json, wmi_namespace_open,
     wmi_session_free, wmi_session_new, WmiSession,
 };
-use serde_json::Value;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
 
 fn new_session() -> (*mut WmiSession, Vec<CString>) {
-    std::env::set_var("LINUX_WMI_SKIP_EPM", "1");
     std::env::set_var("LINUX_WMI_USE_STUB", "1");
     let host = CString::new("localhost").unwrap();
     let mut session_ptr: *mut WmiSession = ptr::null_mut();
@@ -74,7 +72,7 @@ fn ffi_query_flow_returns_stub_data() {
 }
 
 #[test]
-fn ffi_method_flow_returns_stub_owner() {
+fn ffi_method_reports_not_implemented() {
     let (session_ptr, _strings) = new_session();
     let namespace = CString::new("root\\CimV2").unwrap();
     let mut err_ptr: *mut c_char = ptr::null_mut();
@@ -127,7 +125,7 @@ fn ffi_namespace_open_error_propagates() {
 }
 
 #[test]
-fn ffi_method_handles_null_params_pointer() {
+fn ffi_method_with_null_params_reaches_the_backend() {
     let (session_ptr, _strings) = new_session();
     let namespace = CString::new("root\\CimV2").unwrap();
     let mut err_ptr: *mut c_char = ptr::null_mut();
@@ -137,6 +135,8 @@ fn ffi_method_handles_null_params_pointer() {
         unsafe { wmi_free_err(err_ptr) };
     }
 
+    // A null params pointer means "{}": the call gets past parameter parsing
+    // and is answered by the backend (ExecMethod is not implemented yet).
     let class = CString::new("Win32_Process").unwrap();
     let method = CString::new("GetOwner").unwrap();
     let mut json_ptr: *mut u8 = ptr::null_mut();
@@ -154,14 +154,42 @@ fn ffi_method_handles_null_params_pointer() {
             &mut err_ptr,
         )
     };
-    assert_eq!(rc, 0);
-    assert!(err_ptr.is_null());
+    assert_eq!(rc, -1);
+    assert!(json_ptr.is_null());
     unsafe {
-        let slice = std::slice::from_raw_parts(json_ptr, json_len);
-        let json = std::str::from_utf8(slice).unwrap();
-        let value: Value = serde_json::from_str(json).unwrap();
-        assert_eq!(value["Domain"], "NT AUTHORITY");
-        wmi_free_json(json_ptr, json_len);
+        let err_msg = CStr::from_ptr(err_ptr).to_string_lossy().into_owned();
+        assert!(err_msg.contains("not implemented"), "{err_msg}");
+        assert!(!err_msg.contains("Invalid JSON"));
+        wmi_free_err(err_ptr);
+        wmi_session_free(session_ptr);
+    }
+}
+
+#[test]
+fn ffi_query_unknown_class_returns_the_hresult() {
+    let (session_ptr, _strings) = new_session();
+    let namespace = CString::new("root\\CimV2").unwrap();
+    let mut err_ptr: *mut c_char = ptr::null_mut();
+    let rc = unsafe { wmi_namespace_open(session_ptr, namespace.as_ptr(), &mut err_ptr) };
+    assert_eq!(rc, 0);
+
+    let wql = CString::new("SELECT * FROM Win32_NoSuchClass").unwrap();
+    let mut json_ptr: *mut u8 = ptr::null_mut();
+    let mut json_len: usize = 0;
+    let rc = unsafe {
+        wmi_exec_query_json(
+            session_ptr,
+            wql.as_ptr(),
+            0,
+            &mut json_ptr,
+            &mut json_len,
+            &mut err_ptr,
+        )
+    };
+    assert_eq!(rc as u32, 0x8004_1010, "WBEM_E_INVALID_CLASS");
+    assert!(json_ptr.is_null());
+    unsafe {
+        wmi_free_err(err_ptr);
         wmi_session_free(session_ptr);
     }
 }

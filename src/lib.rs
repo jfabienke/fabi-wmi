@@ -1,108 +1,73 @@
+//! WMI client for Linux and macOS: WQL queries against Windows hosts over
+//! DCOM / MS-RPC, with no Windows components.
+//!
+//! ```no_run
+//! use linux_wmi::{Credentials, WmiClient};
+//!
+//! let creds = Credentials::new("Administrator", "secret");
+//! let mut wmi = WmiClient::connect("192.0.2.10", &creds, r"root\cimv2")?;
+//! for row in wmi.query("SELECT Name, ProcessId FROM Win32_Process")? {
+//!     println!("{} {}", row["ProcessId"], row["Name"]);
+//! }
+//! # Ok::<(), linux_wmi::Error>(())
+//! ```
+//!
+//! The crate also exports a C ABI (`include/linux_wmi.h`) used by the .NET
+//! shim in `shim/wmi_shim.cs`.
+
 use std::alloc::{alloc, dealloc, Layout};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
-#[cfg(any(test, feature = "test-support"))]
-use std::sync::Arc;
 use std::sync::Mutex;
-use zeroize::Zeroize;
 
 use serde_json::Value;
-use thiserror::Error;
 use tracing::debug;
 
 mod auth;
-mod crypto;
-pub mod crypto_v2; // New improved crypto module
+mod client;
 mod dcom;
-mod ndr;
-#[cfg(feature = "async")]
-mod pool;
+#[cfg(feature = "kerberos")]
+mod kerberos_adapter;
 mod rpc;
-pub mod spnego;
 mod sspi_ntlm;
-mod transport; // Used internally by dcom and lib
-mod wmi;
-mod wmi_conn;
+#[cfg(any(test, feature = "test-support"))]
+mod test_support;
 mod wmi_proto;
 mod wmio;
 
-// Test support infrastructure
-#[cfg(any(test, feature = "test-support"))]
-pub mod test_support;
-
-// Kerberos modules
-#[cfg(feature = "kerberos")]
-mod kerberos_adapter; // Adapter to new kerbsec
-#[cfg(feature = "kerberos")]
-mod kerberos_integration; // Integration layer
-
-// Kerberos support via kerbsec crate
-#[cfg(feature = "kerberos")]
-pub use kerbsec;
-
-// Export auth module for examples
-pub mod auth_exports {
-    pub use crate::auth::{
-        AuthError, AuthProvider, AuthenticateMessage, Credentials, NegotiateMessage, NtlmV2Client,
-    };
-}
-
-pub use auth::AuthError;
-pub use dcom::{activate_wmi_dcom, resolve_oxid, DcomError, ObjectReference};
-
-// Export Kerberos types from adapter
+pub use auth::{AuthError, Credentials};
+pub use client::{query, Error, WmiClient, DEFAULT_TIMEOUT};
+pub use dcom::DcomError;
 #[cfg(feature = "kerberos")]
 pub use kerberos_adapter::{KerberosCacheBackend, KerberosClient, KerberosConfig, KerberosError};
-#[cfg(feature = "async")]
-pub use pool::{
-    AsyncTransportManager, PoolAcquireError, PoolBuildError, PooledTransport, WmiConnectionPool,
-    WmiConnectionPoolBuilder,
-};
 pub use rpc::RpcError;
-pub use wmi::{IWbemLocator, IWbemServices, WmiError};
-pub use wmi_conn::{query, WmiClient, WmiConnError};
-
-/// Default per-read/write network timeout for [`WmiClient`].
-pub fn wmi_default_timeout() -> std::time::Duration {
-    wmi_conn::DEFAULT_TIMEOUT
-}
 pub use wmi_proto::WmiProtoError;
 pub use wmio::WmioError;
 
-#[derive(Error, Debug)]
-pub enum WmiClientError {
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("Dcom error: {0}")]
-    Dcom(#[from] DcomError),
-    #[error("RPC error: {0}")]
-    Rpc(#[from] RpcError),
-    #[error("WMI error: {0}")]
-    Wmi(#[from] WmiError),
-    #[error("Auth error: {0}")]
-    Auth(#[from] AuthError),
+/// Errors at the C ABI boundary: a WMI failure, or bad input from the caller.
+#[derive(thiserror::Error, Debug)]
+enum FfiError {
     #[error("{0}")]
-    Query(#[from] WmiConnError),
+    Wmi(#[from] Error),
     #[error("Invalid input: {0}")]
     Invalid(String),
-    #[error("Alloc failed")]
-    Alloc,
 }
 
-impl WmiClientError {
+impl FfiError {
     /// The status an FFI call returns for this error: the server's HRESULT
     /// when there is one (e.g. 0x80070005 for bad credentials), else -1.
     fn status(&self) -> i32 {
         match self {
-            WmiClientError::Query(err) => err.hresult().map_or(-1, |hr| hr as i32),
-            _ => -1,
+            FfiError::Wmi(err) => err.hresult().map_or(-1, |hr| hr as i32),
+            FfiError::Invalid(_) => -1,
         }
     }
 }
 
-type Result<T> = std::result::Result<T, WmiClientError>;
+type Result<T> = std::result::Result<T, FfiError>;
 
+/// Opaque session handle for the C ABI.
 #[repr(C)]
 pub struct WmiSession {
     inner: *mut InnerSession,
@@ -111,6 +76,8 @@ pub struct WmiSession {
 impl Drop for WmiSession {
     fn drop(&mut self) {
         if !self.inner.is_null() {
+            // SAFETY: `inner` came from Box::into_raw in wmi_session_new and is
+            // freed exactly once, here.
             unsafe {
                 drop(Box::from_raw(self.inner));
             }
@@ -121,35 +88,34 @@ impl Drop for WmiSession {
 
 impl WmiSession {
     fn inner(&self) -> Result<&InnerSession> {
+        // SAFETY: `inner` is null or a live Box pointer owned by this session.
         unsafe {
             self.inner
                 .as_ref()
-                .ok_or_else(|| WmiClientError::Invalid("Session not initialised".into()))
+                .ok_or_else(|| FfiError::Invalid("Session not initialised".into()))
         }
     }
 
     fn inner_mut(&mut self) -> Result<&mut InnerSession> {
+        // SAFETY: as in `inner`; `&mut self` guarantees exclusive access.
         unsafe {
             self.inner
                 .as_mut()
-                .ok_or_else(|| WmiClientError::Invalid("Session not initialised".into()))
+                .ok_or_else(|| FfiError::Invalid("Session not initialised".into()))
         }
     }
 }
 
-pub struct InnerSession {
+struct InnerSession {
     host: String,
-    credentials: Option<auth::Credentials>,
+    credentials: Option<Credentials>,
     backend: Backend,
 }
 
 enum Backend {
-    /// `LINUX_WMI_USE_STUB=1`: canned in-process transport and codec (tests).
+    /// `LINUX_WMI_USE_STUB=1`: canned in-process results (tests only).
     #[cfg(any(test, feature = "test-support"))]
-    Stub {
-        locator: Box<wmi::IWbemLocator>,
-        services: Option<wmi::IWbemServices>,
-    },
+    Stub { namespace: Option<String> },
     /// Real DCOM/WMI: a logged-in [`WmiClient`] per opened namespace, reused
     /// by queries and replaced when an error leaves its connection unusable.
     Dcom {
@@ -167,23 +133,21 @@ impl InnerSession {
         auth_level: u32,
     ) -> Result<Self> {
         if host.trim().is_empty() {
-            return Err(WmiClientError::Invalid("Host must not be empty".into()));
+            return Err(FfiError::Invalid("Host must not be empty".into()));
         }
         // The stub backend is for tests only and must be enabled explicitly.
         let use_stub = std::env::var("LINUX_WMI_USE_STUB").as_deref() == Ok("1");
-        let username = username.filter(|s| !s.is_empty());
-        let password = password.filter(|s| !s.is_empty());
-        let credentials = match (username, password) {
-            (Some(user), Some(pass)) => Some(auth::Credentials::new(
-                user.to_string(),
-                pass.to_string(),
-                domain.unwrap_or("").to_string(),
-                host.to_string(),
-            )),
+        let credentials = match (
+            username.filter(|s| !s.is_empty()),
+            password.filter(|s| !s.is_empty()),
+        ) {
+            (Some(user), Some(pass)) => {
+                Some(Credentials::new(user, pass).with_domain(domain.unwrap_or("")))
+            }
             _ => None,
         };
         let backend = if use_stub {
-            Self::stub_backend(host)?
+            Self::stub_backend()?
         } else if credentials.is_some() {
             // No network I/O yet: wmi_namespace_open activates and logs in, so
             // bad hosts, credentials and namespaces all surface there.
@@ -192,7 +156,7 @@ impl InnerSession {
                 client: Mutex::new(None),
             }
         } else {
-            return Err(WmiClientError::Invalid(
+            return Err(FfiError::Invalid(
                 "Username and password are required for WMI connections".to_string(),
             ));
         };
@@ -205,52 +169,45 @@ impl InnerSession {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    fn stub_backend(host: &str) -> Result<Backend> {
-        let codec: Arc<dyn ndr::NdrCodec + Send + Sync> = Arc::new(test_support::StubNdrCodec);
-        let transport: Arc<Mutex<Box<dyn transport::RpcTransport + Send>>> =
-            Arc::new(Mutex::new(Box::new(test_support::StubTransport)));
-        Ok(Backend::Stub {
-            locator: Box::new(wmi::IWbemLocator::with_components(host, codec, transport)),
-            services: None,
-        })
+    fn stub_backend() -> Result<Backend> {
+        Ok(Backend::Stub { namespace: None })
     }
 
     #[cfg(not(any(test, feature = "test-support")))]
-    fn stub_backend(_host: &str) -> Result<Backend> {
-        Err(WmiClientError::Invalid(
+    fn stub_backend() -> Result<Backend> {
+        Err(FfiError::Invalid(
             "LINUX_WMI_USE_STUB=1 requires a build with the test-support feature".into(),
         ))
     }
 
+    fn credentials(&self) -> &Credentials {
+        self.credentials
+            .as_ref()
+            .expect("DCOM sessions are only created with credentials")
+    }
+
     fn open_namespace(&mut self, namespace: &str) -> Result<()> {
         if namespace.trim().is_empty() {
-            return Err(WmiClientError::Invalid(
-                "Namespace must not be empty".into(),
-            ));
+            return Err(FfiError::Invalid("Namespace must not be empty".into()));
         }
+        let connected = match &self.backend {
+            #[cfg(any(test, feature = "test-support"))]
+            Backend::Stub { .. } => None,
+            Backend::Dcom { .. } => Some(WmiClient::connect(
+                &self.host,
+                self.credentials(),
+                namespace,
+            )?),
+        };
         match &mut self.backend {
             #[cfg(any(test, feature = "test-support"))]
-            Backend::Stub { locator, services } => {
-                let creds = self.credentials.as_ref();
-                *services = Some(locator.connect_server(
-                    namespace,
-                    creds.map(|c| c.username.as_str()),
-                    creds.map(|c| c.password.as_str()),
-                    creds.map(|c| c.domain.as_str()),
-                )?);
-            }
+            Backend::Stub { namespace: ns } => *ns = Some(namespace.to_string()),
             Backend::Dcom {
                 namespace: ns,
                 client,
             } => {
-                let creds = self
-                    .credentials
-                    .as_ref()
-                    .expect("DCOM sessions have credentials");
-                let connected =
-                    WmiClient::connect(&self.host, creds, namespace, wmi_conn::DEFAULT_TIMEOUT)?;
                 // Replacing a previous client drops it, releasing its references.
-                *client.get_mut().unwrap_or_else(|p| p.into_inner()) = Some(Box::new(connected));
+                *client.get_mut().unwrap_or_else(|p| p.into_inner()) = connected.map(Box::new);
                 *ns = Some(namespace.to_string());
             }
         }
@@ -259,30 +216,28 @@ impl InnerSession {
 
     /// Run `wql`; `timeout_ms` bounds each network read/write (0 = default).
     fn exec_query(&self, wql: &str, timeout_ms: u32) -> Result<String> {
+        let not_opened = || FfiError::Invalid("Namespace not opened".into());
         let values = match &self.backend {
             #[cfg(any(test, feature = "test-support"))]
-            Backend::Stub { services, .. } => services
-                .as_ref()
-                .ok_or_else(|| WmiClientError::Invalid("Namespace not opened".into()))?
-                .exec_query(wql)?,
+            Backend::Stub { namespace } => {
+                namespace.as_ref().ok_or_else(not_opened)?;
+                test_support::query(wql)?
+            }
             Backend::Dcom { namespace, client } => {
-                let namespace = namespace
-                    .as_deref()
-                    .ok_or_else(|| WmiClientError::Invalid("Namespace not opened".into()))?;
+                let namespace = namespace.as_deref().ok_or_else(not_opened)?;
                 let timeout = match timeout_ms {
-                    0 => wmi_conn::DEFAULT_TIMEOUT,
+                    0 => DEFAULT_TIMEOUT,
                     ms => std::time::Duration::from_millis(u64::from(ms)),
                 };
                 let mut slot = client.lock().unwrap_or_else(|p| p.into_inner());
                 // Reconnect if an earlier error left the connection unusable.
                 if slot.as_deref().is_none_or(WmiClient::is_broken) {
                     *slot = None;
-                    let creds = self
-                        .credentials
-                        .as_ref()
-                        .expect("DCOM sessions have credentials");
-                    *slot = Some(Box::new(WmiClient::connect(
-                        &self.host, creds, namespace, timeout,
+                    *slot = Some(Box::new(WmiClient::connect_with_timeout(
+                        &self.host,
+                        self.credentials(),
+                        namespace,
+                        timeout,
                     )?));
                 }
                 let client = slot.as_mut().expect("connected above");
@@ -291,36 +246,22 @@ impl InnerSession {
             }
         };
         serde_json::to_string(&values)
-            .map_err(|err| WmiClientError::Invalid(format!("Serialize query result failed: {err}")))
+            .map_err(|err| FfiError::Invalid(format!("Serialize query result failed: {err}")))
     }
 
-    fn exec_method(&self, class: &str, method: &str, params: &Value) -> Result<String> {
+    fn exec_method(&self, class: &str, method: &str, _params: &Value) -> Result<String> {
         match &self.backend {
             #[cfg(any(test, feature = "test-support"))]
-            Backend::Stub { services, .. } => {
-                let value = services
+            Backend::Stub { namespace } => {
+                namespace
                     .as_ref()
-                    .ok_or_else(|| WmiClientError::Invalid("Namespace not opened".into()))?
-                    .exec_method(class, method, params)?;
-                serde_json::to_string(&value).map_err(|err| {
-                    WmiClientError::Invalid(format!("Serialize method result failed: {err}"))
-                })
+                    .ok_or_else(|| FfiError::Invalid("Namespace not opened".into()))?;
             }
-            Backend::Dcom { .. } => {
-                let _ = params;
-                Err(WmiClientError::Invalid(format!(
-                    "ExecMethod ({class}.{method}) is not implemented on the DCOM transport yet"
-                )))
-            }
+            Backend::Dcom { .. } => {}
         }
-    }
-}
-
-impl Drop for InnerSession {
-    fn drop(&mut self) {
-        if let Some(creds) = &mut self.credentials {
-            creds.zeroize();
-        }
+        Err(FfiError::Invalid(format!(
+            "ExecMethod ({class}.{method}) is not implemented yet"
+        )))
     }
 }
 
@@ -594,16 +535,9 @@ pub unsafe extern "C" fn wmi_exec_method_json(
 
     let result = match inner.exec_method(&class, &method, &params) {
         Ok(json) => json,
-        Err(WmiClientError::Wmi(WmiError::Method(class_name, method_name))) => {
-            set_error(
-                out_err,
-                Some(format!("Unsupported method {class_name}.{method_name}")),
-            );
-            return -1;
-        }
         Err(err) => {
             set_error(out_err, Some(format!("Method failed: {err}")));
-            return -1;
+            return err.status();
         }
     };
     copy_json_to_out(out_json, out_len, out_err, &result)
@@ -646,23 +580,15 @@ mod tests {
     use serde_json::json;
     use std::sync::Once;
 
-    fn enable_epm_stub() {
+    fn enable_stub() {
         static INIT: Once = Once::new();
-        INIT.call_once(|| {
-            std::env::set_var("LINUX_WMI_SKIP_EPM", "1");
-            std::env::set_var("LINUX_WMI_USE_STUB", "1");
-        });
+        INIT.call_once(|| std::env::set_var("LINUX_WMI_USE_STUB", "1"));
     }
 
     fn dcom_session() -> InnerSession {
         InnerSession {
             host: "host".into(),
-            credentials: Some(auth::Credentials::new(
-                "user".into(),
-                "pass".into(),
-                String::new(),
-                "host".into(),
-            )),
+            credentials: Some(Credentials::new("user", "pass")),
             backend: Backend::Dcom {
                 namespace: None,
                 client: Mutex::new(None),
@@ -673,17 +599,13 @@ mod tests {
     #[test]
     fn dcom_session_requires_an_open_namespace() {
         let err = dcom_session().exec_query("SELECT * FROM Win32_Process", 0);
-        assert!(
-            matches!(err, Err(WmiClientError::Invalid(msg)) if msg.contains("Namespace not opened"))
-        );
+        assert!(matches!(err, Err(FfiError::Invalid(msg)) if msg.contains("Namespace not opened")));
     }
 
     #[test]
     fn dcom_session_reports_exec_method_unsupported() {
         let err = dcom_session().exec_method("Win32_Process", "Create", &json!({}));
-        assert!(
-            matches!(err, Err(WmiClientError::Invalid(msg)) if msg.contains("not implemented"))
-        );
+        assert!(matches!(err, Err(FfiError::Invalid(msg)) if msg.contains("not implemented")));
     }
 
     #[test]
@@ -693,16 +615,14 @@ mod tests {
 
     #[test]
     fn error_status_carries_the_hresult() {
-        let invalid_class =
-            WmiClientError::Query(WmiConnError::Wmi(WmiProtoError::Hresult(0x8004_1010)));
+        let invalid_class = FfiError::Wmi(Error::Wmi(WmiProtoError::Hresult(0x8004_1010)));
         assert_eq!(invalid_class.status(), 0x8004_1010u32 as i32);
-        let denied = WmiClientError::Query(WmiConnError::Activation(DcomError::AccessDenied));
+        let denied = FfiError::Wmi(Error::Activation(DcomError::AccessDenied));
         assert_eq!(denied.status(), 0x8007_0005u32 as i32);
-        let fault =
-            WmiClientError::Query(WmiConnError::Transport(transport::TransportError::Fault(5)));
+        let fault = FfiError::Wmi(Error::Rpc(RpcError::Fault(5)));
         assert_eq!(fault.status(), 0x8007_0005u32 as i32);
-        assert_eq!(WmiClientError::Invalid("x".into()).status(), -1);
-        let lost = WmiClientError::Query(WmiConnError::Protocol("desync".into()));
+        assert_eq!(FfiError::Invalid("x".into()).status(), -1);
+        let lost = FfiError::Wmi(Error::Protocol("desync".into()));
         assert_eq!(lost.status(), -1);
     }
 
@@ -768,7 +688,7 @@ mod tests {
 
     #[test]
     fn inner_session_new_extracts_credentials() {
-        enable_epm_stub();
+        enable_stub();
         let session =
             InnerSession::new("host", Some("user"), Some("pass"), Some("domain"), 0).unwrap();
         assert!(session.credentials.is_some());
@@ -778,8 +698,8 @@ mod tests {
     }
 
     #[test]
-    fn inner_session_query_and_method_success() {
-        enable_epm_stub();
+    fn inner_session_stub_query_and_method() {
+        enable_stub();
         let mut session = InnerSession::new("host", None, None, None, 0).unwrap();
         session.open_namespace("CimV2").unwrap();
 
@@ -789,20 +709,21 @@ mod tests {
             .unwrap();
         assert!(json.contains("ThreadCount"));
 
-        let result = session
+        let err = session
             .exec_method("Win32_Process", "GetOwner", &json!({}))
-            .unwrap();
-        assert!(result.contains("\"ReturnValue\""));
+            .unwrap_err();
+        assert!(err.to_string().contains("not implemented"));
     }
 
     #[test]
     fn inner_session_exec_query_error_propagates() {
-        enable_epm_stub();
+        enable_stub();
         let mut session = InnerSession::new("host", None, None, None, 0).unwrap();
         session.open_namespace("CimV2").unwrap();
         let err = session
             .exec_query("SELECT * FROM Win32_Unknown", 0)
             .unwrap_err();
-        assert!(matches!(err, WmiClientError::Wmi(_)));
+        assert!(matches!(err, FfiError::Wmi(_)));
+        assert_eq!(err.status(), 0x8004_1010u32 as i32);
     }
 }

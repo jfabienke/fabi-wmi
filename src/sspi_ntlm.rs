@@ -95,10 +95,6 @@ impl AuthProvider for SspiNtlmClient {
         self.step(Some(challenge))
     }
 
-    fn session_key(&self) -> Option<&[u8]> {
-        None
-    }
-
     fn seal_rpc(
         &mut self,
         header: &[u8],
@@ -225,7 +221,7 @@ fn local_workstation_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::{
+    use crate::rpc::{
         build_sealed_request_pdu, build_signed_request_pdu, unseal_response_pdu,
         verify_signed_response_pdu,
     };
@@ -378,12 +374,7 @@ mod tests {
     }
 
     fn authenticated_pair() -> (SspiNtlmClient, Server) {
-        let creds = Credentials::new(
-            "Administrator".into(),
-            "Lab-Passw0rd".into(),
-            "TEST".into(),
-            "WORKSTATION".into(),
-        );
+        let creds = Credentials::new("Administrator", "Lab-Passw0rd").with_domain("TEST");
         let mut client = SspiNtlmClient::new(&creds, "host/dc01").unwrap();
         let mut server = Server::new(&creds);
         let negotiate = client.negotiate().unwrap();

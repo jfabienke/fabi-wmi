@@ -1,5 +1,4 @@
-// Transport tests - most transport types are not exported publicly
-// We test transport functionality through the session API
+//! Session creation through the C ABI: input validation and backend choice.
 
 use std::sync::{Mutex, OnceLock};
 
@@ -13,14 +12,13 @@ fn session_creation_with_invalid_host_fails() {
     let _guard = env_mutex().lock().unwrap();
     // Session creation should fail with invalid host
     std::env::remove_var("LINUX_WMI_USE_STUB"); // Ensure real transport
-    std::env::set_var("LINUX_WMI_SKIP_EPM", "1"); // Skip EPM to avoid network calls
 
     let result = unsafe {
         linux_wmi::wmi_session_new(
-            "\0".as_ptr() as *const i8, // Empty host
-            "user\0".as_ptr() as *const i8,
-            "pass\0".as_ptr() as *const i8,
-            "DOMAIN\0".as_ptr() as *const i8,
+            c"".as_ptr(), // Empty host
+            c"user".as_ptr(),
+            c"pass".as_ptr(),
+            c"DOMAIN".as_ptr(),
             0,
             &mut std::ptr::null_mut(),
             &mut std::ptr::null_mut(),
@@ -28,20 +26,16 @@ fn session_creation_with_invalid_host_fails() {
     };
 
     assert_ne!(result, 0); // Should fail
-
-    // Clean up
-    std::env::remove_var("LINUX_WMI_SKIP_EPM");
 }
 
 #[test]
 fn session_requires_credentials_in_production_mode() {
     let _guard = env_mutex().lock().unwrap();
     std::env::remove_var("LINUX_WMI_USE_STUB"); // Ensure production mode
-    std::env::set_var("LINUX_WMI_SKIP_EPM", "1"); // Skip EPM to avoid network calls
 
     let result = unsafe {
         linux_wmi::wmi_session_new(
-            "test-host\0".as_ptr() as *const i8,
+            c"test-host".as_ptr(),
             std::ptr::null(), // No username
             std::ptr::null(), // No password
             std::ptr::null(), // No domain
@@ -52,9 +46,6 @@ fn session_requires_credentials_in_production_mode() {
     };
 
     assert_ne!(result, 0); // Should fail without credentials
-
-    // Clean up
-    std::env::remove_var("LINUX_WMI_SKIP_EPM");
 }
 
 #[test]
@@ -62,14 +53,13 @@ fn session_requires_credentials_in_production_mode() {
 fn session_with_stub_transport_succeeds() {
     let _guard = env_mutex().lock().unwrap();
     std::env::set_var("LINUX_WMI_USE_STUB", "1"); // Enable stub for testing
-    std::env::set_var("LINUX_WMI_SKIP_EPM", "1"); // Skip EPM to avoid network calls
 
     let mut session_ptr = std::ptr::null_mut();
     let mut err_ptr = std::ptr::null_mut();
 
     let result = unsafe {
         linux_wmi::wmi_session_new(
-            "test-host\0".as_ptr() as *const i8,
+            c"test-host".as_ptr(),
             std::ptr::null(),
             std::ptr::null(),
             std::ptr::null(),
@@ -89,7 +79,6 @@ fn session_with_stub_transport_succeeds() {
 
     // Clean up
     std::env::remove_var("LINUX_WMI_USE_STUB");
-    std::env::remove_var("LINUX_WMI_SKIP_EPM");
 
     if !err_ptr.is_null() {
         unsafe {

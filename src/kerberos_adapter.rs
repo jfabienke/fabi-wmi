@@ -640,9 +640,27 @@ impl AuthProvider for KerberosClient {
         }
     }
 
-    fn session_key(&self) -> Option<&[u8]> {
-        self.session_key.as_deref()
+    // DCE/RPC PDU protection needs GSS IOV wrapping over header, stub and
+    // sec_trailer (MS-RPCE 3.3.1.5.2); not wired to kerbsec yet.
+    fn seal_rpc(&mut self, _: &[u8], _: &mut [u8], _: &[u8]) -> Result<Vec<u8>, AuthError> {
+        Err(not_wired())
     }
+
+    fn unseal_rpc(&mut self, _: &[u8], _: &mut [u8], _: &[u8], _: &[u8]) -> Result<(), AuthError> {
+        Err(not_wired())
+    }
+
+    fn sign_rpc(&mut self, _: &[u8], _: &[u8], _: &[u8]) -> Result<Vec<u8>, AuthError> {
+        Err(not_wired())
+    }
+
+    fn verify_rpc(&mut self, _: &[u8], _: &[u8], _: &[u8], _: &[u8]) -> Result<(), AuthError> {
+        Err(not_wired())
+    }
+}
+
+fn not_wired() -> AuthError {
+    AuthError::Protection("Kerberos RPC message protection is not implemented yet".into())
 }
 
 impl Drop for KerberosClient {
