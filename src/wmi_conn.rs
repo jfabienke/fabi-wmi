@@ -24,7 +24,8 @@ use crate::transport::{
     TransportError, AUTH_TYPE_NTLM, DATA_REP, RPC_IO_TIMEOUT,
 };
 use crate::wmi_proto::{
-    self, WmiProtoError, IID_IENUM_WBEM_CLASS_OBJECT, IID_IWBEM_LEVEL1_LOGIN, IID_IWBEM_SERVICES,
+    self, InterfaceRef, WmiProtoError, IID_IENUM_WBEM_CLASS_OBJECT, IID_IREMUNKNOWN,
+    IID_IWBEM_LEVEL1_LOGIN, IID_IWBEM_SERVICES,
 };
 use crate::wmio::{self, WmioError};
 
@@ -66,6 +67,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const OPNUM_NTLM_LOGIN: u16 = 6;
 const OPNUM_EXEC_QUERY: u16 = 20;
 const OPNUM_ENUM_NEXT: u16 = 4;
+const OPNUM_REM_RELEASE: u16 = 5;
 /// lTimeout for IEnumWbemClassObject::Next: wait until objects are ready.
 const WBEM_INFINITE: i32 = -1;
 /// Objects requested per Next call.
@@ -199,23 +201,36 @@ struct WmiConnection {
 }
 
 impl WmiConnection {
-    fn open(host: &str, port: u16, creds: &Credentials) -> Result<Self, WmiConnError> {
+    fn open(
+        host: &str,
+        port: u16,
+        creds: &Credentials,
+        timeout: Duration,
+    ) -> Result<Self, WmiConnError> {
         let addr = (host, port)
             .to_socket_addrs()?
             .next()
             .ok_or_else(|| WmiConnError::Protocol(format!("{host} resolved to no addresses")))?;
-        let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)?;
-        stream.set_read_timeout(Some(RPC_IO_TIMEOUT))?;
-        stream.set_write_timeout(Some(RPC_IO_TIMEOUT))?;
+        let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT.min(timeout))?;
         let _ = stream.set_nodelay(true);
-        Ok(Self {
+        let mut conn = Self {
             stream,
             creds: creds.clone(),
             target_name: format!("host/{host}"),
             call_id: 0,
             next_context_id: 0,
             max_xmit: MAX_FRAG,
-        })
+        };
+        conn.set_timeout(timeout)?;
+        Ok(conn)
+    }
+
+    fn set_timeout(&mut self, timeout: Duration) -> Result<(), WmiConnError> {
+        // A zero Duration means "no timeout" to the socket API; never allow it.
+        let timeout = Some(timeout.max(Duration::from_millis(1)));
+        self.stream.set_read_timeout(timeout)?;
+        self.stream.set_write_timeout(timeout)?;
+        Ok(())
     }
 
     fn next_call_id(&mut self) -> u32 {
@@ -347,56 +362,222 @@ fn namespace_path(namespace: &str) -> String {
     }
 }
 
+impl WmiConnError {
+    /// The HRESULT behind this error, when the server reported one (a failed
+    /// WMI/DCOM call or an RPC-level access-denied fault).
+    pub fn hresult(&self) -> Option<u32> {
+        match self {
+            WmiConnError::Wmi(WmiProtoError::Hresult(hr))
+            | WmiConnError::Decode(WmioError::Hresult(hr)) => Some(*hr),
+            WmiConnError::Activation(DcomError::AccessDenied) => Some(E_ACCESSDENIED),
+            WmiConnError::Activation(DcomError::ServerUnavailable) => Some(0x8007_06BA),
+            WmiConnError::Activation(DcomError::RemoteProcedureCallFailed) => Some(0x8007_06BE),
+            WmiConnError::Activation(DcomError::Hresult { hr }) => Some(*hr),
+            WmiConnError::Transport(TransportError::Fault(status)) => {
+                Some(crate::transport::fault_to_hresult(*status))
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether the connection can no longer be used after this error (I/O
+    /// failure, timeout, or a protocol desync) as opposed to a call that
+    /// failed cleanly on a healthy connection.
+    pub fn is_connection_lost(&self) -> bool {
+        !matches!(
+            self,
+            WmiConnError::Wmi(_)
+                | WmiConnError::Decode(_)
+                | WmiConnError::Transport(TransportError::Fault(_))
+        )
+    }
+}
+
+const E_ACCESSDENIED: u32 = 0x8007_0005;
+
+/// Default bound on every network read and write.
+pub const DEFAULT_TIMEOUT: Duration = RPC_IO_TIMEOUT;
+/// How long releasing references may take when a client is dropped.
+const RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A WMI namespace logged in on one host, ready to run queries.
+///
+/// Holds one connection to the server's object exporter with IWbemServices
+/// bound. Queries reuse it. Every interface reference the server hands out is
+/// released with IRemUnknown::RemRelease as soon as it is no longer needed,
+/// and IWbemServices itself when the client is dropped.
+pub struct WmiClient {
+    conn: WmiConnection,
+    services: BoundInterface,
+    services_ref: InterfaceRef,
+    rem_unknown: BoundInterface,
+    /// The IEnumWbemClassObject presentation/security context, bound on the
+    /// first query and reused (with each query's own IPID) afterwards.
+    enumerator: Option<BoundInterface>,
+    causality_id: [u8; 16],
+    /// Set once an I/O or protocol error left the stream in an unknown state.
+    broken: bool,
+}
+
+impl WmiClient {
+    /// Activate WMI on `host`, log in to `namespace`, and bind IWbemServices.
+    /// `timeout` bounds each network read/write on the WMI connection.
+    pub fn connect(
+        host: &str,
+        creds: &Credentials,
+        namespace: &str,
+        timeout: Duration,
+    ) -> Result<Self, WmiConnError> {
+        let (port, activation) = dcom::activate_level1_login(host, creds)?;
+        // The advertised bindings name the server's own view of itself (which
+        // may be unreachable behind NAT); keep dialing the address we were given.
+        let mut conn = WmiConnection::open(host, port, creds, timeout)?;
+        let causality_id = *uuid::Uuid::new_v4().as_bytes();
+        let login_ref = InterfaceRef {
+            ipid: activation.ipid,
+            public_refs: activation.public_refs,
+        };
+
+        let mut login =
+            conn.bind_interface("IWbemLevel1Login", &IID_IWBEM_LEVEL1_LOGIN, login_ref.ipid)?;
+        let resp = conn.call(
+            &mut login,
+            OPNUM_NTLM_LOGIN,
+            &wmi_proto::encode_ntlm_login(&causality_id, &namespace_path(namespace)),
+        );
+        let mut rem_unknown =
+            conn.bind_interface("IRemUnknown", &IID_IREMUNKNOWN, activation.ipid_rem_unknown)?;
+        // IWbemLevel1Login is only needed for the login itself.
+        let released = release(&mut conn, &mut rem_unknown, &causality_id, &[login_ref]);
+        let services_ref = wmi_proto::parse_interface_response(&resp?, &IID_IWBEM_SERVICES)?;
+        released?;
+
+        let services =
+            conn.bind_interface("IWbemServices", &IID_IWBEM_SERVICES, services_ref.ipid)?;
+        Ok(Self {
+            conn,
+            services,
+            services_ref,
+            rem_unknown,
+            enumerator: None,
+            causality_id,
+            broken: false,
+        })
+    }
+
+    /// Change the bound on each network read/write for later calls.
+    pub fn set_timeout(&mut self, timeout: Duration) -> Result<(), WmiConnError> {
+        self.conn.set_timeout(timeout)
+    }
+
+    /// Whether an earlier error left the connection unusable; reconnect then.
+    pub fn is_broken(&self) -> bool {
+        self.broken
+    }
+
+    /// Run `wql` and return one JSON object per result row.
+    pub fn query(&mut self, wql: &str) -> Result<Vec<serde_json::Value>, WmiConnError> {
+        if self.broken {
+            return Err(WmiConnError::Protocol(
+                "connection was lost by an earlier error; reconnect".into(),
+            ));
+        }
+        let result = self.run_query(wql);
+        if let Err(err) = &result {
+            self.broken |= err.is_connection_lost();
+        }
+        result
+    }
+
+    fn run_query(&mut self, wql: &str) -> Result<Vec<serde_json::Value>, WmiConnError> {
+        let resp = self.conn.call(
+            &mut self.services,
+            OPNUM_EXEC_QUERY,
+            &wmi_proto::encode_exec_query(&self.causality_id, wql, 0),
+        )?;
+        let enum_ref = wmi_proto::parse_interface_response(&resp, &IID_IENUM_WBEM_CLASS_OBJECT)?;
+        let rows = self.enumerate(enum_ref.ipid);
+        // Release the enumerator unless the connection itself failed.
+        if !matches!(&rows, Err(err) if err.is_connection_lost()) {
+            release(
+                &mut self.conn,
+                &mut self.rem_unknown,
+                &self.causality_id,
+                &[enum_ref],
+            )?;
+        }
+        rows
+    }
+
+    fn enumerate(&mut self, ipid: [u8; 16]) -> Result<Vec<serde_json::Value>, WmiConnError> {
+        let enumerator = match &mut self.enumerator {
+            Some(bound) => bound,
+            slot => slot.insert(self.conn.bind_interface(
+                "IEnumWbemClassObject",
+                &IID_IENUM_WBEM_CLASS_OBJECT,
+                ipid,
+            )?),
+        };
+        enumerator.ipid = ipid;
+        let mut rows = Vec::new();
+        loop {
+            let resp = self.conn.call(
+                enumerator,
+                OPNUM_ENUM_NEXT,
+                &wmi_proto::encode_enum_next(&self.causality_id, WBEM_INFINITE, NEXT_BATCH),
+            )?;
+            let batch = wmio::decode_next_response(&resp)?;
+            let done = batch.len() < NEXT_BATCH as usize;
+            rows.extend(batch);
+            if done {
+                return Ok(rows);
+            }
+        }
+    }
+}
+
+impl Drop for WmiClient {
+    fn drop(&mut self) {
+        if self.broken {
+            return; // the server reclaims references when pinging stops
+        }
+        let _ = self.conn.set_timeout(RELEASE_TIMEOUT);
+        if let Err(err) = release(
+            &mut self.conn,
+            &mut self.rem_unknown,
+            &self.causality_id,
+            &[self.services_ref],
+        ) {
+            debug!(%err, "releasing IWbemServices failed");
+        }
+    }
+}
+
+/// Release interface references through the OXID's IRemUnknown.
+fn release(
+    conn: &mut WmiConnection,
+    rem_unknown: &mut BoundInterface,
+    causality_id: &[u8; 16],
+    refs: &[InterfaceRef],
+) -> Result<(), WmiConnError> {
+    let resp = conn.call(
+        rem_unknown,
+        OPNUM_REM_RELEASE,
+        &wmi_proto::encode_rem_release(causality_id, refs),
+    )?;
+    Ok(wmi_proto::parse_rem_release_response(&resp)?)
+}
+
 /// Run `wql` in `namespace` on `host` and return one JSON object per result.
+/// Connects, queries, and releases everything; use [`WmiClient`] to run
+/// several queries over one login.
 pub fn query(
     host: &str,
     creds: &Credentials,
     namespace: &str,
     wql: &str,
 ) -> Result<Vec<serde_json::Value>, WmiConnError> {
-    let (port, activation) = dcom::activate_level1_login(host, creds)?;
-    // The advertised bindings name the server's own view of itself (which may
-    // be unreachable behind NAT); keep dialing the address we were given.
-    let mut conn = WmiConnection::open(host, port, creds)?;
-    let causality_id = *uuid::Uuid::new_v4().as_bytes();
-
-    let mut login =
-        conn.bind_interface("IWbemLevel1Login", &IID_IWBEM_LEVEL1_LOGIN, activation.ipid)?;
-    let resp = conn.call(
-        &mut login,
-        OPNUM_NTLM_LOGIN,
-        &wmi_proto::encode_ntlm_login(&causality_id, &namespace_path(namespace)),
-    )?;
-    let services_ipid = wmi_proto::parse_interface_response(&resp, &IID_IWBEM_SERVICES)?;
-
-    let mut services = conn.bind_interface("IWbemServices", &IID_IWBEM_SERVICES, services_ipid)?;
-    let resp = conn.call(
-        &mut services,
-        OPNUM_EXEC_QUERY,
-        &wmi_proto::encode_exec_query(&causality_id, wql, 0),
-    )?;
-    let enum_ipid = wmi_proto::parse_interface_response(&resp, &IID_IENUM_WBEM_CLASS_OBJECT)?;
-
-    let mut enumerator = conn.bind_interface(
-        "IEnumWbemClassObject",
-        &IID_IENUM_WBEM_CLASS_OBJECT,
-        enum_ipid,
-    )?;
-    let mut rows = Vec::new();
-    loop {
-        let resp = conn.call(
-            &mut enumerator,
-            OPNUM_ENUM_NEXT,
-            &wmi_proto::encode_enum_next(&causality_id, WBEM_INFINITE, NEXT_BATCH),
-        )?;
-        let batch = wmio::decode_next_response(&resp)?;
-        let done = batch.len() < NEXT_BATCH as usize;
-        rows.extend(batch);
-        if done {
-            break;
-        }
-    }
-    Ok(rows)
+    WmiClient::connect(host, creds, namespace, DEFAULT_TIMEOUT)?.query(wql)
 }
 
 #[cfg(test)]

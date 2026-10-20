@@ -43,6 +43,8 @@ pub enum TransportError {
     Bind { result: u16, reason: u16 },
     #[error("alter_context rejected (result={result:#06x})")]
     AlterReject { result: u16 },
+    #[error("RPC fault 0x{0:08x}")]
+    Fault(u32),
 }
 
 impl From<std::io::Error> for TransportError {
@@ -224,7 +226,7 @@ pub(crate) fn verify_signed_response_pdu(
     let ptype = pdu[2];
     if ptype == 0x03 {
         let status = u32::from_le_bytes(pdu[24..28].try_into().unwrap());
-        return Err(TransportError::Failure(format!("RPC fault 0x{status:08x}")));
+        return Err(TransportError::Fault(status));
     }
     if ptype != 0x02 {
         return Err(TransportError::Failure(format!(
@@ -259,6 +261,17 @@ pub(crate) fn verify_signed_response_pdu(
     Ok(pdu[RESPONSE_HEADER_LEN..stub_end].to_vec())
 }
 
+/// Map an RPC fault status to an HRESULT: access-denied (Win32 error 5 or
+/// nca_s_fault_access_denied) becomes E_ACCESSDENIED, an HRESULT passes
+/// through, and any other Win32 error becomes HRESULT_FROM_WIN32.
+pub(crate) fn fault_to_hresult(status: u32) -> u32 {
+    match status {
+        0x0000_0005 | 0x1c01_0002 => 0x8007_0005,
+        s if s & 0x8000_0000 != 0 => s,
+        s => 0x8007_0000 | (s & 0xFFFF),
+    }
+}
+
 /// True if this fragment is the last of a response (PFC_LAST).
 #[allow(dead_code)]
 pub(crate) fn is_last_fragment(pdu: &[u8]) -> bool {
@@ -277,7 +290,7 @@ pub(crate) fn unseal_response_pdu(
     let ptype = pdu[2];
     if ptype == 0x03 {
         let status = u32::from_le_bytes(pdu[24..28].try_into().unwrap());
-        return Err(TransportError::Failure(format!("RPC fault 0x{status:08x}")));
+        return Err(TransportError::Fault(status));
     }
     if ptype != 0x02 {
         return Err(TransportError::Failure(format!(

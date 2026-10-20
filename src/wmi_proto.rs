@@ -21,6 +21,8 @@ pub enum WmiProtoError {
     Hresult(u32),
 }
 
+/// IID of IRemUnknown, the OXID object used to release references.
+pub(crate) const IID_IREMUNKNOWN: [u8; 16] = hex_literal::hex!("3101000000000000c000000000000046");
 /// IID of IWbemLevel1Login (activated from CLSID_WbemLevel1Login).
 pub(crate) const IID_IWBEM_LEVEL1_LOGIN: [u8; 16] =
     hex_literal::hex!("18ad09f36ad8d011a07500c04fb68820");
@@ -136,16 +138,25 @@ pub(crate) fn encode_enum_next(causality_id: &[u8; 16], timeout: i32, count: u32
     buf
 }
 
+/// An interface pointer returned by the server: the IPID to address calls to
+/// and the public references held on it (released with RemRelease).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InterfaceRef {
+    pub ipid: [u8; 16],
+    pub public_refs: u32,
+}
+
 /// Parse a response whose [out] parameter is an interface pointer (NTLMLogin,
 /// ExecQuery): confirm the call's HRESULT (last 4 bytes) is success, locate the
 /// returned OBJREF_STANDARD by its "MEOW" signature, check it is standard and
-/// carries `expected_iid`, and return its std.ipid for subsequent ORPC calls.
+/// carries `expected_iid`, and return its std.ipid and std.cPublicRefs.
 pub(crate) fn parse_interface_response(
     stub: &[u8],
     expected_iid: &[u8; 16],
-) -> Result<[u8; 16], WmiProtoError> {
+) -> Result<InterfaceRef, WmiProtoError> {
     const FLAGS_OFF: usize = 4;
     const IID_OFF: usize = 8;
+    const PUBLIC_REFS_OFF: usize = 28; // sig(4)+flags(4)+iid(16)+std.flags(4)
     const IPID_OFF: usize = 48; // sig(4)+flags(4)+iid(16)+std{flags(4)+crefs(4)+oxid(8)+oid(8)}
     const OBJREF_END: usize = IPID_OFF + 16;
     const OBJREF_STANDARD: u32 = 1;
@@ -187,7 +198,45 @@ pub(crate) fn parse_interface_response(
     if &objref[IID_OFF..IID_OFF + 16] != expected_iid {
         return Err(WmiProtoError::WrongInterface);
     }
-    Ok(objref[IPID_OFF..IPID_OFF + 16].try_into().unwrap())
+    Ok(InterfaceRef {
+        ipid: objref[IPID_OFF..IPID_OFF + 16].try_into().unwrap(),
+        public_refs: u32::from_le_bytes(
+            objref[PUBLIC_REFS_OFF..PUBLIC_REFS_OFF + 4]
+                .try_into()
+                .unwrap(),
+        ),
+    })
+}
+
+/// Encode the IRemUnknown::RemRelease (opnum 5) request stub (MS-DCOM
+/// 3.1.1.5.6.1.3): ORPCTHIS, cInterfaceRefs, then a conformant array of
+/// REMINTERFACEREF { ipid, cPublicRefs, cPrivateRefs }.
+pub(crate) fn encode_rem_release(causality_id: &[u8; 16], refs: &[InterfaceRef]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    encode_orpcthis(&mut buf, causality_id);
+    buf.write_u16::<LittleEndian>(refs.len() as u16).unwrap();
+    align4(&mut buf, 0);
+    buf.write_u32::<LittleEndian>(refs.len() as u32).unwrap(); // max_count
+    for r in refs {
+        buf.extend_from_slice(&r.ipid);
+        buf.write_u32::<LittleEndian>(r.public_refs).unwrap();
+        buf.write_u32::<LittleEndian>(0).unwrap(); // cPrivateRefs
+    }
+    buf
+}
+
+/// Check a RemRelease response stub (ORPCTHAT, HRESULT).
+pub(crate) fn parse_rem_release_response(stub: &[u8]) -> Result<(), WmiProtoError> {
+    let hr = stub
+        .len()
+        .checked_sub(4)
+        .filter(|&o| o >= 8)
+        .map(|o| u32::from_le_bytes(stub[o..o + 4].try_into().unwrap()))
+        .ok_or(WmiProtoError::Malformed)?;
+    if hr != 0 {
+        return Err(WmiProtoError::Hresult(hr));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -274,14 +323,16 @@ mod tests {
 
     #[test]
     fn parse_interface_response_extracts_iwbemservices_ipid() {
-        let ipid = parse_interface_response(NTLMLOGIN_RESP, &IID_IWBEM_SERVICES).unwrap();
-        assert_eq!(hex::encode(ipid), "0c7000007c060000b7af6bab62096d93");
+        let r = parse_interface_response(NTLMLOGIN_RESP, &IID_IWBEM_SERVICES).unwrap();
+        assert_eq!(hex::encode(r.ipid), "0c7000007c060000b7af6bab62096d93");
+        assert_eq!(r.public_refs, 5);
     }
 
     #[test]
     fn parse_interface_response_extracts_ienum_ipid() {
-        let ipid = parse_interface_response(EXECQUERY_RESP, &IID_IENUM_WBEM_CLASS_OBJECT).unwrap();
-        assert_eq!(hex::encode(ipid), "159c00007c060000b632e12bd5007b97");
+        let r = parse_interface_response(EXECQUERY_RESP, &IID_IENUM_WBEM_CLASS_OBJECT).unwrap();
+        assert_eq!(hex::encode(r.ipid), "159c00007c060000b632e12bd5007b97");
+        assert_eq!(r.public_refs, 5);
     }
 
     #[test]
@@ -325,8 +376,62 @@ mod tests {
         // real OBJREF further on: the parser still returns the true IPID.
         let mut stub = NTLMLOGIN_RESP.to_vec();
         stub[0..4].copy_from_slice(b"MEOW"); // ORPCTHAT flags
-        let ipid = parse_interface_response(&stub, &IID_IWBEM_SERVICES).unwrap();
-        assert_eq!(hex::encode(ipid), "0c7000007c060000b7af6bab62096d93");
+        let r = parse_interface_response(&stub, &IID_IWBEM_SERVICES).unwrap();
+        assert_eq!(hex::encode(r.ipid), "0c7000007c060000b7af6bab62096d93");
+    }
+
+    /// IRemUnknown::RemRelease request impacket sent (1 public ref on the
+    /// IWbemLevel1Login IPID) and Windows accepted.
+    const REM_RELEASE_STUB: [u8; 64] = hex_literal::hex!(
+        "0500070000000000000000005919bc025b44841a7e8a2e4899ca040b000000000100cece010000000f6000007c060000309fbbb3b07c6c4c0100000000000000"
+    );
+
+    #[test]
+    fn encode_rem_release_matches_windows_reference() {
+        let cid: [u8; 16] = REM_RELEASE_STUB[12..28].try_into().unwrap();
+        let r = InterfaceRef {
+            ipid: REM_RELEASE_STUB[40..56].try_into().unwrap(),
+            public_refs: 1,
+        };
+        let stub = encode_rem_release(&cid, &[r]);
+        // Bytes 34..36 are NDR alignment pad (arbitrary on the wire).
+        let masked = std::slice::from_ref(&(34..36));
+        assert_eq!(mask(&stub, masked), mask(&REM_RELEASE_STUB, masked));
+    }
+
+    #[test]
+    fn encode_rem_release_lists_every_ref() {
+        let refs = [
+            InterfaceRef {
+                ipid: [1; 16],
+                public_refs: 5,
+            },
+            InterfaceRef {
+                ipid: [2; 16],
+                public_refs: 3,
+            },
+        ];
+        let stub = encode_rem_release(&[0; 16], &refs);
+        assert_eq!(stub.len(), 32 + 4 + 4 + 2 * 24);
+        assert_eq!(&stub[32..34], &2u16.to_le_bytes());
+        assert_eq!(&stub[36..40], &2u32.to_le_bytes());
+        assert_eq!(&stub[64..80], &[2; 16]);
+        assert_eq!(&stub[80..84], &3u32.to_le_bytes());
+    }
+
+    #[test]
+    fn parse_rem_release_response_checks_hresult() {
+        assert_eq!(parse_rem_release_response(&[0; 12]), Ok(()));
+        let mut bad = [0u8; 12];
+        bad[8..].copy_from_slice(&0x8001_0105u32.to_le_bytes()); // RPC_E_SERVERFAULT
+        assert_eq!(
+            parse_rem_release_response(&bad),
+            Err(WmiProtoError::Hresult(0x8001_0105))
+        );
+        assert_eq!(
+            parse_rem_release_response(&[0; 4]),
+            Err(WmiProtoError::Malformed)
+        );
     }
 
     #[test]

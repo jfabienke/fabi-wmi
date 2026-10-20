@@ -57,6 +57,19 @@ fn hresult_to_err(hr: u32) -> DcomError {
     }
 }
 
+/// The status of an RPC fault PDU (C706 12.6.4.7), if `pdu` is one.
+fn fault_status(pdu: &[u8]) -> Option<u32> {
+    (pdu.get(2) == Some(&0x03))
+        .then(|| pdu.get(24..28))
+        .flatten()
+        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+}
+
+/// Map an RPC fault status (Win32 error, NCA status, or HRESULT) to a DcomError.
+fn fault_to_err(status: u32) -> DcomError {
+    hresult_to_err(crate::transport::fault_to_hresult(status))
+}
+
 #[instrument(level = "debug", skip_all, fields(host))]
 pub fn resolve_wmi_port(host: &str, creds: Option<&Credentials>) -> Result<u16, DcomError> {
     // Step 1: Check for hardcoded port (highest priority)
@@ -675,6 +688,15 @@ fn activate_wmi_dcom_with_auth(
 
     let alter_ack = read_rpc_pdu(&mut stream)?;
     debug!(len = alter_ack.len(), hex = %hex::encode(&alter_ack), "SCM alter_ack raw");
+    // Bad credentials surface here: Windows faults the authenticating
+    // alter_context (status 5, access denied) instead of accepting it.
+    if let Some(status) = fault_status(&alter_ack) {
+        warn!(
+            status = format_args!("{status:#010x}"),
+            "SCM rejected authentication"
+        );
+        return Err(fault_to_err(status));
+    }
     RealRpcTransport::parse_alter_ack(&alter_ack).map_err(|err| {
         debug!(?err, "SCM alter_ack parse failure");
         DcomError::Protocol
@@ -697,7 +719,10 @@ fn activate_wmi_dcom_with_auth(
     let resp_pdu = read_rpc_pdu(&mut stream)?;
     let resp_pdu = unseal_response_pdu(auth_client.as_mut(), &resp_pdu).map_err(|err| {
         error!(%err, "RemoteActivation response rejected");
-        DcomError::Protocol
+        match err {
+            crate::transport::TransportError::Fault(status) => fault_to_err(status),
+            _ => DcomError::Protocol,
+        }
     })?;
     let activation = parse_remote_activation_response(&resp_pdu, Some(&iid_level1_login))?;
     let port = activation.port().ok_or_else(|| {
@@ -928,8 +953,9 @@ pub(crate) struct ActivationResponse {
     pub oxid: [u8; 8],
     /// IPID of the activated interface, read from the returned OBJREF_STANDARD.
     pub ipid: [u8; 16],
-    /// IPID of the OXID's IRemUnknown, needed later to release references.
-    #[allow(dead_code)] // consumed once reference release (IRemUnknown) is implemented
+    /// Public references the OBJREF granted on `ipid` (to RemRelease later).
+    pub public_refs: u32,
+    /// IPID of the OXID's IRemUnknown, used to release references.
     pub ipid_rem_unknown: [u8; 16],
     /// ncacn_ip_tcp bindings the server advertised, as (host, port). Under NAT
     /// these name the server's own view (e.g. DC01, 10.0.2.15); the caller keeps
@@ -1064,7 +1090,7 @@ fn parse_activation_stub(
     // ORPC calls target. The OBJREF starts with the "MEOW" signature (MS-DCOM
     // 2.2.18). Scan only the bytes after phr so a "MEOW" inside the random OXID
     // or ipidRemUnknown cannot be mistaken for it.
-    let ipid = find_objref_ipid(stub, c.position() as usize, &oxid, expected_iid)?;
+    let (ipid, public_refs) = find_objref_ipid(stub, c.position() as usize, &oxid, expected_iid)?;
 
     debug!(
         oxid = %hex::encode(oxid),
@@ -1075,6 +1101,7 @@ fn parse_activation_stub(
     Ok(ActivationResponse {
         oxid,
         ipid,
+        public_refs,
         ipid_rem_unknown,
         tcp_bindings,
     })
@@ -1125,12 +1152,13 @@ fn find_objref_ipid(
     scan_from: usize,
     expected_oxid: &[u8; 8],
     expected_iid: Option<&[u8; 16]>,
-) -> Result<[u8; 16], DcomError> {
+) -> Result<([u8; 16], u32), DcomError> {
     // OBJREF layout: signature(4) flags(4) iid(16) then STDOBJREF
     // { flags(4) cPublicRefs(4) oxid(8) oid(8) ipid(16) }.
     const FLAGS_OFFSET: usize = 4;
     const IID_OFFSET: usize = 8;
-    const OXID_OFFSET: usize = 4 + 4 + 16 + 4 + 4; // 32
+    const PUBLIC_REFS_OFFSET: usize = 4 + 4 + 16 + 4; // 28
+    const OXID_OFFSET: usize = PUBLIC_REFS_OFFSET + 4; // 32
     const IPID_OFFSET: usize = OXID_OFFSET + 8 + 8; // 48
     const OBJREF_END: usize = IPID_OFFSET + 16; // 64
     const OBJREF_STANDARD: u32 = 0x1;
@@ -1162,7 +1190,12 @@ fn find_objref_ipid(
     }
     let mut ipid = [0u8; 16];
     ipid.copy_from_slice(&objref[IPID_OFFSET..IPID_OFFSET + 16]);
-    Ok(ipid)
+    let public_refs = u32::from_le_bytes(
+        objref[PUBLIC_REFS_OFFSET..PUBLIC_REFS_OFFSET + 4]
+            .try_into()
+            .unwrap(),
+    );
+    Ok((ipid, public_refs))
 }
 
 /// Build an anonymous RPC bind PDU (no authentication)
@@ -1361,6 +1394,7 @@ mod tests {
             parse_activation_stub(WINDOWS_ACTIVATION_STUB, Some(&IID_WBEM_LEVEL1_LOGIN)).unwrap();
         assert_eq!(hex::encode(r.oxid), "889959be75b91cd7");
         assert_eq!(hex::encode(r.ipid), "1a7c0000e8090000b541859917e7b564");
+        assert_eq!(r.public_refs, 5);
         assert_eq!(
             hex::encode(r.ipid_rem_unknown),
             "00a40000e809000023bfdc109049aa7d"
@@ -1446,6 +1480,7 @@ mod tests {
         let r = parse_remote_activation_response(&pdu, Some(&IID_WBEM_LEVEL1_LOGIN)).unwrap();
         assert_eq!(r.port(), Some(24158));
         assert_eq!(hex::encode(r.ipid), "1a7c0000e8090000b541859917e7b564");
+        assert_eq!(r.public_refs, 5);
     }
 
     #[test]
@@ -1455,6 +1490,25 @@ mod tests {
         pdu.extend_from_slice(&[0u8; 8]); // alloc_hint, cancel_count, reserved
         pdu.extend_from_slice(&0x8007_0005u32.to_le_bytes());
         assert!(parse_remote_activation_response(&pdu, None).is_err());
+    }
+
+    #[test]
+    fn fault_to_err_maps_access_denied() {
+        // The fault Windows sends for an alter_context with bad credentials.
+        let pdu =
+            hex_literal::hex!("0500032310000000200000000200000020000000000000000500000000000000");
+        assert_eq!(fault_status(&pdu), Some(5));
+        assert!(matches!(fault_to_err(5), DcomError::AccessDenied));
+        assert!(matches!(fault_to_err(0x1c01_0002), DcomError::AccessDenied));
+        assert!(matches!(fault_to_err(0x6ba), DcomError::ServerUnavailable));
+        assert!(matches!(
+            fault_to_err(0x8004_1003),
+            DcomError::Hresult { hr: 0x8004_1003 }
+        ));
+        assert_eq!(fault_status(&pdu[..20]), None);
+        let mut not_fault = pdu;
+        not_fault[2] = 0x0F;
+        assert_eq!(fault_status(&not_fault), None);
     }
 
     #[test]

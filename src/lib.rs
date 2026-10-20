@@ -59,7 +59,12 @@ pub use pool::{
 };
 pub use rpc::RpcError;
 pub use wmi::{IWbemLocator, IWbemServices, WmiError};
-pub use wmi_conn::{query, WmiConnError};
+pub use wmi_conn::{query, WmiClient, WmiConnError};
+
+/// Default per-read/write network timeout for [`WmiClient`].
+pub fn wmi_default_timeout() -> std::time::Duration {
+    wmi_conn::DEFAULT_TIMEOUT
+}
 pub use wmi_proto::WmiProtoError;
 pub use wmio::WmioError;
 
