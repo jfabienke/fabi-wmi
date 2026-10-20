@@ -141,9 +141,9 @@ Everything else is move-the-code and keep the tests green.
 2. [x] `fabi-dcerpc` with the `RpcConnection` object and the generalized auth seam.
 3. [x] Consolidate the three OBJREF copies into `fabi-dcom`; restore OXID
    resolution; generalize activation.
-4. [ ] Widen `fabi-wmi` (ExecMethod first, since the shim's `ExecuteStaticMethod`
+4. [x] Widen `fabi-wmi` (ExecMethod first, since the shim's `ExecuteStaticMethod`
    needs it; gate the C ABI under an `ffi` feature).
-5. [ ] Rename `kerbsec` to `fabi-kerbsec`, fix IOV, and wire Kerberos into the
+5. [x] Rename `kerbsec` to `fabi-kerbsec`, fix IOV, and wire Kerberos into the
    `fabi-dcerpc` SSP seam.
 
 The test suite stays green at every step — that is the whole advantage over a

@@ -37,7 +37,7 @@ use tracing::{debug, info, warn};
 
 #[cfg(feature = "kerberos")]
 use fabi_kerbsec::{
-    // Channel bindings are available when kerbsec has the feature
+    // Channel bindings are available when fabi-kerbsec has the feature
     channel_bindings::{ChannelBindingType, ChannelBindings},
     AuthLevel as KerbsecAuthLevel,
     Context as KerbsecContext,
@@ -629,6 +629,26 @@ impl AuthProvider for KerberosClient {
         AUTH_TYPE_KERBEROS
     }
 
+    fn auth_value_len(&mut self, sealed: bool, padded_stub_len: usize) -> Result<usize, AuthError> {
+        #[cfg(feature = "kerberos")]
+        {
+            if let Some(ref ctx) = self.context {
+                return ctx
+                    .dce_auth_value_len(sealed, padded_stub_len)
+                    .map_err(|e| AuthError::Protection(e.to_string()));
+            }
+            Err(AuthError::Protection(
+                "Kerberos context not initialized".into(),
+            ))
+        }
+
+        #[cfg(not(feature = "kerberos"))]
+        {
+            let _ = (sealed, padded_stub_len);
+            Err(AuthError::Protection("Kerberos feature not enabled".into()))
+        }
+    }
+
     fn negotiate(&mut self) -> Result<Vec<u8>, AuthError> {
         // For DCE/RPC, this is the first leg (AP-REQ)
         self.bind_token().map_err(|_| AuthError::Creds)
@@ -644,27 +664,129 @@ impl AuthProvider for KerberosClient {
         }
     }
 
-    // DCE/RPC PDU protection needs GSS IOV wrapping over header, stub and
-    // sec_trailer (MS-RPCE 3.3.1.5.2); not wired to kerbsec yet.
-    fn seal_rpc(&mut self, _: &[u8], _: &mut [u8], _: &[u8]) -> Result<Vec<u8>, AuthError> {
-        Err(not_wired())
+    fn seal_rpc(
+        &mut self,
+        header: &[u8],
+        stub: &mut [u8],
+        sec_trailer: &[u8],
+    ) -> Result<Vec<u8>, AuthError> {
+        #[cfg(feature = "kerberos")]
+        {
+            if self.auth_state != AuthState::Established {
+                return Err(AuthError::Protection(
+                    "Kerberos context not established".into(),
+                ));
+            }
+            if let Some(ref mut ctx) = self.context {
+                return ctx
+                    .wrap_dce_iov(header, stub, sec_trailer, true)
+                    .map_err(|e| AuthError::Protection(e.to_string()));
+            }
+            Err(AuthError::Protection(
+                "Kerberos context not initialized".into(),
+            ))
+        }
+
+        #[cfg(not(feature = "kerberos"))]
+        {
+            let _ = (header, stub, sec_trailer);
+            Err(AuthError::Protection("Kerberos feature not enabled".into()))
+        }
     }
 
-    fn unseal_rpc(&mut self, _: &[u8], _: &mut [u8], _: &[u8], _: &[u8]) -> Result<(), AuthError> {
-        Err(not_wired())
+    fn unseal_rpc(
+        &mut self,
+        header: &[u8],
+        stub: &mut [u8],
+        sec_trailer: &[u8],
+        auth_value: &[u8],
+    ) -> Result<(), AuthError> {
+        #[cfg(feature = "kerberos")]
+        {
+            if self.auth_state != AuthState::Established {
+                return Err(AuthError::Protection(
+                    "Kerberos context not established".into(),
+                ));
+            }
+            if let Some(ref mut ctx) = self.context {
+                return ctx
+                    .unwrap_dce_iov(header, stub, sec_trailer, auth_value, true)
+                    .map_err(|e| AuthError::Protection(e.to_string()));
+            }
+            Err(AuthError::Protection(
+                "Kerberos context not initialized".into(),
+            ))
+        }
+
+        #[cfg(not(feature = "kerberos"))]
+        {
+            let _ = (header, stub, sec_trailer, auth_value);
+            Err(AuthError::Protection("Kerberos feature not enabled".into()))
+        }
     }
 
-    fn sign_rpc(&mut self, _: &[u8], _: &[u8], _: &[u8]) -> Result<Vec<u8>, AuthError> {
-        Err(not_wired())
+    fn sign_rpc(
+        &mut self,
+        header: &[u8],
+        stub: &[u8],
+        sec_trailer: &[u8],
+    ) -> Result<Vec<u8>, AuthError> {
+        #[cfg(feature = "kerberos")]
+        {
+            if self.auth_state != AuthState::Established {
+                return Err(AuthError::Protection(
+                    "Kerberos context not established".into(),
+                ));
+            }
+            if let Some(ref mut ctx) = self.context {
+                let mut stub_copy = stub.to_vec();
+                return ctx
+                    .wrap_dce_iov(header, &mut stub_copy, sec_trailer, false)
+                    .map_err(|e| AuthError::Protection(e.to_string()));
+            }
+            Err(AuthError::Protection(
+                "Kerberos context not initialized".into(),
+            ))
+        }
+
+        #[cfg(not(feature = "kerberos"))]
+        {
+            let _ = (header, stub, sec_trailer);
+            Err(AuthError::Protection("Kerberos feature not enabled".into()))
+        }
     }
 
-    fn verify_rpc(&mut self, _: &[u8], _: &[u8], _: &[u8], _: &[u8]) -> Result<(), AuthError> {
-        Err(not_wired())
-    }
-}
+    fn verify_rpc(
+        &mut self,
+        header: &[u8],
+        stub: &[u8],
+        sec_trailer: &[u8],
+        auth_value: &[u8],
+    ) -> Result<(), AuthError> {
+        #[cfg(feature = "kerberos")]
+        {
+            if self.auth_state != AuthState::Established {
+                return Err(AuthError::Protection(
+                    "Kerberos context not established".into(),
+                ));
+            }
+            if let Some(ref mut ctx) = self.context {
+                let mut stub_copy = stub.to_vec();
+                return ctx
+                    .unwrap_dce_iov(header, &mut stub_copy, sec_trailer, auth_value, false)
+                    .map_err(|e| AuthError::Protection(e.to_string()));
+            }
+            Err(AuthError::Protection(
+                "Kerberos context not initialized".into(),
+            ))
+        }
 
-fn not_wired() -> AuthError {
-    AuthError::Protection("Kerberos RPC message protection is not implemented yet".into())
+        #[cfg(not(feature = "kerberos"))]
+        {
+            let _ = (header, stub, sec_trailer, auth_value);
+            Err(AuthError::Protection("Kerberos feature not enabled".into()))
+        }
+    }
 }
 
 impl Drop for KerberosClient {
