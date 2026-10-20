@@ -1,3 +1,7 @@
 /target
 .venv/
 docs/rpcdump_*
+
+# Per-user Claude Code settings (may hold lab credentials)
+.claude/settings.local.json
+.DS_Store
