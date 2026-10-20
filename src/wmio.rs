@@ -10,7 +10,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
-pub(crate) enum WmioError {
+pub enum WmioError {
     #[error("malformed WMIO data")]
     Malformed,
     #[error("unexpected custom marshaler CLSID")]
@@ -21,7 +21,13 @@ pub(crate) enum WmioError {
     Unsupported,
     #[error("CIM type {0:#06x} not yet decoded")]
     UnsupportedType(u16),
+    #[error("enumeration failed (hr={0:#010x})")]
+    Hresult(u32),
 }
+
+/// HRESULT from IEnumWbemClassObject::Next when fewer objects than requested
+/// were returned, i.e. the enumeration is complete (MS-WMI 2.2.11).
+const WBEM_S_FALSE: u32 = 0x0000_0001;
 
 const OBJREF_SIGNATURE: &[u8; 4] = b"MEOW";
 const OBJREF_CUSTOM: u32 = 0x4;
@@ -46,15 +52,15 @@ pub(crate) struct WmioBlob {
 /// IEnumWbemClassObject::Next response stub (ORPCTHAT, apObjects array,
 /// puReturned, HRESULT). Each object is an OBJREF_CUSTOM wrapping the WMIO data.
 pub(crate) fn parse_next_response(stub: &[u8]) -> Result<Vec<WmioBlob>, WmioError> {
-    // The call's HRESULT is the last 4 bytes; WBEM_S_FALSE (0x40001) ends the
+    // The call's HRESULT is the last 4 bytes; WBEM_S_FALSE ends the
     // enumeration and is not an error.
     let hr = stub
         .len()
         .checked_sub(4)
         .map(|o| rd_u32(stub, o))
         .ok_or(WmioError::Malformed)??;
-    if hr != 0 && hr != 0x0004_0001 {
-        return Err(WmioError::Malformed);
+    if hr != 0 && hr != WBEM_S_FALSE {
+        return Err(WmioError::Hresult(hr));
     }
 
     // ORPCTHAT: flags, extensions pointer (null in practice).
@@ -84,7 +90,8 @@ pub(crate) fn parse_next_response(stub: &[u8]) -> Result<Vec<WmioBlob>, WmioErro
         let cnt = rd_u32(stub, off)? as usize;
         off += 4;
         let objref = stub.get(off..off + cnt).ok_or(WmioError::Malformed)?;
-        off += cnt;
+        // NDR aligns the next pointee to 4 bytes.
+        off = (off + cnt + 3) & !3;
         blobs.push(WmioBlob {
             data: parse_objref_custom(objref)?.to_vec(),
         });
@@ -439,6 +446,57 @@ mod tests {
                 ("Name", CIM_STRING, 12),
             ]
         );
+    }
+
+    /// Next response that ended the enumeration: no objects, WBEM_S_FALSE.
+    const NEXT_END: [u8; 28] =
+        hex_literal::hex!("00000000000000000100000000000000000000000000000001000000");
+
+    #[test]
+    fn parse_next_response_end_of_enumeration_is_empty() {
+        assert_eq!(parse_next_response(&NEXT_END).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn parse_next_response_accepts_wbem_s_false_with_objects() {
+        // A batch request that got fewer objects than asked for: S_FALSE.
+        let mut stub = NEXT_RESULT.to_vec();
+        let at = stub.len() - 4;
+        stub[at..].copy_from_slice(&1u32.to_le_bytes()); // WBEM_S_FALSE on the wire
+        assert_eq!(decode_next_response(&stub).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn parse_next_response_reports_failure_hresult() {
+        let mut stub = NEXT_END;
+        stub[24..].copy_from_slice(&0x8004_1010u32.to_le_bytes()); // WBEM_E_INVALID_CLASS
+        assert_eq!(
+            parse_next_response(&stub),
+            Err(WmioError::Hresult(0x8004_1010))
+        );
+    }
+
+    #[test]
+    fn parse_next_response_aligns_between_objects() {
+        // Two copies of the fixture object. Its OBJREF length is not a multiple
+        // of 4, so the second MInterfacePointer starts after NDR alignment pad.
+        let cnt = rd_u32(NEXT_RESULT, 28).unwrap() as usize;
+        assert_ne!(cnt % 4, 0, "fixture must exercise the pad");
+        let pointee = &NEXT_RESULT[24..32 + cnt];
+        let pad = vec![0u8; (4 - cnt % 4) % 4];
+        let mut stub = NEXT_RESULT[..8].to_vec(); // ORPCTHAT
+        for v in [2u32, 0, 2, 0x0002_0000, 0x0002_0004] {
+            stub.extend_from_slice(&v.to_le_bytes()); // max, offset, actual, referents
+        }
+        for _ in 0..2 {
+            stub.extend_from_slice(pointee);
+            stub.extend_from_slice(&pad);
+        }
+        stub.extend_from_slice(&2u32.to_le_bytes()); // puReturned
+        stub.extend_from_slice(&0u32.to_le_bytes()); // S_OK
+        let rows = decode_next_response(&stub).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], rows[1]);
     }
 
     #[test]
