@@ -5,6 +5,7 @@ on:
     branches: [ main, master ]
     paths:
       - 'src/**'
+      - 'crates/**'
       - 'shim/**'
       - 'tests/e2e-dotnet/**'
       - '.github/workflows/e2e-tests.yml'
@@ -12,6 +13,7 @@ on:
     branches: [ main, master ]
     paths:
       - 'src/**'
+      - 'crates/**'
       - 'shim/**'
       - 'tests/e2e-dotnet/**'
       - '.github/workflows/e2e-tests.yml'
@@ -69,8 +71,8 @@ jobs:
       with:
         name: linux-wmi-library
         path: |
-          target/release/liblinux_wmi.so
-          target/release/liblinux_wmi.a
+          target/release/libfabi_wmi.so
+          target/release/libfabi_wmi.a
 
   test-dotnet:
     name: .NET E2E Tests
@@ -95,7 +97,7 @@ jobs:
         path: target/release
 
     - name: Set execute permissions on library
-      run: chmod +x target/release/liblinux_wmi.so || true
+      run: chmod +x target/release/libfabi_wmi.so || true
 
     - name: Restore .NET packages
       working-directory: tests/e2e-dotnet
@@ -107,8 +109,8 @@ jobs:
 
     - name: Copy library to test output
       run: |
-        cp target/release/liblinux_wmi.so tests/e2e-dotnet/bin/Release/net8.0/ || \
-        cp target/release/liblinux_wmi.a tests/e2e-dotnet/bin/Release/net8.0/
+        cp target/release/libfabi_wmi.so tests/e2e-dotnet/bin/Release/net8.0/ || \
+        cp target/release/libfabi_wmi.a tests/e2e-dotnet/bin/Release/net8.0/
 
     - name: Run tests (mock mode)
       if: github.event_name != 'workflow_dispatch' || github.event.inputs.skip_network_tests == 'true'

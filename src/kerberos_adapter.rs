@@ -36,7 +36,7 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 
 #[cfg(feature = "kerberos")]
-use kerbsec::{
+use fabi_kerbsec::{
     // Channel bindings are available when kerbsec has the feature
     channel_bindings::{ChannelBindingType, ChannelBindings},
     AuthLevel as KerbsecAuthLevel,

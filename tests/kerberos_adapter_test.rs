@@ -3,7 +3,7 @@
 
 #![cfg(feature = "kerberos")]
 
-use linux_wmi::{Credentials, KerberosClient, KerberosConfig, KerberosError};
+use fabi_wmi::{Credentials, KerberosClient, KerberosConfig, KerberosError};
 
 #[test]
 fn config_builder_records_realm_and_spn() {

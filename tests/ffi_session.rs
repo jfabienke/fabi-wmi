@@ -1,5 +1,7 @@
 //! Session creation through the C ABI: input validation and backend choice.
 
+#![cfg(feature = "ffi")]
+
 use std::sync::{Mutex, OnceLock};
 
 fn env_mutex() -> &'static Mutex<()> {
@@ -14,7 +16,7 @@ fn session_creation_with_invalid_host_fails() {
     std::env::remove_var("LINUX_WMI_USE_STUB"); // Ensure real transport
 
     let result = unsafe {
-        linux_wmi::wmi_session_new(
+        fabi_wmi::wmi_session_new(
             c"".as_ptr(), // Empty host
             c"user".as_ptr(),
             c"pass".as_ptr(),
@@ -34,7 +36,7 @@ fn session_requires_credentials_in_production_mode() {
     std::env::remove_var("LINUX_WMI_USE_STUB"); // Ensure production mode
 
     let result = unsafe {
-        linux_wmi::wmi_session_new(
+        fabi_wmi::wmi_session_new(
             c"test-host".as_ptr(),
             std::ptr::null(), // No username
             std::ptr::null(), // No password
@@ -58,7 +60,7 @@ fn session_with_stub_transport_succeeds() {
     let mut err_ptr = std::ptr::null_mut();
 
     let result = unsafe {
-        linux_wmi::wmi_session_new(
+        fabi_wmi::wmi_session_new(
             c"test-host".as_ptr(),
             std::ptr::null(),
             std::ptr::null(),
@@ -73,7 +75,7 @@ fn session_with_stub_transport_succeeds() {
 
     if !session_ptr.is_null() {
         unsafe {
-            linux_wmi::wmi_session_free(session_ptr);
+            fabi_wmi::wmi_session_free(session_ptr);
         }
     }
 
@@ -82,7 +84,7 @@ fn session_with_stub_transport_succeeds() {
 
     if !err_ptr.is_null() {
         unsafe {
-            linux_wmi::wmi_free_err(err_ptr);
+            fabi_wmi::wmi_free_err(err_ptr);
         }
     }
 }

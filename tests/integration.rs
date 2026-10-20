@@ -1,8 +1,10 @@
-use linux_wmi::{
+#![cfg(feature = "ffi")]
+
+use fabi_wmi::{
     wmi_exec_method_json, wmi_exec_query_json, wmi_free_err, wmi_free_json, wmi_namespace_open,
     wmi_session_free, wmi_session_new, WmiSession,
 };
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::os::raw::c_char;
 use std::ptr;
 
@@ -72,7 +74,7 @@ fn ffi_query_flow_returns_stub_data() {
 }
 
 #[test]
-fn ffi_method_reports_not_implemented() {
+fn ffi_method_returns_stub_result_and_unknown_method_hresult() {
     let (session_ptr, _strings) = new_session();
     let namespace = CString::new("root\\CimV2").unwrap();
     let mut err_ptr: *mut c_char = ptr::null_mut();
@@ -101,14 +103,32 @@ fn ffi_method_reports_not_implemented() {
             &mut err_ptr,
         )
     };
-    // ExecMethod is now unsupported and should return error
-    assert_eq!(rc, -1, "method should return unsupported");
+    assert_eq!(rc, 0, "method should succeed on stub");
+    assert!(err_ptr.is_null());
+    assert!(!json_ptr.is_null());
+    let json = unsafe { std::slice::from_raw_parts(json_ptr, json_len) };
+    let json_str = std::str::from_utf8(json).unwrap();
+    assert!(json_str.contains("SYSTEM"));
+    unsafe { wmi_free_json(json_ptr, json_len) };
+
+    let bad_method = CString::new("NoSuchMethod").unwrap();
+    let mut json_ptr: *mut u8 = ptr::null_mut();
+    let mut json_len: usize = 0;
+    let mut err_ptr: *mut c_char = ptr::null_mut();
+    let rc = unsafe {
+        wmi_exec_method_json(
+            session_ptr,
+            class.as_ptr(),
+            bad_method.as_ptr(),
+            params.as_ptr(),
+            5_000,
+            &mut json_ptr,
+            &mut json_len,
+            &mut err_ptr,
+        )
+    };
+    assert_eq!(rc as u32, 0x8004_1055, "WBEM_E_METHOD_NOT_IMPLEMENTED");
     assert!(!err_ptr.is_null());
-
-    // Check error message indicates it's unsupported
-    let err_msg = unsafe { CStr::from_ptr(err_ptr).to_string_lossy() };
-    assert!(err_msg.contains("not implemented") || err_msg.contains("not yet implemented"));
-
     unsafe { wmi_free_err(err_ptr) };
     unsafe { wmi_session_free(session_ptr) };
 }
@@ -136,7 +156,7 @@ fn ffi_method_with_null_params_reaches_the_backend() {
     }
 
     // A null params pointer means "{}": the call gets past parameter parsing
-    // and is answered by the backend (ExecMethod is not implemented yet).
+    // and is answered by the backend.
     let class = CString::new("Win32_Process").unwrap();
     let method = CString::new("GetOwner").unwrap();
     let mut json_ptr: *mut u8 = ptr::null_mut();
@@ -154,13 +174,14 @@ fn ffi_method_with_null_params_reaches_the_backend() {
             &mut err_ptr,
         )
     };
-    assert_eq!(rc, -1);
-    assert!(json_ptr.is_null());
+    assert_eq!(rc, 0);
+    assert!(err_ptr.is_null());
+    assert!(!json_ptr.is_null());
+    let json = unsafe { std::slice::from_raw_parts(json_ptr, json_len) };
+    let json_str = std::str::from_utf8(json).unwrap();
+    assert!(json_str.contains("SYSTEM"));
     unsafe {
-        let err_msg = CStr::from_ptr(err_ptr).to_string_lossy().into_owned();
-        assert!(err_msg.contains("not implemented"), "{err_msg}");
-        assert!(!err_msg.contains("Invalid JSON"));
-        wmi_free_err(err_ptr);
+        wmi_free_json(json_ptr, json_len);
         wmi_session_free(session_ptr);
     }
 }

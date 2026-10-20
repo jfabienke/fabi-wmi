@@ -2,8 +2,8 @@
 //!
 //! Usage: wmi_query <host> <user> <password> <domain|""> <wql> [<wql> ...]
 //! The namespace defaults to root/cimv2; set WMI_NAMESPACE to change it.
-//! RUST_LOG=linux_wmi=debug shows the protocol steps.
-use linux_wmi::{Credentials, WmiClient};
+//! RUST_LOG=fabi_wmi=debug shows the protocol steps.
+use fabi_wmi::{Credentials, WmiClient};
 
 fn main() {
     tracing_subscriber::fmt()

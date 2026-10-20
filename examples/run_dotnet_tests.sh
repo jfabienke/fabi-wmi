@@ -70,21 +70,21 @@ done
 
 # Build the Rust library if not skipped
 if [[ "${SKIP_BUILD}" == "false" ]]; then
-    echo "🔨 Building linux-wmi library..."
+    echo "🔨 Building fabi-wmi library..."
     cd "${REPO_ROOT}"
     cargo build --lib
 
     # Check if the library was built
-    if [[ ! -f "${LIB_DIR}/liblinux_wmi.dylib" ]] && [[ ! -f "${LIB_DIR}/liblinux_wmi.so" ]]; then
-        echo "❌ Failed to build linux-wmi library" >&2
+    if [[ ! -f "${LIB_DIR}/libfabi_wmi.dylib" ]] && [[ ! -f "${LIB_DIR}/libfabi_wmi.so" ]]; then
+        echo "❌ Failed to build fabi-wmi library" >&2
         exit 1
     fi
 
     # Copy library to test output directory for .NET to find it
-    if [[ -f "${LIB_DIR}/liblinux_wmi.dylib" ]]; then
-        LIB_FILE="${LIB_DIR}/liblinux_wmi.dylib"
+    if [[ -f "${LIB_DIR}/libfabi_wmi.dylib" ]]; then
+        LIB_FILE="${LIB_DIR}/libfabi_wmi.dylib"
     else
-        LIB_FILE="${LIB_DIR}/liblinux_wmi.so"
+        LIB_FILE="${LIB_DIR}/libfabi_wmi.so"
     fi
 fi
 
@@ -148,7 +148,7 @@ if [[ -n "${LIB_FILE:-}" ]]; then
     # On macOS, we might need to handle the .dylib extension
     if [[ "${LIB_FILE}" == *.dylib ]]; then
         # .NET might look for .so, so create a symlink
-        (cd "${TEST_OUTPUT}" && ln -sf "$(basename "${LIB_FILE}")" "liblinux_wmi.so" 2>/dev/null || true)
+        (cd "${TEST_OUTPUT}" && ln -sf "$(basename "${LIB_FILE}")" "libfabi_wmi.so" 2>/dev/null || true)
     fi
 fi
 

@@ -54,7 +54,7 @@ namespace Arqitekta.WmiShim
 
     internal static class NativeMethods
     {
-        private const string LibName = "linux_wmi";
+        private const string LibName = "fabi_wmi";
 
         [DllImport(LibName, EntryPoint = "wmi_session_new", CallingConvention = CallingConvention.Cdecl)]
         private static extern int wmi_session_new_internal(

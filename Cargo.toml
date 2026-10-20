@@ -2,12 +2,12 @@
 members = ["crates/fabi-wmio", "crates/fabi-dcerpc", "crates/fabi-dcom"]
 
 [package]
-name = "linux-wmi"
+name = "fabi-wmi"
 version = "0.2.0"
 edition = "2021"
 
 [lib]
-name = "linux_wmi"
+name = "fabi_wmi"
 crate-type = ["cdylib", "rlib"]
 
 [[example]]
@@ -30,12 +30,13 @@ uuid = { version = "1.10", features = ["v4"] }
 zeroize = { version = "1.7", features = ["derive"] }
 
 [target.'cfg(unix)'.dependencies]
-# Kerberos via the system GSS-API (internal kerbsec crate)
-kerbsec = { path = "../kerbsec", version = "0.2.0", features = ["dns", "runtime", "trace", "ccache", "channel-bindings", "channel-bindings-rustls", "iov"], optional = true }
+# Kerberos via the system GSS-API (fabi-kerbsec crate)
+fabi-kerbsec = { path = "../kerbsec", version = "0.2.0", features = ["dns", "runtime", "trace", "ccache", "channel-bindings", "channel-bindings-rustls", "iov"], optional = true }
 
 [features]
-default = ["kerberos"]
-kerberos = ["kerbsec"]
+default = ["ffi", "kerberos"]
+ffi = []
+kerberos = ["fabi-kerbsec"]
 # In-process stub backend for the C ABI (LINUX_WMI_USE_STUB=1)
 test-support = []
 test-gss-mock = []
