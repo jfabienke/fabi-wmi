@@ -27,33 +27,35 @@ cargo fmt && cargo clippy --all-targets
 ### Running against a live host
 
 ```bash
-RUST_LOG=linux_wmi=debug cargo run --example test_connect <host> \
-  --user <user> --pass <pass> --domain <domain> --query 'SELECT Name FROM Win32_ComputerSystem'
-./examples/test_e2e.sh <host> <user> <pass> <domain> <query>
+cargo run --no-default-features --example wmi_query <host> <user> <pass> <domain|""> '<WQL>' ['<WQL>' ...]
+# WMI_NAMESPACE=root/StandardCimv2 to change namespace; RUST_LOG=linux_wmi=debug for protocol steps,
+# RUST_LOG=linux_wmi::wmi_conn=trace to dump every response stub as hex (how fixtures are captured).
 ```
+
+The .NET suite runs live with `WMI_TEST_DEFAULTHOST/USERNAME/PASSWORD` (and `WMI_TEST_TESTHOSTS_PRIMARY_*`) after copying `target/release/liblinux_wmi.{so,dylib}` into its output dir; with only a newer .NET runtime installed, set `DOTNET_ROLL_FORWARD=Major`.
 
 ### Environment variables
 
 | Variable | Effect |
 |---|---|
-| `LINUX_WMI_USE_STUB=1` | Session uses `StubTransport` + `StubNdrCodec` (no network). Requires `test-support` feature or it panics. |
-| `LINUX_WMI_PORT=<n>` | Skip DCOM activation for port resolution and use this port (workaround when NTLM-for-DCOM is blocked). |
-| `LINUX_WMI_SKIP_EPM=1` | Port resolution returns 135 without activation. Does **not** enable the stub transport. |
-| `RUST_LOG=linux_wmi=debug` | `tracing` output (JSON-capable). |
+| `LINUX_WMI_USE_STUB=1` | Session uses the canned `StubTransport` + `StubNdrCodec` backend (no network). Without the `test-support` feature, session creation fails. |
+| `LINUX_WMI_PORT` / `LINUX_WMI_SKIP_EPM` | Only read by the legacy `dcom::resolve_wmi_port`; not on the FFI path. |
+| `RUST_LOG=linux_wmi=debug` | `tracing` output. |
 
 ## Architecture
 
-Request flow (spans several files):
+The working path (FFI → `wmi_conn::WmiClient`):
 
-1. **FFI** (`src/lib.rs`): `wmi_session_new` → `InnerSession::new`, `wmi_namespace_open`, `wmi_exec_query_json`, `wmi_exec_method_json`, and `wmi_session_free` / `wmi_free_json` / `wmi_free_err`. Must stay in sync with `include/linux_wmi.h` and the `DllImport`s in `shim/wmi_shim.cs`.
-2. **Port resolution** (`dcom.rs::resolve_wmi_port`): `LINUX_WMI_PORT` → `LINUX_WMI_SKIP_EPM` → anonymous DCOM activation → authenticated activation.
-3. **Namespace open** (`wmi.rs::IWbemLocator::connect_server`): with credentials, does DCOM `RemoteActivation` (`dcom::activate_wmi_dcom`) to get port + OXID, then `transport::RealRpcTransport::connect_with_oxid`. That transport, not the one created in `InnerSession::new`, carries the queries. Without credentials it silently keeps the session's existing transport.
-4. **Transport** (`transport.rs`): bind/alter-context, NTLM (`auth.rs`) or Kerberos/SPNEGO (`kerberos_adapter.rs`, `spnego.rs`; Kerberos is tried first when the feature is on, falling back to NTLM), PDU sign/seal (`crypto.rs`; `crypto_v2/` is the newer RustCrypto-based module), fragment reassembly. `AsyncRealRpcTransport` is the `async`-feature variant.
-5. **NDR** (`ndr/codec.rs` `RealNdrCodec`, `ndr/types.rs`) behind the `NdrCodec` trait: ExecQuery is opnum 9, ExecMethod is opnum 25. Golden wire-format tests are in `ndr/golden_tests.rs`.
+1. **FFI** (`src/lib.rs`): `wmi_session_new` only validates input (no I/O). `wmi_namespace_open` calls `WmiClient::connect`, so bad hosts/credentials/namespaces fail there. `wmi_exec_query_json` reuses the client (reconnecting if an earlier error broke the connection); `timeout_ms` bounds each network read/write. Non-zero status = the server's HRESULT when known, else -1. Must stay in sync with `include/linux_wmi.h` and `shim/wmi_shim.cs`.
+2. **Activation** (`dcom::activate_level1_login`): port 135, IActivation::RemoteActivation of CLSID_WbemLevel1Login, NTLM via `sspi_ntlm::SspiNtlmClient` at PKT_PRIVACY (sealed). Returns port, IPIDs, and reference counts. Bindings advertised by the server are ignored except for the port (they are NAT-internal names); the client keeps dialing the host it was given.
+3. **WMI connection** (`wmi_conn.rs`): one TCP connection to that port at PKT_INTEGRITY (signed, cleartext). Every interface gets its own presentation context **and** its own NTLM context (bind or alter_context → challenge → auth3). Requests carry the IPID as object UUID. Calls: NTLMLogin (6) → ExecQuery (20) → Next (4, batches of 32 until WBEM_S_FALSE = 1). Every interface reference is released through IRemUnknown::RemRelease (5).
+4. **Encoders** (`wmi_proto.rs`) and **MS-WMIO decoder** (`wmio.rs`, objects → JSON). Both are golden-tested against bytes captured from Windows in `src/testdata/`. Values stay as WMI gives them (DMTF datetime strings, uint64 as numbers); the C# shim converts DMTF datetimes/intervals for typed models and returns `ExpandoObject`s for `Query<dynamic>`.
 
-**Gotcha:** `RealNdrCodec` falls back to canned stub results (`decode_stub_response` / `decode_stub_method`, e.g. `"Name": "STUB-PC"`) when decoding fails, the enumerator's "more" flag is set, or ExecMethod returns no output. A query that "succeeds" with stub-looking data did not actually decode a real response.
+**Legacy stack, not on the FFI path:** `transport.rs` `RealRpcTransport`/`AsyncRealRpcTransport`, `ndr/` (`RealNdrCodec`, which silently returns canned `"STUB-PC"` data when decoding fails), `wmi.rs` `IWbemLocator`/`IWbemServices`, `pool.rs`. These are still exported from the Rust API, but they never completed a real query. Don't build on them.
 
-Test doubles live in `src/test_support/` (compiled under `cfg(test)` or `test-support`). `IWbemLocator::new` only works with `test-support`; production code uses `with_components`.
+ExecMethod is not implemented on the DCOM path yet (`wmi_exec_method_json` returns an error).
+
+Test doubles live in `src/test_support/` (compiled under `cfg(test)` or `test-support`).
 
 ## References
 
