@@ -91,17 +91,18 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: linux-wmi-library
-        path: |
-          linux-wmi/target/release/libfabi_wmi.so
-          linux-wmi/target/release/libfabi_wmi.a
+        path: linux-wmi/target/release/libfabi_wmi.so
 
   test-dotnet:
     name: .NET E2E Tests
     needs: build-library
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write # dorny/test-reporter publishes a check run
     strategy:
       matrix:
-        dotnet: ['8.0.x']
+        dotnet: ['9.0.x']
 
     steps:
     - uses: actions/checkout@v4
@@ -129,9 +130,7 @@ jobs:
       run: dotnet build --configuration Release --no-restore
 
     - name: Copy library to test output
-      run: |
-        cp target/release/libfabi_wmi.so tests/e2e-dotnet/bin/Release/net8.0/ || \
-        cp target/release/libfabi_wmi.a tests/e2e-dotnet/bin/Release/net8.0/
+      run: cp target/release/libfabi_wmi.so tests/e2e-dotnet/bin/Release/net9.0/
 
     - name: Run tests (mock mode)
       if: github.event_name != 'workflow_dispatch' || github.event.inputs.skip_network_tests == 'true'
@@ -204,7 +203,7 @@ jobs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v3
       with:
-        dotnet-version: '8.0.x'
+        dotnet-version: '9.0.x'
 
     - name: Setup Rust
       uses: dtolnay/rust-toolchain@stable
@@ -251,7 +250,7 @@ jobs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v3
       with:
-        dotnet-version: '8.0.x'
+        dotnet-version: '9.0.x'
 
     - name: Download library artifact
       uses: actions/download-artifact@v4
@@ -272,7 +271,7 @@ jobs:
         WMI_TEST_SKIPNETWORKTESTS: true
         WMI_TEST_SKIPAUTHTESTS: true
       run: |
-        coverlet bin/Debug/net8.0/E2ETests.dll \
+        coverlet bin/Debug/net9.0/E2ETests.dll \
           --target "dotnet" \
           --targetargs "test --no-build --configuration Debug" \
           --format opencover \
