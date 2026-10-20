@@ -242,6 +242,26 @@ pub fn parse_m_interface_pointer(buf: &[u8], off: usize) -> Result<(ObjRef<'_>, 
     Ok((objref, end))
 }
 
+/// Append an NDR `MInterfacePointer` wrapping an `OBJREF_CUSTOM` (`iid`,
+/// `clsid`, and `data`) to `buf` (MS-DCOM 2.2.14 / 2.2.18.6).
+pub fn encode_custom_m_interface_pointer(
+    buf: &mut Vec<u8>,
+    iid: &[u8; 16],
+    clsid: &[u8; 16],
+    data: &[u8],
+) {
+    let objref_len = (48 + data.len()) as u32;
+    buf.write_u32::<LittleEndian>(objref_len).unwrap(); // max_count
+    buf.write_u32::<LittleEndian>(objref_len).unwrap(); // ulCntData
+    buf.extend_from_slice(OBJREF_SIGNATURE);
+    buf.write_u32::<LittleEndian>(OBJREF_CUSTOM).unwrap();
+    buf.extend_from_slice(iid);
+    buf.extend_from_slice(clsid);
+    buf.write_u32::<LittleEndian>(0).unwrap(); // cbExtension
+    buf.write_u32::<LittleEndian>(data.len() as u32).unwrap(); // size
+    buf.extend_from_slice(data);
+}
+
 /// Locate an `OBJREF_STANDARD` wrapped in an `MInterfacePointer` at or after
 /// `scan_from` in `stub`, validate `expected_iid` (and `expected_oxid` when
 /// given), and return its [`StdObjRef`].
@@ -894,6 +914,25 @@ mod tests {
         assert_eq!(
             hex::encode(resolved.ipid_rem_unknown),
             "00a40000e809000023bfdc109049aa7d"
+        );
+    }
+
+    #[test]
+    fn custom_m_interface_pointer_round_trips() {
+        let iid = [0x11u8; 16];
+        let clsid = [0x22u8; 16];
+        let payload = b"wmio-encoding-unit";
+        let mut buf = Vec::new();
+        encode_custom_m_interface_pointer(&mut buf, &iid, &clsid, payload);
+        let (parsed, end) = parse_m_interface_pointer(&buf, 0).unwrap();
+        assert_eq!(end, buf.len());
+        assert_eq!(
+            parsed,
+            ObjRef::Custom {
+                iid,
+                clsid,
+                data: payload,
+            }
         );
     }
 }

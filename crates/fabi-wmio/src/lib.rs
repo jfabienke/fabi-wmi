@@ -413,6 +413,337 @@ fn decode_scalar(
     Ok(v)
 }
 
+/// Write an `ENCODED_STRING` (MS-WMIO 2.2.77) to `heap` and return its offset.
+/// Uses compact ASCII (flag `0`) when every character is non-NUL ASCII, else
+/// UTF-16LE (flag `1`).
+fn push_encoded_string(heap: &mut Vec<u8>, s: &str) -> u32 {
+    let offset = heap.len() as u32;
+    if s.bytes().all(|b| b != 0 && b < 0x80) {
+        heap.push(0);
+        heap.extend_from_slice(s.as_bytes());
+        heap.push(0);
+    } else {
+        heap.push(1);
+        for u in s.encode_utf16() {
+            heap.extend_from_slice(&u.to_le_bytes());
+        }
+        heap.extend_from_slice(&0u16.to_le_bytes());
+    }
+    offset
+}
+
+/// Encode a scalar JSON value of `cim_type` into `slot` (in a ValueTable or
+/// array body) and `heap`.
+fn encode_scalar(
+    cim_type: u16,
+    val: &serde_json::Value,
+    slot: &mut [u8],
+    heap: &mut Vec<u8>,
+) -> Result<(), WmioError> {
+    let as_i64 = |v: &serde_json::Value| {
+        v.as_i64()
+            .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+    };
+    let as_u64 = |v: &serde_json::Value| {
+        v.as_u64()
+            .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+    };
+    let as_f64 = |v: &serde_json::Value| {
+        v.as_f64()
+            .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+    };
+
+    match cim_type {
+        CIM_BOOLEAN => {
+            let b = val.as_bool().ok_or(WmioError::UnsupportedType(cim_type))?;
+            let word: u16 = if b { 0xffff } else { 0x0000 };
+            slot[..2].copy_from_slice(&word.to_le_bytes());
+        }
+        CIM_SINT8 => {
+            let n = as_i64(val)
+                .and_then(|v| i8::try_from(v).ok())
+                .ok_or(WmioError::UnsupportedType(cim_type))?;
+            slot[..1].copy_from_slice(&n.to_le_bytes());
+        }
+        CIM_UINT8 => {
+            let n = as_u64(val)
+                .and_then(|v| u8::try_from(v).ok())
+                .ok_or(WmioError::UnsupportedType(cim_type))?;
+            slot[..1].copy_from_slice(&n.to_le_bytes());
+        }
+        CIM_SINT16 => {
+            let n = as_i64(val)
+                .and_then(|v| i16::try_from(v).ok())
+                .ok_or(WmioError::UnsupportedType(cim_type))?;
+            slot[..2].copy_from_slice(&n.to_le_bytes());
+        }
+        CIM_UINT16 => {
+            let n = as_u64(val)
+                .and_then(|v| u16::try_from(v).ok())
+                .ok_or(WmioError::UnsupportedType(cim_type))?;
+            slot[..2].copy_from_slice(&n.to_le_bytes());
+        }
+        CIM_SINT32 => {
+            let n = as_i64(val)
+                .and_then(|v| i32::try_from(v).ok())
+                .ok_or(WmioError::UnsupportedType(cim_type))?;
+            slot[..4].copy_from_slice(&n.to_le_bytes());
+        }
+        CIM_UINT32 => {
+            let n = as_u64(val)
+                .and_then(|v| u32::try_from(v).ok())
+                .ok_or(WmioError::UnsupportedType(cim_type))?;
+            slot[..4].copy_from_slice(&n.to_le_bytes());
+        }
+        CIM_SINT64 => {
+            let n = as_i64(val).ok_or(WmioError::UnsupportedType(cim_type))?;
+            slot[..8].copy_from_slice(&n.to_le_bytes());
+        }
+        CIM_UINT64 => {
+            let n = as_u64(val).ok_or(WmioError::UnsupportedType(cim_type))?;
+            slot[..8].copy_from_slice(&n.to_le_bytes());
+        }
+        CIM_REAL32 => {
+            let n = as_f64(val).ok_or(WmioError::UnsupportedType(cim_type))? as f32;
+            slot[..4].copy_from_slice(&n.to_le_bytes());
+        }
+        CIM_REAL64 => {
+            let n = as_f64(val).ok_or(WmioError::UnsupportedType(cim_type))?;
+            slot[..8].copy_from_slice(&n.to_le_bytes());
+        }
+        CIM_CHAR16 => {
+            let ch = if let Some(s) = val.as_str() {
+                let mut it = s.encode_utf16();
+                let first = it.next().ok_or(WmioError::UnsupportedType(cim_type))?;
+                if it.next().is_some() {
+                    return Err(WmioError::UnsupportedType(cim_type));
+                }
+                first
+            } else {
+                as_u64(val)
+                    .and_then(|v| u16::try_from(v).ok())
+                    .ok_or(WmioError::UnsupportedType(cim_type))?
+            };
+            slot[..2].copy_from_slice(&ch.to_le_bytes());
+        }
+        CIM_STRING | CIM_DATETIME | CIM_REFERENCE => {
+            let s = val.as_str().ok_or(WmioError::UnsupportedType(cim_type))?;
+            let heap_ref = push_encoded_string(heap, s);
+            slot[..4].copy_from_slice(&heap_ref.to_le_bytes());
+        }
+        other => return Err(WmioError::UnsupportedType(other)),
+    }
+    Ok(())
+}
+
+/// Encode a property value (scalar or array) into `value_table` at `value_at`.
+fn encode_value(
+    cim_type: u16,
+    is_array: bool,
+    val: &serde_json::Value,
+    value_table: &mut [u8],
+    value_at: usize,
+    heap: &mut Vec<u8>,
+) -> Result<(), WmioError> {
+    let elem_size = value_size(cim_type).ok_or(WmioError::UnsupportedType(if is_array {
+        0x2000 | cim_type
+    } else {
+        cim_type
+    }))?;
+    if !is_array {
+        let slot = value_table
+            .get_mut(value_at..value_at + elem_size)
+            .ok_or(WmioError::Malformed)?;
+        return encode_scalar(cim_type, val, slot, heap);
+    }
+    let arr = val
+        .as_array()
+        .ok_or(WmioError::UnsupportedType(0x2000 | cim_type))?;
+    let total_elems_bytes = arr
+        .len()
+        .checked_mul(elem_size)
+        .ok_or(WmioError::Malformed)?;
+    let array_ref = heap.len() as u32;
+    let slot = value_table
+        .get_mut(value_at..value_at + 4)
+        .ok_or(WmioError::Malformed)?;
+    slot.copy_from_slice(&array_ref.to_le_bytes());
+
+    // Reserve array header + elements in `heap` first so any string elements
+    // appended afterwards land after the array body.
+    heap.extend_from_slice(&(arr.len() as u32).to_le_bytes());
+    let body_start = heap.len();
+    heap.resize(body_start + total_elems_bytes, 0);
+    for (i, item) in arr.iter().enumerate() {
+        let mut elem_slot = vec![0u8; elem_size];
+        encode_scalar(cim_type, item, &mut elem_slot, heap)?;
+        let at = body_start + i * elem_size;
+        heap[at..at + elem_size].copy_from_slice(&elem_slot);
+    }
+    Ok(())
+}
+
+/// Build an MS-WMIO instance `EncodingUnit` from any class or template instance
+/// `EncodingUnit` (`template_wmio`), setting the properties present in `props`
+/// (matched case-insensitively) and marking unspecified properties as
+/// class-default (`0b11`).
+pub fn spawn_instance(
+    template_wmio: &[u8],
+    props: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Vec<u8>, WmioError> {
+    let header = parse_object_header(template_wmio)?;
+    let class = parse_class_part(template_wmio, header.body_offset)?;
+    let class_part_bytes = template_wmio
+        .get(header.body_offset..header.body_offset + class.encoding_length)
+        .ok_or(WmioError::Malformed)?;
+
+    let nd_size = if class.properties.is_empty() {
+        0
+    } else {
+        (class.properties.len() - 1) / 4 + 1
+    };
+    let value_table_len = class
+        .nd_value_table_len
+        .checked_sub(nd_size)
+        .ok_or(WmioError::Malformed)?;
+    let mut nd_table = vec![0u8; nd_size];
+    let mut value_table = vec![0u8; value_table_len];
+    let mut instance_heap = Vec::new();
+    let class_name_ref = push_encoded_string(&mut instance_heap, &class.class_name);
+
+    let set_nd_bits = |table: &mut [u8], order: usize, bits: u8| {
+        let shift = 2 * (order % 4);
+        table[order / 4] = (table[order / 4] & !(0b11 << shift)) | ((bits & 0b11) << shift);
+    };
+
+    for p in &class.properties {
+        if p.order >= class.properties.len() {
+            return Err(WmioError::Malformed);
+        }
+        let found = props.get(&p.name).or_else(|| {
+            props
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(&p.name))
+                .map(|(_, v)| v)
+        });
+        match found {
+            None => set_nd_bits(&mut nd_table, p.order, 0b11), // NULL + inherited default
+            Some(serde_json::Value::Null) => set_nd_bits(&mut nd_table, p.order, 0b01), // NULL
+            Some(val) => {
+                set_nd_bits(&mut nd_table, p.order, 0b00);
+                encode_value(
+                    p.cim_type,
+                    p.is_array,
+                    val,
+                    &mut value_table,
+                    p.value_table_offset,
+                    &mut instance_heap,
+                )?;
+            }
+        }
+    }
+
+    // InstanceType (MS-WMIO 2.2.54):
+    // EncodingLength(4) + InstanceFlags(1) + InstanceClassName(4) +
+    // NdTable + ValueTable + InstanceQualifierSet(4 + 1) + InstanceHeap(4 + len).
+    let instance_encoding_len = 9 + class.nd_value_table_len + 4 + 1 + 4 + instance_heap.len();
+    let object_encoding_len = 1 + class_part_bytes.len() + instance_encoding_len;
+    let mut out = Vec::with_capacity(8 + object_encoding_len);
+    out.extend_from_slice(&WMIO_SIGNATURE.to_le_bytes());
+    out.extend_from_slice(&(object_encoding_len as u32).to_le_bytes());
+    out.push(OBJECT_FLAG_INSTANCE);
+    out.extend_from_slice(class_part_bytes);
+    out.extend_from_slice(&(instance_encoding_len as u32).to_le_bytes());
+    out.push(0); // InstanceFlags
+    out.extend_from_slice(&class_name_ref.to_le_bytes());
+    out.extend_from_slice(&nd_table);
+    out.extend_from_slice(&value_table);
+    out.extend_from_slice(&4u32.to_le_bytes()); // empty QualifierSet
+    out.push(1); // InstancePropQualifierSet flag = 1 (no per-property qualifiers)
+    out.extend_from_slice(&((instance_heap.len() as u32) | 0x8000_0000).to_le_bytes());
+    out.extend_from_slice(&instance_heap);
+    Ok(out)
+}
+
+/// Extract the `InputSignature` class `EncodingUnit` for `method_name` from a
+/// CIM class `EncodingUnit` (`class_wmio`, returned by `IWbemServices::GetObject`).
+/// Returns `Ok(None)` when the method exists but takes no input parameters.
+pub fn extract_method_in_params(
+    class_wmio: &[u8],
+    method_name: &str,
+) -> Result<Option<Vec<u8>>, WmioError> {
+    let header = parse_object_header(class_wmio)?;
+    if header.is_instance {
+        return Err(WmioError::Unsupported);
+    }
+    let class = parse_class_part(class_wmio, header.body_offset)?;
+    // MethodsPart (MS-WMIO 2.2.41): EncodingLength(4), MethodCount(2),
+    // MethodCountPadding(2), MethodCount * MethodDescription(24), MethodHeap.
+    let methods_start = header
+        .body_offset
+        .checked_add(class.encoding_length)
+        .ok_or(WmioError::Malformed)?;
+    let _methods_len = rd_u32(class_wmio, methods_start)?;
+    let method_count = u16::from_le_bytes(
+        class_wmio
+            .get(methods_start + 4..methods_start + 6)
+            .ok_or(WmioError::Malformed)?
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    let descs_start = methods_start + 8;
+    let descs_len = method_count.checked_mul(24).ok_or(WmioError::Malformed)?;
+    let heap_hdr_at = descs_start
+        .checked_add(descs_len)
+        .ok_or(WmioError::Malformed)?;
+    let heap_len = (rd_u32(class_wmio, heap_hdr_at)? & 0x7fff_ffff) as usize;
+    let method_heap = class_wmio
+        .get(heap_hdr_at + 4..heap_hdr_at + 4 + heap_len)
+        .ok_or(WmioError::Malformed)?;
+
+    for i in 0..method_count {
+        let desc_at = descs_start + i * 24;
+        let name_ref = (rd_u32(class_wmio, desc_at)? & 0x7fff_ffff) as usize;
+        let name = encoded_string(method_heap, name_ref)?;
+        if !name.eq_ignore_ascii_case(method_name) {
+            continue;
+        }
+        // InputSignature is at offset 16 of MethodDescription (0xffff_ffff = none).
+        let input_sig = rd_u32(class_wmio, desc_at + 16)?;
+        if input_sig == 0xffff_ffff {
+            return Ok(None);
+        }
+        let sig_off = (input_sig & 0x7fff_ffff) as usize;
+        let block_len = rd_u32(method_heap, sig_off)? as usize;
+        if block_len == 0 {
+            return Ok(None);
+        }
+        let object_block = method_heap
+            .get(sig_off + 4..sig_off + 4 + block_len)
+            .ok_or(WmioError::Malformed)?;
+        let mut unit = Vec::with_capacity(8 + block_len);
+        unit.extend_from_slice(&WMIO_SIGNATURE.to_le_bytes());
+        unit.extend_from_slice(&(block_len as u32).to_le_bytes());
+        unit.extend_from_slice(object_block);
+        return Ok(Some(unit));
+    }
+    Err(WmioError::Malformed)
+}
+
+/// Build the `pInParams` WMIO instance `EncodingUnit` for `method_name` on
+/// `class_wmio` populated with `params`. Returns `Ok(None)` if the method has
+/// no `InputSignature`.
+pub fn encode_method_in_params(
+    class_wmio: &[u8],
+    method_name: &str,
+    params: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<Vec<u8>>, WmioError> {
+    match extract_method_in_params(class_wmio, method_name)? {
+        Some(in_sig_wmio) => spawn_instance(&in_sig_wmio, params).map(Some),
+        None => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,5 +989,95 @@ mod tests {
         assert_eq!(encoded_string(&ascii, 0).unwrap(), "ABC");
         let uni = [1u8, b'A', 0, b'B', 0, 0, 0];
         assert_eq!(encoded_string(&uni, 0).unwrap(), "AB");
+    }
+
+    #[test]
+    fn spawn_instance_matches_windows_reference_bytes() {
+        let orig = decode_object(WMIO_RESULT).unwrap();
+        let spawned = spawn_instance(WMIO_RESULT, orig.as_object().unwrap()).unwrap();
+        // WMIO_RESULT has 885 bytes of EncodingUnit header + ObjectFlags +
+        // ClassPart(763) + InstanceType(113), followed by zero padding.
+        // Byte 8 in WMIO_RESULT has flag 0x10 set alongside OBJECT_FLAG_INSTANCE (0x02);
+        // everything from ClassPart (9..885) matches byte-for-byte.
+        assert_eq!(spawned.len(), 885);
+        assert_eq!(&spawned[9..], &WMIO_RESULT[9..885]);
+        assert_eq!(decode_object(&spawned).unwrap(), orig);
+    }
+
+    #[test]
+    fn spawn_instance_round_trips_scalars_arrays_nulls_and_defaults() {
+        use serde_json::json;
+        let props = json!({
+            "IPAddress": ["192.0.2.1", "2001:db8::1"],
+            "GatewayCostMetric": [10, 20],
+            "IPEnabled": true,
+            "Index": 42,
+            "MACAddress": null,
+        });
+        let spawned = spawn_instance(WMIO_NIC, props.as_object().unwrap()).unwrap();
+        let decoded = decode_object(&spawned).unwrap();
+        assert_eq!(decoded["IPAddress"], json!(["192.0.2.1", "2001:db8::1"]));
+        assert_eq!(decoded["GatewayCostMetric"], json!([10, 20]));
+        assert_eq!(decoded["IPEnabled"], json!(true));
+        assert_eq!(decoded["Index"], json!(42));
+        assert_eq!(decoded["MACAddress"], json!(null));
+    }
+
+    #[test]
+    fn encode_method_in_params_builds_valid_parameter_instance() {
+        use serde_json::json;
+        // Build a synthetic class EncodingUnit whose MethodsPart has one method
+        // "Create" taking WMIO_RESULT's ClassPart as its InputSignature.
+        let cp = parse_class_part(WMIO_RESULT, 9).unwrap();
+        let class_part = &WMIO_RESULT[9..9 + cp.encoding_length];
+
+        // InputSignature ObjectBlock: ObjectFlags(0x01 = class) + ClassPart + empty MethodsPart.
+        let mut sig_object_block = Vec::new();
+        sig_object_block.push(0x01); // ObjectFlags = class
+        sig_object_block.extend_from_slice(class_part);
+        sig_object_block.extend_from_slice(&12u32.to_le_bytes()); // MethodsPart EncodingLength
+        sig_object_block.extend_from_slice(&0u16.to_le_bytes()); // MethodCount = 0
+        sig_object_block.extend_from_slice(&0u16.to_le_bytes()); // Padding
+        sig_object_block.extend_from_slice(&0x8000_0000u32.to_le_bytes()); // empty MethodHeap
+
+        let mut method_heap = Vec::new();
+        let name_ref = push_encoded_string(&mut method_heap, "Create");
+        let sig_ref = method_heap.len() as u32;
+        method_heap.extend_from_slice(&(sig_object_block.len() as u32).to_le_bytes());
+        method_heap.extend_from_slice(&sig_object_block);
+
+        let methods_len = 8 + 24 + 4 + method_heap.len();
+        let mut methods_part = Vec::new();
+        methods_part.extend_from_slice(&(methods_len as u32).to_le_bytes());
+        methods_part.extend_from_slice(&1u16.to_le_bytes()); // 1 method
+        methods_part.extend_from_slice(&0u16.to_le_bytes()); // padding
+                                                             // MethodDescription (24 bytes): Name(4), Flags(1), Pad(3), Origin(4), Quals(4), InSig(4), OutSig(4)
+        methods_part.extend_from_slice(&name_ref.to_le_bytes());
+        methods_part.extend_from_slice(&[0, 0, 0, 0]);
+        methods_part.extend_from_slice(&0u32.to_le_bytes());
+        methods_part.extend_from_slice(&0u32.to_le_bytes());
+        methods_part.extend_from_slice(&sig_ref.to_le_bytes());
+        methods_part.extend_from_slice(&0xffff_ffffu32.to_le_bytes());
+        methods_part.extend_from_slice(&((method_heap.len() as u32) | 0x8000_0000).to_le_bytes());
+        methods_part.extend_from_slice(&method_heap);
+
+        let obj_len = 1 + class_part.len() + methods_part.len();
+        let mut class_wmio = Vec::new();
+        class_wmio.extend_from_slice(&WMIO_SIGNATURE.to_le_bytes());
+        class_wmio.extend_from_slice(&(obj_len as u32).to_le_bytes());
+        class_wmio.push(0x01); // ObjectFlags = class
+        class_wmio.extend_from_slice(class_part);
+        class_wmio.extend_from_slice(&methods_part);
+
+        let params = json!({
+            "Name": "SERVER01",
+            "Domain": "corp.example",
+        });
+        let in_params = encode_method_in_params(&class_wmio, "create", params.as_object().unwrap())
+            .unwrap()
+            .expect("Create has an InputSignature");
+        let decoded = decode_object(&in_params).unwrap();
+        assert_eq!(decoded["Name"], "SERVER01");
+        assert_eq!(decoded["Domain"], "corp.example");
     }
 }

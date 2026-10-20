@@ -9,7 +9,10 @@
 #![allow(dead_code)]
 
 use byteorder::{LittleEndian, WriteBytesExt};
-use fabi_dcom::{find_std_objref, parse_m_interface_pointer, DcomError, ObjRef};
+use fabi_dcom::{
+    encode_custom_m_interface_pointer, find_std_objref, parse_m_interface_pointer, DcomError,
+    ObjRef,
+};
 use thiserror::Error;
 
 pub(crate) use fabi_dcom::{encode_orpcthis, encode_rem_release, InterfaceRef, IID_IREMUNKNOWN};
@@ -38,6 +41,9 @@ pub(crate) const IID_IWBEM_SERVICES: [u8; 16] =
 /// IID of IEnumWbemClassObject (returned by IWbemServices::ExecQuery).
 pub(crate) const IID_IENUM_WBEM_CLASS_OBJECT: [u8; 16] =
     hex_literal::hex!("e147790231d7ce11a357000000000001");
+/// IID of IWbemClassObject {dc12a681-737f-11cf-884d-00aa004b2e24}.
+pub(crate) const IID_IWBEM_CLASS_OBJECT: [u8; 16] =
+    hex_literal::hex!("81a612dc7f73cf11884d00aa004b2e24");
 
 /// Base NDR referent id for the first unique pointer in a stub. The exact
 /// value is immaterial to the server as long as referents are non-zero and
@@ -115,6 +121,61 @@ pub(crate) fn encode_exec_query(causality_id: &[u8; 16], wql: &str, lflags: u32)
     encode_bstr(&mut buf, REFERENT_BASE + 4, wql);
     buf.write_u32::<LittleEndian>(lflags).unwrap();
     buf.write_u32::<LittleEndian>(0).unwrap(); // pCtx: null ptr
+    buf
+}
+
+/// Encode the IWbemServices::GetObject (opnum 6) request stub (MS-WMI
+/// 3.1.4.3.4): ORPCTHIS, strObjectPath, lFlags, null pCtx, null [in] ppObject,
+/// null [in] ppCallResult.
+pub(crate) fn encode_get_object(
+    causality_id: &[u8; 16],
+    object_path: &str,
+    lflags: u32,
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+    encode_orpcthis(&mut buf, causality_id);
+    encode_bstr(&mut buf, REFERENT_BASE, object_path);
+    buf.write_u32::<LittleEndian>(lflags).unwrap();
+    buf.write_u32::<LittleEndian>(0).unwrap(); // pCtx: null ptr
+    buf.write_u32::<LittleEndian>(0).unwrap(); // ppObject: null on input
+    buf.write_u32::<LittleEndian>(0).unwrap(); // ppCallResult: null on input
+    buf
+}
+
+/// Encode the IWbemServices::ExecMethod (opnum 24) request stub (MS-WMI
+/// 3.1.4.3.22): ORPCTHIS, strObjectPath, strMethodName, lFlags, null pCtx,
+/// pInParams (null or MInterfacePointer wrapping OBJREF_CUSTOM), null [in]
+/// ppOutParams, null [in] ppCallResult.
+pub(crate) fn encode_exec_method(
+    causality_id: &[u8; 16],
+    object_path: &str,
+    method_name: &str,
+    lflags: u32,
+    in_params_wmio: Option<&[u8]>,
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+    encode_orpcthis(&mut buf, causality_id);
+    encode_bstr(&mut buf, REFERENT_BASE, object_path);
+    encode_bstr(&mut buf, REFERENT_BASE + 4, method_name);
+    buf.write_u32::<LittleEndian>(lflags).unwrap();
+    buf.write_u32::<LittleEndian>(0).unwrap(); // pCtx: null ptr
+    match in_params_wmio {
+        Some(wmio) => {
+            buf.write_u32::<LittleEndian>(REFERENT_BASE + 8).unwrap();
+            encode_custom_m_interface_pointer(
+                &mut buf,
+                &IID_IWBEM_CLASS_OBJECT,
+                &CLSID_WBEM_CLASS_OBJECT,
+                wmio,
+            );
+            align4(&mut buf, 0);
+        }
+        None => {
+            buf.write_u32::<LittleEndian>(0).unwrap(); // pInParams: null ptr
+        }
+    }
+    buf.write_u32::<LittleEndian>(0).unwrap(); // ppOutParams: null on input
+    buf.write_u32::<LittleEndian>(0).unwrap(); // ppCallResult: null on input
     buf
 }
 
@@ -241,6 +302,30 @@ pub(crate) fn parse_next_response(stub: &[u8]) -> Result<Vec<WmioBlob>, WmiProto
         });
     }
     Ok(blobs)
+}
+
+/// Parse a synchronous `IWbemServices::GetObject` or `IWbemServices::ExecMethod`
+/// response stub (ORPCTHAT, `[out, unique] ppObject`/`ppOutParams`, `[out,
+/// unique] ppCallResult`, HRESULT). Returns `Ok(None)` when the output object
+/// pointer is NULL (e.g. a void method with no output parameters).
+pub(crate) fn parse_single_object_response(stub: &[u8]) -> Result<Option<WmioBlob>, WmiProtoError> {
+    if stub.len() < 20 {
+        return Err(WmiProtoError::Malformed);
+    }
+    let hr = rd_u32(stub, stub.len() - 4)?;
+    if hr != 0 {
+        return Err(WmiProtoError::Hresult(hr));
+    }
+    // ORPCTHAT: flags(4), extensions pointer(4).
+    let out_referent = rd_u32(stub, 8)?;
+    if out_referent == 0 {
+        return Ok(None);
+    }
+    let (objref, _) = parse_m_interface_pointer(stub, 12).map_err(|_| WmiProtoError::Malformed)?;
+    let data = expect_wbem_custom(objref)?;
+    Ok(Some(WmioBlob {
+        data: data.to_vec(),
+    }))
 }
 
 /// Validate an OBJREF_CUSTOM for IWbemClassObject and return its WMIO payload.
@@ -539,6 +624,61 @@ mod tests {
         assert_eq!(
             parse_objref_custom(&objref),
             Err(WmiProtoError::NotWbemObject)
+        );
+    }
+
+    #[test]
+    fn encode_get_object_and_exec_method_are_well_formed() {
+        let cid = [0x11u8; 16];
+        let get_stub = encode_get_object(&cid, "Win32_Process", 0);
+        // ORPCTHIS(32) + BSTR("Win32_Process\0": 16 + 14*2 = 44) + lFlags(4) + pCtx(4) + ppObject(4) + ppCallResult(4) = 92
+        assert_eq!(get_stub.len(), 92);
+        assert_eq!(&get_stub[32..36], &REFERENT_BASE.to_le_bytes());
+        assert_eq!(&get_stub[76..92], &[0u8; 16]);
+
+        let exec_no_in = encode_exec_method(&cid, "Win32_Process", "Create", 0, None);
+        // ORPCTHIS(32) + BSTR("Win32_Process\0": 44) + BSTR("Create\0": 16 + 14 + 2 pad = 32)
+        // + lFlags(4) + pCtx(4) + pInParams(4) + ppOutParams(4) + ppCallResult(4) = 128
+        assert_eq!(exec_no_in.len(), 128);
+        assert_eq!(&exec_no_in[108..128], &[0u8; 20]);
+
+        let exec_with_in =
+            encode_exec_method(&cid, "Win32_Process", "Create", 0, Some(WMIO_RESULT));
+        assert_eq!(&exec_with_in[116..120], &(REFERENT_BASE + 8).to_le_bytes());
+        let (objref, end) = parse_m_interface_pointer(&exec_with_in, 120).unwrap();
+        assert_eq!(expect_wbem_custom(objref).unwrap(), WMIO_RESULT);
+        let aligned_end = (end + 3) & !3;
+        assert_eq!(&exec_with_in[aligned_end..], &[0u8; 8]); // ppOutParams(0), ppCallResult(0)
+    }
+
+    #[test]
+    fn parse_single_object_response_extracts_wmio_or_none() {
+        // Build a synthetic ExecMethod/GetObject response wrapping WMIO_RESULT.
+        let mut resp = vec![0u8; 8]; // ORPCTHAT
+        resp.extend_from_slice(&REFERENT_BASE.to_le_bytes()); // ppOutParams referent
+        encode_custom_m_interface_pointer(
+            &mut resp,
+            &IID_IWBEM_CLASS_OBJECT,
+            &CLSID_WBEM_CLASS_OBJECT,
+            WMIO_RESULT,
+        );
+        align4(&mut resp, 0);
+        resp.extend_from_slice(&0u32.to_le_bytes()); // ppCallResult = NULL
+        resp.extend_from_slice(&0u32.to_le_bytes()); // S_OK
+        let blob = parse_single_object_response(&resp).unwrap().unwrap();
+        assert_eq!(blob.data, WMIO_RESULT);
+
+        // Null ppOutParams (void method with no output object).
+        let mut empty_resp = vec![0u8; 16]; // ORPCTHAT(8) + ppOutParams(4) + ppCallResult(4)
+        empty_resp.extend_from_slice(&0u32.to_le_bytes()); // S_OK
+        assert_eq!(parse_single_object_response(&empty_resp).unwrap(), None);
+
+        // Failure HRESULT.
+        let mut err_resp = vec![0u8; 16];
+        err_resp.extend_from_slice(&0x8004_102Eu32.to_le_bytes()); // WBEM_E_INVALID_METHOD
+        assert_eq!(
+            parse_single_object_response(&err_resp),
+            Err(WmiProtoError::Hresult(0x8004_102E))
         );
     }
 }

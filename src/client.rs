@@ -23,7 +23,7 @@ use fabi_dcerpc::{
     RpcError, SspiNtlmClient, AUTH_LEVEL_PKT_INTEGRITY, RPC_IO_TIMEOUT,
 };
 use fabi_dcom::{self as dcom, DcomError};
-use fabi_wmio::{decode_object, WmioError};
+use fabi_wmio::{decode_object, encode_method_in_params, WmioError};
 
 /// Everything that can go wrong talking to WMI. [`Error::hresult`] gives the
 /// Windows status code when the server reported one.
@@ -54,7 +54,9 @@ impl From<std::io::Error> for Error {
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 const OPNUM_NTLM_LOGIN: u16 = 6;
+const OPNUM_GET_OBJECT: u16 = 6;
 const OPNUM_EXEC_QUERY: u16 = 20;
+const OPNUM_EXEC_METHOD: u16 = 24;
 const OPNUM_ENUM_NEXT: u16 = 4;
 const OPNUM_REM_RELEASE: u16 = 5;
 /// lTimeout for IEnumWbemClassObject::Next: wait until objects are ready.
@@ -277,6 +279,84 @@ impl WmiClient {
             .collect()
     }
 
+    /// Execute a CIM method (`method`) on `object_path` (a class name for a
+    /// static method such as `"Win32_Process"`, or an instance path such as
+    /// `r#"Win32_Process.Handle="1234""#`) with input parameters `in_params`
+    /// (a JSON object or `null`) and return the output parameters object.
+    pub fn exec_method(
+        &mut self,
+        object_path: &str,
+        method: &str,
+        in_params: &serde_json::Value,
+    ) -> Result<serde_json::Value, Error> {
+        if self.broken {
+            return Err(Error::Protocol(
+                "connection was lost by an earlier error; reconnect".into(),
+            ));
+        }
+        let result = self.run_exec_method(object_path, method, in_params);
+        if let Err(err) = &result {
+            self.broken |= err.is_connection_lost();
+        }
+        result
+    }
+
+    /// Execute `method` on `object_path` and deserialize the output parameters
+    /// into `T`.
+    pub fn exec_method_as<T: DeserializeOwned>(
+        &mut self,
+        object_path: &str,
+        method: &str,
+        in_params: &serde_json::Value,
+    ) -> Result<T, Error> {
+        let out = self.exec_method(object_path, method, in_params)?;
+        serde_json::from_value(out).map_err(Error::from)
+    }
+
+    fn run_exec_method(
+        &mut self,
+        object_path: &str,
+        method: &str,
+        in_params: &serde_json::Value,
+    ) -> Result<serde_json::Value, Error> {
+        let in_wmio = match in_params {
+            serde_json::Value::Null => None,
+            serde_json::Value::Object(map) if map.is_empty() => None,
+            serde_json::Value::Object(map) => {
+                let class_name = class_name_from_path(object_path);
+                let class_resp = self.conn.call(
+                    &mut self.services,
+                    OPNUM_GET_OBJECT,
+                    &wmi_proto::encode_get_object(&self.causality_id, class_name, 0),
+                )?;
+                let class_blob = wmi_proto::parse_single_object_response(&class_resp)?
+                    .ok_or(WmiProtoError::Malformed)?;
+                encode_method_in_params(&class_blob.data, method, map)?
+            }
+            _ => {
+                return Err(Error::Protocol(
+                    "ExecMethod input parameters must be a JSON object or null".into(),
+                ))
+            }
+        };
+
+        let resp = self.conn.call(
+            &mut self.services,
+            OPNUM_EXEC_METHOD,
+            &wmi_proto::encode_exec_method(
+                &self.causality_id,
+                object_path,
+                method,
+                0,
+                in_wmio.as_deref(),
+            ),
+        )?;
+        match wmi_proto::parse_single_object_response(&resp)? {
+            Some(out_blob) => Ok(decode_object(&out_blob.data)?),
+            None => Ok(serde_json::json!({})),
+        }
+    }
+
     fn run_query(&mut self, wql: &str) -> Result<Vec<serde_json::Value>, Error> {
         let resp = self.conn.call(
             &mut self.services,
@@ -358,6 +438,19 @@ fn release(
     Ok(wmi_proto::parse_rem_release_response(&resp)?)
 }
 
+/// Extract the CIM class name from an object path (e.g. `"Win32_Process"`,
+/// `r#"Win32_Process.Handle="1234""#`, or `r#"\\.\root\cimv2:Win32_Process=@"#`).
+pub(crate) fn class_name_from_path(object_path: &str) -> &str {
+    let after_colon = object_path
+        .rsplit_once(':')
+        .map_or(object_path, |(_, rest)| rest);
+    after_colon
+        .split(['.', '='])
+        .next()
+        .unwrap_or(after_colon)
+        .trim()
+}
+
 /// Run `wql` in `namespace` on `host` and return one JSON object per result.
 /// Connects, queries, and releases everything; use [`WmiClient`] to run
 /// several queries over one login.
@@ -370,6 +463,20 @@ pub fn query(
     WmiClient::connect(host, creds, namespace)?.query(wql)
 }
 
+/// Execute `method` on `object_path` in `namespace` on `host` and return the
+/// output parameters JSON object. Connects, invokes the method, and releases
+/// everything; use [`WmiClient`] to reuse one login across calls.
+pub fn exec_method(
+    host: &str,
+    creds: &Credentials,
+    namespace: &str,
+    object_path: &str,
+    method: &str,
+    in_params: &serde_json::Value,
+) -> Result<serde_json::Value, Error> {
+    WmiClient::connect(host, creds, namespace)?.exec_method(object_path, method, in_params)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,5 +487,19 @@ mod tests {
         assert_eq!(namespace_path("root/cimv2"), "//./root/cimv2");
         assert_eq!(namespace_path("//./root/cimv2"), "//./root/cimv2");
         assert_eq!(namespace_path(r"\\.\root\cimv2"), "//./root/cimv2");
+    }
+
+    #[test]
+    fn class_name_from_path_extracts_class() {
+        assert_eq!(class_name_from_path("Win32_Process"), "Win32_Process");
+        assert_eq!(
+            class_name_from_path(r#"Win32_Process.Handle="1234""#),
+            "Win32_Process"
+        );
+        assert_eq!(
+            class_name_from_path(r#"\\SAI-NAV009-2\root\cimv2:Win32_Process.Handle="724""#),
+            "Win32_Process"
+        );
+        assert_eq!(class_name_from_path("MySingleton=@"), "MySingleton");
     }
 }

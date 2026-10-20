@@ -10,6 +10,8 @@ use crate::wmi_proto::WmiProtoError;
 
 /// WBEM_E_INVALID_CLASS, what Windows returns for an unknown class.
 const WBEM_E_INVALID_CLASS: u32 = 0x8004_1010;
+/// WBEM_E_METHOD_NOT_IMPLEMENTED, what Windows returns for an unknown method.
+const WBEM_E_METHOD_NOT_IMPLEMENTED: u32 = 0x8004_1055;
 
 /// Canned rows for `SELECT ... FROM <class>`, keyed on the class name.
 pub(crate) fn query(wql: &str) -> Result<Vec<Value>, Error> {
@@ -37,4 +39,32 @@ pub(crate) fn query(wql: &str) -> Result<Vec<Value>, Error> {
         _ => return Err(Error::Wmi(WmiProtoError::Hresult(WBEM_E_INVALID_CLASS))),
     };
     Ok(rows)
+}
+
+/// Canned output parameters for `ExecMethod(object_path, method, params)`.
+pub(crate) fn exec_method(
+    object_path: &str,
+    method: &str,
+    _params: &Value,
+) -> Result<Value, Error> {
+    let class = crate::client::class_name_from_path(object_path).to_ascii_uppercase();
+    let method_upper = method.to_ascii_uppercase();
+    match (class.as_str(), method_upper.as_str()) {
+        ("WIN32_PROCESS", "GETOWNER") => Ok(json!({
+            "ReturnValue": 0,
+            "User": "SYSTEM",
+            "Domain": "NT AUTHORITY",
+        })),
+        ("WIN32_PROCESS", "CREATE") => Ok(json!({
+            "ReturnValue": 0,
+            "ProcessId": 4242,
+        })),
+        ("WIN32_PROCESS", "TERMINATE") => Ok(json!({
+            "ReturnValue": 0,
+        })),
+        ("WIN32_PROCESS" | "WIN32_COMPUTERSYSTEM" | "WIN32_OPERATINGSYSTEM", _) => Err(Error::Wmi(
+            WmiProtoError::Hresult(WBEM_E_METHOD_NOT_IMPLEMENTED),
+        )),
+        _ => Err(Error::Wmi(WmiProtoError::Hresult(WBEM_E_INVALID_CLASS))),
+    }
 }
