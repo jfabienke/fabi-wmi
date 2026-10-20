@@ -16,7 +16,7 @@ namespace LinuxWmi.E2ETests.Tests
     {
         public Priority1_ErrorHandlingTests(ITestOutputHelper output) : base(output) { }
 
-        [Fact]
+        [SkippableFact]
         public void Test030_InvalidCredentials_ThrowsAuthenticationError()
         {
             // Arrange
@@ -44,7 +44,7 @@ namespace LinuxWmi.E2ETests.Tests
             Output.WriteLine("✅ Invalid credentials correctly resulted in authentication error");
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test031_InvalidUsername_ThrowsAuthenticationError()
         {
             // Arrange
@@ -72,7 +72,7 @@ namespace LinuxWmi.E2ETests.Tests
             Output.WriteLine("✅ Invalid username correctly resulted in authentication error");
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test032_UnreachableHost_ThrowsNetworkError()
         {
             // Arrange
@@ -102,7 +102,7 @@ namespace LinuxWmi.E2ETests.Tests
             Output.WriteLine($"✅ Unreachable host {unreachableHost} correctly resulted in network error");
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test033_InvalidPort_ThrowsConnectionError()
         {
             // Arrange
@@ -132,7 +132,7 @@ namespace LinuxWmi.E2ETests.Tests
             Output.WriteLine("✅ Invalid port correctly resulted in connection error");
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test034_InvalidWQLQuery_ThrowsQueryError()
         {
             // Arrange
@@ -152,7 +152,7 @@ namespace LinuxWmi.E2ETests.Tests
             Output.WriteLine("✅ Invalid WQL syntax correctly resulted in query error");
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test035_QueryNonExistentClass_ThrowsError()
         {
             // Arrange
@@ -172,7 +172,7 @@ namespace LinuxWmi.E2ETests.Tests
             Output.WriteLine("✅ Query for non-existent class correctly resulted in error");
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test036_InvalidNamespace_ThrowsError()
         {
             // Arrange
@@ -200,7 +200,7 @@ namespace LinuxWmi.E2ETests.Tests
             Output.WriteLine("✅ Invalid namespace correctly resulted in error");
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test037_QueryTimeout_ThrowsTimeoutError()
         {
             // Arrange
@@ -232,7 +232,7 @@ namespace LinuxWmi.E2ETests.Tests
             Output.WriteLine("✅ Query with short timeout correctly resulted in timeout error");
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test038_DisposedHelper_ThrowsObjectDisposedException()
         {
             // Arrange
@@ -250,7 +250,7 @@ namespace LinuxWmi.E2ETests.Tests
             Output.WriteLine("✅ Using disposed WMIHelper correctly threw ObjectDisposedException");
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test039_EmptyCredentials_ThrowsError()
         {
             // Arrange

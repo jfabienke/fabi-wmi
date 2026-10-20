@@ -45,20 +45,12 @@ namespace LinuxWmi.E2ETests.Infrastructure
 
         protected void SkipIfNetworkTestsDisabled()
         {
-            if (Config.SkipNetworkTests)
-            {
-                Output.WriteLine("⚠️ Skipping test: Network tests are disabled in configuration");
-                Assert.True(false, "Test skipped: Network tests are disabled in configuration");
-            }
+            Skip.If(Config.SkipNetworkTests, "Network tests are disabled in configuration");
         }
 
         protected void SkipIfAuthTestsDisabled()
         {
-            if (Config.SkipAuthTests)
-            {
-                Output.WriteLine("⚠️ Skipping test: Authentication tests are disabled in configuration");
-                Assert.True(false, "Test skipped: Authentication tests are disabled in configuration");
-            }
+            Skip.If(Config.SkipAuthTests, "Authentication tests are disabled in configuration");
         }
 
         protected void AssertWmiException(Action action, int? expectedCode = null, string? messageContains = null)

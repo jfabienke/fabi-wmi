@@ -47,7 +47,7 @@ namespace LinuxWmi.E2ETests.Tests
             public DateTime? LastBootUpTime { get; set; }
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test010_QueryMultipleProcesses_ReturnsNonEmptyCollection()
         {
             // Arrange
@@ -69,7 +69,7 @@ namespace LinuxWmi.E2ETests.Tests
             Output.WriteLine($"Sample processes: {string.Join(", ", processes.Take(5).Select(p => $"{p.Name}({p.ProcessId})"))}");
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test011_QueryComputerSystem_ReturnsSingleObject()
         {
             // Arrange
@@ -98,7 +98,7 @@ namespace LinuxWmi.E2ETests.Tests
             Output.WriteLine($"   Memory: {system.TotalPhysicalMemory:N0} bytes");
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test012_QueryWithWhereClause_FiltersCorrectly()
         {
             // Arrange
@@ -123,7 +123,7 @@ namespace LinuxWmi.E2ETests.Tests
             }
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test013_QueryOperatingSystem_ReturnsValidData()
         {
             // Arrange
@@ -150,7 +150,7 @@ namespace LinuxWmi.E2ETests.Tests
             }
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test014_QueryWithSpecificFields_ReturnsOnlyRequestedFields()
         {
             // Arrange
@@ -174,7 +174,7 @@ namespace LinuxWmi.E2ETests.Tests
             Output.WriteLine($"   HandleCount: {process.HandleCount}");
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test015_QueryWithOrderBy_ReturnsOrderedResults()
         {
             // Arrange

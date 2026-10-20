@@ -14,7 +14,7 @@ namespace LinuxWmi.E2ETests.Tests
     {
         public Priority0_ConnectionTests(ITestOutputHelper output) : base(output) { }
 
-        [Fact]
+        [SkippableFact]
         public void Test001_SuccessfulConnection_WithValidCredentials()
         {
             // Arrange
@@ -38,7 +38,7 @@ namespace LinuxWmi.E2ETests.Tests
             helper?.Dispose();
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test002_ConnectionCreation_DoesNotThrow()
         {
             // Arrange
@@ -51,7 +51,7 @@ namespace LinuxWmi.E2ETests.Tests
             Output.WriteLine("✅ WMIHelper instance created successfully without throwing");
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test003_MultipleConnectionsSequential_Succeed()
         {
             // Arrange
@@ -70,7 +70,7 @@ namespace LinuxWmi.E2ETests.Tests
             }
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test004_ConnectionWithDifferentAuthLevels_Succeed()
         {
             // Arrange
@@ -105,7 +105,7 @@ namespace LinuxWmi.E2ETests.Tests
             }
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test005_ConnectionDisposal_CanBeCalledMultipleTimes()
         {
             // Arrange

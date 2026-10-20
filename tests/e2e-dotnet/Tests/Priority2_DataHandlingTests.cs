@@ -47,7 +47,7 @@ namespace LinuxWmi.E2ETests.Tests
             public string? VolumeName { get; set; }
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test040_QueryReturningZeroResults_ReturnsEmptyCollection()
         {
             // Arrange
@@ -65,7 +65,7 @@ namespace LinuxWmi.E2ETests.Tests
             Output.WriteLine("✅ Query with zero results correctly returned empty collection");
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test041_QueryWithVariedDataTypes_DeserializesCorrectly()
         {
             // Arrange
@@ -101,7 +101,7 @@ namespace LinuxWmi.E2ETests.Tests
             Output.WriteLine($"   DateTime: InstallDate = {os.InstallDate}");
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test042_LargeResultSet_HandlesCorrectly()
         {
             // Arrange
@@ -134,7 +134,7 @@ namespace LinuxWmi.E2ETests.Tests
             Output.WriteLine($"   Total handles: {totalHandles:N0}");
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test043_UnicodeStrings_HandledCorrectly()
         {
             // Arrange
@@ -168,7 +168,7 @@ namespace LinuxWmi.E2ETests.Tests
             Output.WriteLine($"✅ Unicode strings handled correctly in {services.Count} services");
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test044_NullableProperties_HandledCorrectly()
         {
             // Arrange
@@ -204,7 +204,7 @@ namespace LinuxWmi.E2ETests.Tests
             Output.WriteLine($"   Adapters with null Speed: {adapters.Count(a => !a.Speed.HasValue)}");
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test045_LargeNumericValues_HandledCorrectly()
         {
             // Arrange
@@ -242,7 +242,7 @@ namespace LinuxWmi.E2ETests.Tests
             }
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test046_SpecialCharactersInStrings_HandledCorrectly()
         {
             // Arrange
@@ -276,7 +276,7 @@ namespace LinuxWmi.E2ETests.Tests
             Output.WriteLine($"✅ Special characters in strings handled correctly for {services.Count} services");
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test047_QueryFirstOrDefault_WithNoResults_ReturnsNull()
         {
             // Arrange
@@ -293,7 +293,7 @@ namespace LinuxWmi.E2ETests.Tests
             Output.WriteLine("✅ QueryFirstOrDefault with no results correctly returned null");
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test048_ArrayProperties_HandledCorrectly()
         {
             // Arrange

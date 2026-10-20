@@ -51,7 +51,7 @@ namespace LinuxWmi.E2ETests.Tests
             public uint ReturnValue { get; set; }
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test020_GetOwner_ForSystemProcess_ReturnsSystemUser()
         {
             // Arrange
@@ -80,7 +80,7 @@ namespace LinuxWmi.E2ETests.Tests
             Output.WriteLine($"   ReturnValue: {result.ReturnValue}");
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test021_Create_SimpleProcess_ReturnsProcessId()
         {
             // Arrange
@@ -112,7 +112,7 @@ namespace LinuxWmi.E2ETests.Tests
             // Note: The process will exit immediately, so we don't need to clean it up
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test022_Create_InvalidPath_ReturnsError()
         {
             // Arrange
@@ -141,7 +141,7 @@ namespace LinuxWmi.E2ETests.Tests
             Output.WriteLine($"   ReturnValue: {result.ReturnValue} (non-zero indicates failure)");
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test023_Terminate_NonExistentProcess_ReturnsError()
         {
             // Arrange
@@ -169,7 +169,7 @@ namespace LinuxWmi.E2ETests.Tests
             Output.WriteLine($"   ReturnValue: {result.ReturnValue} (non-zero indicates failure)");
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test024_StaticMethod_WithoutParameters_Succeeds()
         {
             // Arrange
@@ -193,7 +193,7 @@ namespace LinuxWmi.E2ETests.Tests
             Output.WriteLine($"✅ Static method without parameters succeeded");
         }
 
-        [Fact]
+        [SkippableFact]
         public void Test025_CreateAndTerminate_ProcessLifecycle()
         {
             // Arrange
