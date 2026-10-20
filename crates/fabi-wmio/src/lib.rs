@@ -18,6 +18,8 @@ pub enum WmioError {
     Unsupported,
     #[error("CIM type {0:#06x} not yet decoded")]
     UnsupportedType(u16),
+    #[error("the class has no method named {0}")]
+    MethodNotFound(String),
 }
 
 /// MS-WMIO 2.2.1 encoding-unit signature.
@@ -74,6 +76,25 @@ fn parse_object_block_header(buf: &[u8], at: usize) -> Result<ObjectHeader, Wmio
         has_decoration,
         body_offset,
     })
+}
+
+/// Offset of the object's own ClassPart. An instance's encoding starts with
+/// it. A class's encoding (ClassType) starts with ParentClass, the ClassPart
+/// and MethodsPart of its superclass (empty for a root class), and continues
+/// with CurrentClass; this skips ParentClass.
+fn current_class_offset(buf: &[u8], header: &ObjectHeader) -> Result<usize, WmioError> {
+    if header.is_instance {
+        return Ok(header.body_offset);
+    }
+    let class_part_len = rd_u32(buf, header.body_offset)? as usize;
+    let methods_at = header
+        .body_offset
+        .checked_add(class_part_len)
+        .ok_or(WmioError::Malformed)?;
+    let methods_len = rd_u32(buf, methods_at)? as usize;
+    methods_at
+        .checked_add(methods_len)
+        .ok_or(WmioError::Malformed)
 }
 
 /// Offset just past the ENCODED_STRING at `off` (flag byte, characters, NUL).
@@ -592,9 +613,10 @@ pub fn spawn_instance(
     props: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<Vec<u8>, WmioError> {
     let header = parse_object_header(template_wmio)?;
-    let class = parse_class_part(template_wmio, header.body_offset)?;
+    let class_at = current_class_offset(template_wmio, &header)?;
+    let class = parse_class_part(template_wmio, class_at)?;
     let class_part_bytes = template_wmio
-        .get(header.body_offset..header.body_offset + class.encoding_length)
+        .get(class_at..class_at + class.encoding_length)
         .ok_or(WmioError::Malformed)?;
 
     let nd_size = if class.properties.is_empty() {
@@ -676,11 +698,11 @@ pub fn extract_method_in_params(
     if header.is_instance {
         return Err(WmioError::Unsupported);
     }
-    let class = parse_class_part(class_wmio, header.body_offset)?;
+    let class_at = current_class_offset(class_wmio, &header)?;
+    let class = parse_class_part(class_wmio, class_at)?;
     // MethodsPart (MS-WMIO 2.2.41): EncodingLength(4), MethodCount(2),
     // MethodCountPadding(2), MethodCount * MethodDescription(24), MethodHeap.
-    let methods_start = header
-        .body_offset
+    let methods_start = class_at
         .checked_add(class.encoding_length)
         .ok_or(WmioError::Malformed)?;
     let _methods_len = rd_u32(class_wmio, methods_start)?;
@@ -727,7 +749,7 @@ pub fn extract_method_in_params(
         unit.extend_from_slice(object_block);
         return Ok(Some(unit));
     }
-    Err(WmioError::Malformed)
+    Err(WmioError::MethodNotFound(method_name.to_owned()))
 }
 
 /// Build the `pInParams` WMIO instance `EncodingUnit` for `method_name` on
@@ -761,6 +783,57 @@ mod tests {
     /// properties (Pure, PerLocale-/PerUserInitialization) carry NdTable 0b10,
     /// i.e. take their value from the class default rather than the instance.
     const WMIO_PROVIDER: &[u8] = include_bytes!("testdata/wmio_provider.bin");
+    /// The `StdRegProv` class as `IWbemServices::GetObject` returns it from
+    /// Windows Server 2025: a decorated class object (ObjectFlags 0x05) whose
+    /// 20 methods sit on CurrentClass, after an empty ParentClass. Non-sensitive.
+    const WMIO_STDREGPROV_CLASS: &[u8] = include_bytes!("testdata/wmio_stdregprov_class.bin");
+
+    #[test]
+    fn extract_method_in_params_reads_current_class_methods() {
+        let sig = extract_method_in_params(WMIO_STDREGPROV_CLASS, "getstringvalue")
+            .unwrap()
+            .unwrap();
+        // The input signature is itself a class object with an empty parent.
+        let header = parse_object_header(&sig).unwrap();
+        assert!(!header.is_instance);
+        let class = parse_class_part(&sig, current_class_offset(&sig, &header).unwrap()).unwrap();
+        assert_eq!(class.class_name, "__PARAMETERS");
+        let props: Vec<(&str, u16)> = class
+            .properties
+            .iter()
+            .map(|p| (p.name.as_str(), p.cim_type))
+            .collect();
+        assert_eq!(
+            props,
+            vec![
+                ("hDefKey", CIM_UINT32),
+                ("sSubKeyName", CIM_STRING),
+                ("sValueName", CIM_STRING),
+            ]
+        );
+        assert_eq!(
+            extract_method_in_params(WMIO_STDREGPROV_CLASS, "NoSuchMethod"),
+            Err(WmioError::MethodNotFound("NoSuchMethod".into()))
+        );
+    }
+
+    #[test]
+    fn encode_method_in_params_round_trips_through_decode() {
+        // The same parameters Windows accepted for GetStringValue.
+        let params = serde_json::json!({
+            "hDefKey": 2_147_483_650_u32, // HKEY_LOCAL_MACHINE
+            "sSubKeyName": r"SOFTWARE\Microsoft\Windows NT\CurrentVersion",
+            "sValueName": "ProductName",
+        });
+        let wmio = encode_method_in_params(
+            WMIO_STDREGPROV_CLASS,
+            "GetStringValue",
+            params.as_object().unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(decode_object(&wmio).unwrap(), params);
+    }
 
     #[test]
     fn parse_object_header_reports_instance() {
@@ -1021,63 +1094,5 @@ mod tests {
         assert_eq!(decoded["IPEnabled"], json!(true));
         assert_eq!(decoded["Index"], json!(42));
         assert_eq!(decoded["MACAddress"], json!(null));
-    }
-
-    #[test]
-    fn encode_method_in_params_builds_valid_parameter_instance() {
-        use serde_json::json;
-        // Build a synthetic class EncodingUnit whose MethodsPart has one method
-        // "Create" taking WMIO_RESULT's ClassPart as its InputSignature.
-        let cp = parse_class_part(WMIO_RESULT, 9).unwrap();
-        let class_part = &WMIO_RESULT[9..9 + cp.encoding_length];
-
-        // InputSignature ObjectBlock: ObjectFlags(0x01 = class) + ClassPart + empty MethodsPart.
-        let mut sig_object_block = Vec::new();
-        sig_object_block.push(0x01); // ObjectFlags = class
-        sig_object_block.extend_from_slice(class_part);
-        sig_object_block.extend_from_slice(&12u32.to_le_bytes()); // MethodsPart EncodingLength
-        sig_object_block.extend_from_slice(&0u16.to_le_bytes()); // MethodCount = 0
-        sig_object_block.extend_from_slice(&0u16.to_le_bytes()); // Padding
-        sig_object_block.extend_from_slice(&0x8000_0000u32.to_le_bytes()); // empty MethodHeap
-
-        let mut method_heap = Vec::new();
-        let name_ref = push_encoded_string(&mut method_heap, "Create");
-        let sig_ref = method_heap.len() as u32;
-        method_heap.extend_from_slice(&(sig_object_block.len() as u32).to_le_bytes());
-        method_heap.extend_from_slice(&sig_object_block);
-
-        let methods_len = 8 + 24 + 4 + method_heap.len();
-        let mut methods_part = Vec::new();
-        methods_part.extend_from_slice(&(methods_len as u32).to_le_bytes());
-        methods_part.extend_from_slice(&1u16.to_le_bytes()); // 1 method
-        methods_part.extend_from_slice(&0u16.to_le_bytes()); // padding
-                                                             // MethodDescription (24 bytes): Name(4), Flags(1), Pad(3), Origin(4), Quals(4), InSig(4), OutSig(4)
-        methods_part.extend_from_slice(&name_ref.to_le_bytes());
-        methods_part.extend_from_slice(&[0, 0, 0, 0]);
-        methods_part.extend_from_slice(&0u32.to_le_bytes());
-        methods_part.extend_from_slice(&0u32.to_le_bytes());
-        methods_part.extend_from_slice(&sig_ref.to_le_bytes());
-        methods_part.extend_from_slice(&0xffff_ffffu32.to_le_bytes());
-        methods_part.extend_from_slice(&((method_heap.len() as u32) | 0x8000_0000).to_le_bytes());
-        methods_part.extend_from_slice(&method_heap);
-
-        let obj_len = 1 + class_part.len() + methods_part.len();
-        let mut class_wmio = Vec::new();
-        class_wmio.extend_from_slice(&WMIO_SIGNATURE.to_le_bytes());
-        class_wmio.extend_from_slice(&(obj_len as u32).to_le_bytes());
-        class_wmio.push(0x01); // ObjectFlags = class
-        class_wmio.extend_from_slice(class_part);
-        class_wmio.extend_from_slice(&methods_part);
-
-        let params = json!({
-            "Name": "SERVER01",
-            "Domain": "corp.example",
-        });
-        let in_params = encode_method_in_params(&class_wmio, "create", params.as_object().unwrap())
-            .unwrap()
-            .expect("Create has an InputSignature");
-        let decoded = decode_object(&in_params).unwrap();
-        assert_eq!(decoded["Name"], "SERVER01");
-        assert_eq!(decoded["Domain"], "corp.example");
     }
 }

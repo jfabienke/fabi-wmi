@@ -145,6 +145,7 @@ impl Error {
             Error::Activation(DcomError::RemoteProcedureCallFailed) => Some(0x8007_06BE),
             Error::Activation(DcomError::Hresult { hr }) => Some(*hr),
             Error::Rpc(RpcError::Fault(status)) => Some(fault_to_hresult(*status)),
+            Error::Decode(WmioError::MethodNotFound(_)) => Some(WBEM_E_INVALID_METHOD),
             _ => None,
         }
     }
@@ -164,6 +165,8 @@ impl Error {
 }
 
 const E_ACCESSDENIED: u32 = 0x8007_0005;
+/// What Windows returns for ExecMethod on a method the class does not have.
+const WBEM_E_INVALID_METHOD: u32 = 0x8004_102E;
 
 /// Default bound on every network read and write.
 pub const DEFAULT_TIMEOUT: Duration = RPC_IO_TIMEOUT;
