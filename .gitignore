@@ -5,3 +5,7 @@ docs/rpcdump_*
 # Per-user Claude Code settings (may hold lab credentials)
 .claude/settings.local.json
 .DS_Store
+
+# .NET build output
+**/bin/
+**/obj/
