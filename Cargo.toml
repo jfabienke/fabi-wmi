@@ -14,6 +14,10 @@ crate-type = ["cdylib", "rlib"]
 name = "wmi_query"
 path = "examples/wmi_query.rs"
 
+[[example]]
+name = "wmi_method"
+path = "examples/wmi_method.rs"
+
 [dependencies]
 byteorder = "1.5"
 fabi-dcerpc = { path = "crates/fabi-dcerpc" }
