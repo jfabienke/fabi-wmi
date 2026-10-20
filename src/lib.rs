@@ -21,6 +21,7 @@ pub mod spnego;
 mod sspi_ntlm;
 mod transport; // Used internally by dcom and lib
 mod wmi;
+mod wmi_conn;
 mod wmi_proto;
 mod wmio;
 
@@ -58,6 +59,9 @@ pub use pool::{
 };
 pub use rpc::RpcError;
 pub use wmi::{IWbemLocator, IWbemServices, WmiError};
+pub use wmi_conn::{query, WmiConnError};
+pub use wmi_proto::WmiProtoError;
+pub use wmio::WmioError;
 
 #[derive(Error, Debug)]
 pub enum WmiClientError {

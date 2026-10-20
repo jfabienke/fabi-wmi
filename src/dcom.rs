@@ -572,9 +572,9 @@ pub fn activate_wmi_dcom(host: &str, creds: &Credentials) -> Result<(u16, [u8; 8
                 match KerberosClient::new(host, kerberos_config, creds.clone()) {
                     Ok(kerberos_client) => {
                         match activate_wmi_dcom_with_auth(host, Box::new(kerberos_client)) {
-                            Ok(result) => {
+                            Ok((port, activation)) => {
                                 info!("DCOM activation succeeded with Kerberos");
-                                return Ok(result);
+                                return Ok((port, activation.oxid));
                             }
                             Err(err) => {
                                 warn!(?err, "Kerberos authentication failed, falling back to NTLM");
@@ -596,6 +596,15 @@ pub fn activate_wmi_dcom(host: &str, creds: &Credentials) -> Result<(u16, [u8; 8
 
     // Fall back to NTLM
     debug!("Using NTLM authentication for DCOM activation");
+    activate_level1_login(host, creds).map(|(port, activation)| (port, activation.oxid))
+}
+
+/// Activate CLSID_WbemLevel1Login with NTLM and return the WMI port together
+/// with the full activation result (OXID, IWbemLevel1Login IPID, bindings).
+pub(crate) fn activate_level1_login(
+    host: &str,
+    creds: &Credentials,
+) -> Result<(u16, ActivationResponse), DcomError> {
     let ntlm_client = crate::sspi_ntlm::SspiNtlmClient::new(creds, &format!("host/{host}"))
         .map_err(|err| {
             error!(%err, "failed to set up NTLM client");
@@ -608,7 +617,7 @@ pub fn activate_wmi_dcom(host: &str, creds: &Credentials) -> Result<(u16, [u8; 8
 fn activate_wmi_dcom_with_auth(
     host: &str,
     mut auth_client: Box<dyn AuthProvider>,
-) -> Result<(u16, [u8; 8]), DcomError> {
+) -> Result<(u16, ActivationResponse), DcomError> {
     // Connect to SCM on port 135
     let addr = format!("{host}:135");
     let mut stream = TcpStream::connect_timeout(
@@ -702,7 +711,7 @@ fn activate_wmi_dcom_with_auth(
         hex::encode(activation.ipid)
     );
 
-    Ok((port, activation.oxid))
+    Ok((port, activation))
 }
 
 use crate::transport::{

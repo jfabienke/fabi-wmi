@@ -12,7 +12,7 @@ use byteorder::{LittleEndian, WriteBytesExt};
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
-pub(crate) enum WmiProtoError {
+pub enum WmiProtoError {
     #[error("malformed WMI response stub")]
     Malformed,
     #[error("response returned an unexpected interface")]
@@ -21,6 +21,9 @@ pub(crate) enum WmiProtoError {
     Hresult(u32),
 }
 
+/// IID of IWbemLevel1Login (activated from CLSID_WbemLevel1Login).
+pub(crate) const IID_IWBEM_LEVEL1_LOGIN: [u8; 16] =
+    hex_literal::hex!("18ad09f36ad8d011a07500c04fb68820");
 /// IID of IWbemServices (returned by IWbemLevel1Login::NTLMLogin).
 pub(crate) const IID_IWBEM_SERVICES: [u8; 16] =
     hex_literal::hex!("99dc56958c82cf11a37e00aa003240c7");
