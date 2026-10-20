@@ -124,9 +124,19 @@ pub(crate) fn encode_exec_query(causality_id: &[u8; 16], wql: &str, lflags: u32)
     buf
 }
 
+/// Encode an `[in, out, unique] IWbemClassObject**` that asks for an object
+/// back: a non-NULL outer pointer to a NULL interface pointer. A NULL outer
+/// pointer tells the server the caller does not want the object, so it runs
+/// the call and returns S_OK with no object.
+fn encode_object_out_ptr(buf: &mut Vec<u8>, referent: u32) {
+    debug_assert!(referent != 0, "a unique-pointer referent must be non-zero");
+    buf.write_u32::<LittleEndian>(referent).unwrap();
+    buf.write_u32::<LittleEndian>(0).unwrap(); // *ppObject: NULL on input
+}
+
 /// Encode the IWbemServices::GetObject (opnum 6) request stub (MS-WMI
-/// 3.1.4.3.4): ORPCTHIS, strObjectPath, lFlags, null pCtx, null [in] ppObject,
-/// null [in] ppCallResult.
+/// 3.1.4.3.4): ORPCTHIS, strObjectPath, lFlags, null pCtx, ppObject (pointer
+/// to a NULL object), null ppCallResult.
 pub(crate) fn encode_get_object(
     causality_id: &[u8; 16],
     object_path: &str,
@@ -137,15 +147,15 @@ pub(crate) fn encode_get_object(
     encode_bstr(&mut buf, REFERENT_BASE, object_path);
     buf.write_u32::<LittleEndian>(lflags).unwrap();
     buf.write_u32::<LittleEndian>(0).unwrap(); // pCtx: null ptr
-    buf.write_u32::<LittleEndian>(0).unwrap(); // ppObject: null on input
-    buf.write_u32::<LittleEndian>(0).unwrap(); // ppCallResult: null on input
+    encode_object_out_ptr(&mut buf, REFERENT_BASE + 4); // ppObject
+    buf.write_u32::<LittleEndian>(0).unwrap(); // ppCallResult: null (synchronous call)
     buf
 }
 
 /// Encode the IWbemServices::ExecMethod (opnum 24) request stub (MS-WMI
 /// 3.1.4.3.22): ORPCTHIS, strObjectPath, strMethodName, lFlags, null pCtx,
-/// pInParams (null or MInterfacePointer wrapping OBJREF_CUSTOM), null [in]
-/// ppOutParams, null [in] ppCallResult.
+/// pInParams (null or MInterfacePointer wrapping OBJREF_CUSTOM), ppOutParams
+/// (pointer to a NULL object), null ppCallResult.
 pub(crate) fn encode_exec_method(
     causality_id: &[u8; 16],
     object_path: &str,
@@ -174,8 +184,8 @@ pub(crate) fn encode_exec_method(
             buf.write_u32::<LittleEndian>(0).unwrap(); // pInParams: null ptr
         }
     }
-    buf.write_u32::<LittleEndian>(0).unwrap(); // ppOutParams: null on input
-    buf.write_u32::<LittleEndian>(0).unwrap(); // ppCallResult: null on input
+    encode_object_out_ptr(&mut buf, REFERENT_BASE + 12); // ppOutParams
+    buf.write_u32::<LittleEndian>(0).unwrap(); // ppCallResult: null (synchronous call)
     buf
 }
 
@@ -305,9 +315,11 @@ pub(crate) fn parse_next_response(stub: &[u8]) -> Result<Vec<WmioBlob>, WmiProto
 }
 
 /// Parse a synchronous `IWbemServices::GetObject` or `IWbemServices::ExecMethod`
-/// response stub (ORPCTHAT, `[out, unique] ppObject`/`ppOutParams`, `[out,
-/// unique] ppCallResult`, HRESULT). Returns `Ok(None)` when the output object
-/// pointer is NULL (e.g. a void method with no output parameters).
+/// response stub (ORPCTHAT, `[in, out, unique] ppObject`/`ppOutParams`,
+/// `[in, out, unique] ppCallResult`, HRESULT). The object comes as two
+/// referents (the outer pointer, then the interface pointer) followed by the
+/// MInterfacePointer. Returns `Ok(None)` when either pointer is NULL (e.g. a
+/// method with no output parameters).
 pub(crate) fn parse_single_object_response(stub: &[u8]) -> Result<Option<WmioBlob>, WmiProtoError> {
     if stub.len() < 20 {
         return Err(WmiProtoError::Malformed);
@@ -317,11 +329,10 @@ pub(crate) fn parse_single_object_response(stub: &[u8]) -> Result<Option<WmioBlo
         return Err(WmiProtoError::Hresult(hr));
     }
     // ORPCTHAT: flags(4), extensions pointer(4).
-    let out_referent = rd_u32(stub, 8)?;
-    if out_referent == 0 {
+    if rd_u32(stub, 8)? == 0 || rd_u32(stub, 12)? == 0 {
         return Ok(None);
     }
-    let (objref, _) = parse_m_interface_pointer(stub, 12).map_err(|_| WmiProtoError::Malformed)?;
+    let (objref, _) = parse_m_interface_pointer(stub, 16).map_err(|_| WmiProtoError::Malformed)?;
     let data = expect_wbem_custom(objref)?;
     Ok(Some(WmioBlob {
         data: data.to_vec(),
@@ -630,17 +641,24 @@ mod tests {
     #[test]
     fn encode_get_object_and_exec_method_are_well_formed() {
         let cid = [0x11u8; 16];
+        // ppObject / ppOutParams must be a non-NULL pointer to a NULL object:
+        // with a NULL outer pointer Windows returns S_OK and no object.
         let get_stub = encode_get_object(&cid, "Win32_Process", 0);
-        // ORPCTHIS(32) + BSTR("Win32_Process\0": 16 + 14*2 = 44) + lFlags(4) + pCtx(4) + ppObject(4) + ppCallResult(4) = 92
-        assert_eq!(get_stub.len(), 92);
+        // ORPCTHIS(32) + BSTR("Win32_Process\0": 16 + 14*2 = 44) + lFlags(4) + pCtx(4)
+        // + ppObject(4 + 4) + ppCallResult(4) = 96
+        assert_eq!(get_stub.len(), 96);
         assert_eq!(&get_stub[32..36], &REFERENT_BASE.to_le_bytes());
-        assert_eq!(&get_stub[76..92], &[0u8; 16]);
+        assert_eq!(&get_stub[76..84], &[0u8; 8]); // lFlags, pCtx
+        assert_eq!(&get_stub[84..88], &(REFERENT_BASE + 4).to_le_bytes());
+        assert_eq!(&get_stub[88..96], &[0u8; 8]); // *ppObject, ppCallResult
 
         let exec_no_in = encode_exec_method(&cid, "Win32_Process", "Create", 0, None);
         // ORPCTHIS(32) + BSTR("Win32_Process\0": 44) + BSTR("Create\0": 16 + 14 + 2 pad = 32)
-        // + lFlags(4) + pCtx(4) + pInParams(4) + ppOutParams(4) + ppCallResult(4) = 128
-        assert_eq!(exec_no_in.len(), 128);
-        assert_eq!(&exec_no_in[108..128], &[0u8; 20]);
+        // + lFlags(4) + pCtx(4) + pInParams(4) + ppOutParams(4 + 4) + ppCallResult(4) = 132
+        assert_eq!(exec_no_in.len(), 132);
+        assert_eq!(&exec_no_in[108..120], &[0u8; 12]); // lFlags, pCtx, pInParams
+        assert_eq!(&exec_no_in[120..124], &(REFERENT_BASE + 12).to_le_bytes());
+        assert_eq!(&exec_no_in[124..132], &[0u8; 8]); // *ppOutParams, ppCallResult
 
         let exec_with_in =
             encode_exec_method(&cid, "Win32_Process", "Create", 0, Some(WMIO_RESULT));
@@ -648,7 +666,44 @@ mod tests {
         let (objref, end) = parse_m_interface_pointer(&exec_with_in, 120).unwrap();
         assert_eq!(expect_wbem_custom(objref).unwrap(), WMIO_RESULT);
         let aligned_end = (end + 3) & !3;
-        assert_eq!(&exec_with_in[aligned_end..], &[0u8; 8]); // ppOutParams(0), ppCallResult(0)
+        let mut tail = (REFERENT_BASE + 12).to_le_bytes().to_vec();
+        tail.extend_from_slice(&[0u8; 8]); // *ppOutParams, ppCallResult
+        assert_eq!(&exec_with_in[aligned_end..], &tail[..]);
+    }
+
+    /// `StdRegProv.GetStringValue(HKLM, "SOFTWARE\Microsoft\Windows NT\CurrentVersion",
+    /// "ProductName")` response stub from Windows Server 2025; matches
+    /// Invoke-CimMethod on the same host. Non-sensitive lab data.
+    const GETSTRINGVALUE_RESPONSE: &[u8] =
+        include_bytes!("testdata/execmethod_getstringvalue_response_stub.bin");
+    /// `__SystemSecurity.GetSD()` (no input parameters) response stub from the
+    /// same host: root\cimv2's security descriptor, well-known SIDs only.
+    const GETSD_RESPONSE: &[u8] = include_bytes!("testdata/execmethod_getsd_response_stub.bin");
+
+    #[test]
+    fn parse_single_object_response_decodes_captured_exec_method_results() {
+        // Both carry two referents (0x00020000, 0x00020004) before the
+        // MInterfacePointer; reading only one misparses the object.
+        let blob = parse_single_object_response(GETSTRINGVALUE_RESPONSE)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            fabi_wmio::decode_object(&blob.data).unwrap(),
+            serde_json::json!({
+                "ReturnValue": 0,
+                "sValue": "Windows Server 2025 Standard Evaluation",
+            })
+        );
+
+        let blob = parse_single_object_response(GETSD_RESPONSE)
+            .unwrap()
+            .unwrap();
+        let out = fabi_wmio::decode_object(&blob.data).unwrap();
+        assert_eq!(out["ReturnValue"], 0);
+        let sd = out["SD"].as_array().unwrap();
+        // Self-relative SECURITY_DESCRIPTOR: revision 1, control SE_SELF_RELATIVE | SE_DACL_PRESENT.
+        assert_eq!(sd.len(), 180);
+        assert_eq!(sd[..4], [1, 0, 4, 0x80]);
     }
 
     #[test]
@@ -656,6 +711,7 @@ mod tests {
         // Build a synthetic ExecMethod/GetObject response wrapping WMIO_RESULT.
         let mut resp = vec![0u8; 8]; // ORPCTHAT
         resp.extend_from_slice(&REFERENT_BASE.to_le_bytes()); // ppOutParams referent
+        resp.extend_from_slice(&(REFERENT_BASE + 4).to_le_bytes()); // *ppOutParams referent
         encode_custom_m_interface_pointer(
             &mut resp,
             &IID_IWBEM_CLASS_OBJECT,
