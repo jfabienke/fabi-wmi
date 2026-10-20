@@ -31,14 +31,35 @@ on:
 env:
   RUST_BACKTRACE: 1
   CARGO_TERM_COLOR: always
+  # Cargo.toml path-depends on ../kerbsec, and Cargo reads that manifest even
+  # with the kerberos feature off, so every cargo job checks out both repos
+  # side by side. The fabi-kerbsec rename lives on this branch until it is
+  # merged; switch to master then.
+  KERBSEC_REF: fix/macos-bindgen-sdk
 
 jobs:
   build-library:
     name: Build Rust Library
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: linux-wmi
 
     steps:
     - uses: actions/checkout@v4
+      with:
+        path: linux-wmi
+
+    - uses: actions/checkout@v4
+      with:
+        repository: jfabienke/kerbsec
+        ref: ${{ env.KERBSEC_REF }}
+        path: kerbsec
+
+    - name: Install GSS-API headers
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libkrb5-dev
 
     - name: Setup Rust
       uses: dtolnay/rust-toolchain@stable
@@ -60,7 +81,7 @@ jobs:
     - name: Cache target
       uses: actions/cache@v3
       with:
-        path: target
+        path: linux-wmi/target
         key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
 
     - name: Build library
@@ -71,8 +92,8 @@ jobs:
       with:
         name: linux-wmi-library
         path: |
-          target/release/libfabi_wmi.so
-          target/release/libfabi_wmi.a
+          linux-wmi/target/release/libfabi_wmi.so
+          linux-wmi/target/release/libfabi_wmi.a
 
   test-dotnet:
     name: .NET E2E Tests
@@ -165,9 +186,20 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     needs: build-library
+    defaults:
+      run:
+        working-directory: linux-wmi
 
     steps:
     - uses: actions/checkout@v4
+      with:
+        path: linux-wmi
+
+    - uses: actions/checkout@v4
+      with:
+        repository: jfabienke/kerbsec
+        ref: ${{ env.KERBSEC_REF }}
+        path: kerbsec
 
     - name: Setup .NET
       uses: actions/setup-dotnet@v3
@@ -181,11 +213,11 @@ jobs:
       run: cargo build --lib --release
 
     - name: Build test project
-      working-directory: tests/e2e-dotnet
+      working-directory: linux-wmi/tests/e2e-dotnet
       run: dotnet build --configuration Release
 
     - name: Run integration tests
-      working-directory: tests/e2e-dotnet
+      working-directory: linux-wmi/tests/e2e-dotnet
       env:
         WMI_TEST_DEFAULTHOST: localhost
         WMI_TEST_DEFAULTUSERNAME: ${{ secrets.WINDOWS_TEST_USER }}
@@ -205,7 +237,7 @@ jobs:
       if: always()
       with:
         name: windows-test-results
-        path: tests/e2e-dotnet/TestResults/*.trx
+        path: linux-wmi/tests/e2e-dotnet/TestResults/*.trx
 
   coverage:
     name: Code Coverage
