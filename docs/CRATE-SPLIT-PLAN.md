@@ -8,8 +8,8 @@ behind each point.
 ## Goal
 
 The original goal of the project: a set of generic, Windows-compatible Rust
-crates for DCE/RPC, DCOM, WMI and Kerberos, with linux-wmi (the C ABI and the
-ORMi-compatible .NET shim) as one consumer.
+crates (`fabi-*`) for DCE/RPC, DCOM, WMI and Kerberos, with `fabi-wmi` exposing
+both the Rust WMI API and the C ABI / ORMi-compatible .NET shim.
 
 ## Where each layer stands
 
@@ -31,7 +31,7 @@ below); the decoder proper should take a WMIO blob.
 
 Generic and byte-validated: PDU framing, `build_bind_pdu`/`build_auth3_pdu`,
 `parse_bind_ack`, signed (integrity) and sealed (privacy) request/response
-PDUs, `read_pdu`, fault mapping. Gaps that a general `dcerpc` crate needs:
+PDUs, `read_pdu`, fault mapping. Gaps that a general `fabi-dcerpc` crate needs:
 
 - **No connection object.** Activation (`dcom.rs::activate_with`,
   `dcom.rs:85`) and the WMI side (`client.rs::WmiConnection`, `client.rs:82`)
@@ -53,7 +53,7 @@ PDUs, `read_pdu`, fault mapping. Gaps that a general `dcerpc` crate needs:
 The thin layer. It activates exactly one hardcoded CLSID
 (`CLSID_WBEM_LEVEL1_LOGIN`, `dcom.rs:69`) through one interface
 (IActivation::RemoteActivation, `activate_with` at `dcom.rs:85`). A generic
-`ms-dcom` crate needs:
+`fabi-dcom` crate needs:
 
 - Activation of an **arbitrary** CLSID/IID.
 - **OXID resolution** (IObjectExporter::ResolveOxid) — this existed as
@@ -75,7 +75,7 @@ files**, each written against its own capture:
   each enumerated object.
 
 All three scan for the `MEOW` signature and parse an STDOBJREF /
-MInterfacePointer by hand. They should be one marshaling module in `ms-dcom`.
+MInterfacePointer by hand. They should be one marshaling module in `fabi-dcom`.
 
 ### WMI (`src/wmi_proto.rs`) — ~50%
 
@@ -85,7 +85,7 @@ one-path: ExecQuery/Next only. No ExecMethod, no class/instance Put, no WQL
 beyond `SELECT`. It also mixes ORPC concerns (the OBJREF parsing above) into
 WMI code.
 
-### Kerberos (`../kerbsec`) — already a separate crate
+### Kerberos (`../kerbsec` → `fabi-kerbsec`) — already a separate crate
 
 But two things block it from being the RPC auth provider:
 - Its DCE/RPC IOV wrap (`gss_iov.rs::wrap_iov_real`, `kerbsec
@@ -113,15 +113,14 @@ primitives, rewrite only the parts that are currently one-path-specific.
 
 | Crate | Content | Depends on |
 |---|---|---|
-| `ms-wmio` | `wmio.rs` value decoder, bytes→`serde_json::Value` | — |
-| `dcerpc` | `rpc.rs` + `RpcConnection` + fragmentation + generalized SSP trait | — |
-| `ms-dcom` | OXID resolution, activation of arbitrary CLSID/IID, one OBJREF marshaling module, IRemUnknown | `dcerpc` |
-| `ms-wmi` | WMI interfaces, WQL, ExecMethod | `ms-dcom`, `ms-wmio` |
-| `kerbsec` | exists; fix IOV, implement the `dcerpc` SSP trait | `dcerpc` (or a bridge, to avoid a dependency cycle) |
-| `linux-wmi` | thin C ABI + ORMi shim | `ms-wmi` |
+| `fabi-wmio` | `wmio.rs` value decoder, bytes→`serde_json::Value` | — |
+| `fabi-dcerpc` | `rpc.rs` + `RpcConnection` + fragmentation + generalized SSP trait | — |
+| `fabi-dcom` | OXID resolution, activation of arbitrary CLSID/IID, one OBJREF marshaling module, IRemUnknown | `fabi-dcerpc` |
+| `fabi-kerbsec` | exists (`../kerbsec`); fix IOV, implement the `fabi-dcerpc` SSP trait | `fabi-dcerpc` (or a bridge, to avoid a dependency cycle) |
+| `fabi-wmi` | WMI interfaces, WQL, ExecMethod (`rlib`), plus optional C ABI (`cdylib` via `ffi` feature) + ORMi .NET shim | `fabi-dcom`, `fabi-wmio` |
 
-NTLM (`sspi_ntlm.rs`) becomes a small SSP impl, either in `dcerpc` or its own
-bridge crate.
+NTLM (`sspi_ntlm.rs`) becomes a small SSP impl, either in `fabi-dcerpc` or its
+own bridge crate.
 
 ### Two points that need real design, not relocation
 
@@ -138,13 +137,14 @@ Everything else is move-the-code and keep the tests green.
 
 ### Suggested order
 
-1. Extract `ms-wmio` — lowest risk, proves the workspace split.
-2. `dcerpc` with the `RpcConnection` object and the generalized auth seam.
-3. Consolidate the three OBJREF copies into `ms-dcom`; restore OXID
+1. [x] Extract `fabi-wmio` — lowest risk, proves the workspace split.
+2. [x] `fabi-dcerpc` with the `RpcConnection` object and the generalized auth seam.
+3. [x] Consolidate the three OBJREF copies into `fabi-dcom`; restore OXID
    resolution; generalize activation.
-4. Widen `ms-wmi` (ExecMethod first, since the shim's `ExecuteStaticMethod`
-   needs it).
-5. Fix kerbsec IOV and wire Kerberos into the `dcerpc` SSP seam.
+4. [ ] Widen `fabi-wmi` (ExecMethod first, since the shim's `ExecuteStaticMethod`
+   needs it; gate the C ABI under an `ffi` feature).
+5. [ ] Rename `kerbsec` to `fabi-kerbsec`, fix IOV, and wire Kerberos into the
+   `fabi-dcerpc` SSP seam.
 
 The test suite stays green at every step — that is the whole advantage over a
 rewrite.

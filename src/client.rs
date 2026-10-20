@@ -8,28 +8,22 @@
 //! Requests carry the target IPID as the object UUID; stubs are signed, not
 //! sealed.
 
-use std::io::Write;
-use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 use tracing::debug;
 
-use crate::auth::{AuthError, AuthProvider, Credentials};
-use crate::dcom::{self, DcomError};
-use crate::rpc::{
-    build_auth3_pdu, build_bind_pdu, build_signed_request_pdu, fault_to_hresult, is_last_fragment,
-    parse_bind_ack, read_pdu, verify_signed_response_pdu, RpcError, AUTH_LEVEL_PKT_INTEGRITY,
-    MAX_FRAG, PTYPE_ALTER_CONTEXT, PTYPE_ALTER_CONTEXT_RESP, PTYPE_BIND, PTYPE_BIND_ACK,
-    PTYPE_FAULT, PTYPE_RESPONSE, RPC_IO_TIMEOUT,
-};
-use crate::sspi_ntlm::SspiNtlmClient;
 use crate::wmi_proto::{
-    self, InterfaceRef, WmiProtoError, IID_IENUM_WBEM_CLASS_OBJECT, IID_IREMUNKNOWN,
-    IID_IWBEM_LEVEL1_LOGIN, IID_IWBEM_SERVICES,
+    self, InterfaceRef, WmiProtoError, CLSID_WBEM_LEVEL1_LOGIN, IID_IENUM_WBEM_CLASS_OBJECT,
+    IID_IREMUNKNOWN, IID_IWBEM_LEVEL1_LOGIN, IID_IWBEM_SERVICES,
 };
-use crate::wmio::{self, WmioError};
+use fabi_dcerpc::{
+    fault_to_hresult, AuthError, BoundContext, Credentials, HandshakeStyle, RpcConnection,
+    RpcError, SspiNtlmClient, AUTH_LEVEL_PKT_INTEGRITY, RPC_IO_TIMEOUT,
+};
+use fabi_dcom::{self as dcom, DcomError};
+use fabi_wmio::{decode_object, WmioError};
 
 /// Everything that can go wrong talking to WMI. [`Error::hresult`] gives the
 /// Windows status code when the server reported one.
@@ -68,57 +62,32 @@ const WBEM_INFINITE: i32 = -1;
 /// Objects requested per Next call.
 const NEXT_BATCH: u32 = 32;
 
-/// An interface bound on the connection: its presentation context, its own
-/// NTLM context, and the IPID calls are addressed to.
+/// An interface bound on the connection: its presentation/security context and
+/// the IPID calls are addressed to.
 struct BoundInterface {
-    name: &'static str,
-    context_id: u16,
-    auth_context_id: u32,
-    auth: SspiNtlmClient,
+    ctx: BoundContext,
     ipid: [u8; 16],
 }
 
-/// The TCP connection to the server's WMI object exporter.
+/// The RPC connection to the server's WMI object exporter.
 struct WmiConnection {
-    stream: TcpStream,
+    rpc: RpcConnection,
     creds: Credentials,
     target_name: String,
-    call_id: u32,
-    next_context_id: u16,
-    max_xmit: u16,
 }
 
 impl WmiConnection {
     fn open(host: &str, port: u16, creds: &Credentials, timeout: Duration) -> Result<Self, Error> {
-        let addr = (host, port)
-            .to_socket_addrs()?
-            .next()
-            .ok_or_else(|| Error::Protocol(format!("{host} resolved to no addresses")))?;
-        let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT.min(timeout))?;
-        let _ = stream.set_nodelay(true);
-        let mut conn = Self {
-            stream,
+        let rpc = RpcConnection::connect(host, port, CONNECT_TIMEOUT, timeout)?;
+        Ok(Self {
+            rpc,
             creds: creds.clone(),
             target_name: format!("host/{host}"),
-            call_id: 0,
-            next_context_id: 0,
-            max_xmit: MAX_FRAG,
-        };
-        conn.set_timeout(timeout)?;
-        Ok(conn)
+        })
     }
 
     fn set_timeout(&mut self, timeout: Duration) -> Result<(), Error> {
-        // A zero Duration means "no timeout" to the socket API; never allow it.
-        let timeout = Some(timeout.max(Duration::from_millis(1)));
-        self.stream.set_read_timeout(timeout)?;
-        self.stream.set_write_timeout(timeout)?;
-        Ok(())
-    }
-
-    fn next_call_id(&mut self) -> u32 {
-        self.call_id += 1;
-        self.call_id
+        Ok(self.rpc.set_timeout(timeout)?)
     }
 
     /// Add a presentation context for `iid` (bind for the first, alter_context
@@ -129,47 +98,15 @@ impl WmiConnection {
         iid: &[u8; 16],
         ipid: [u8; 16],
     ) -> Result<BoundInterface, Error> {
-        let mut auth = SspiNtlmClient::new(&self.creds, &self.target_name)?;
-        let context_id = self.next_context_id;
-        let auth_context_id = u32::from(context_id);
-        let (ptype, ack_ptype) = if context_id == 0 {
-            (PTYPE_BIND, PTYPE_BIND_ACK)
-        } else {
-            (PTYPE_ALTER_CONTEXT, PTYPE_ALTER_CONTEXT_RESP)
-        };
-        let call_id = self.next_call_id();
-
-        let negotiate = auth.negotiate()?;
-        self.stream.write_all(&build_bind_pdu(
-            ptype,
-            call_id,
-            context_id,
+        let auth = SspiNtlmClient::new(&self.creds, &self.target_name)?;
+        let ctx = self.rpc.bind_context(
+            name,
             iid,
             AUTH_LEVEL_PKT_INTEGRITY,
-            auth_context_id,
-            &negotiate,
-        ))?;
-        let ack = parse_bind_ack(&read_pdu(&mut self.stream)?, ack_ptype)?;
-        if context_id == 0 {
-            self.max_xmit = ack.max_xmit.min(MAX_FRAG);
-        }
-
-        let authenticate = auth.respond(&ack.auth_token)?;
-        self.stream.write_all(&build_auth3_pdu(
-            call_id,
-            AUTH_LEVEL_PKT_INTEGRITY,
-            auth_context_id,
-            &authenticate,
-        ))?;
-        self.next_context_id += 1;
-        debug!(interface = name, context_id, "interface bound");
-        Ok(BoundInterface {
-            name,
-            context_id,
-            auth_context_id,
-            auth,
-            ipid,
-        })
+            HandshakeStyle::Auth3,
+            Box::new(auth),
+        )?;
+        Ok(BoundInterface { ctx, ipid })
     }
 
     /// Issue one ORPC call and return the reassembled, verified response stub.
@@ -179,54 +116,9 @@ impl WmiConnection {
         opnum: u16,
         stub: &[u8],
     ) -> Result<Vec<u8>, Error> {
-        let call_id = self.next_call_id();
-        let pdu = build_signed_request_pdu(
-            &mut iface.auth,
-            call_id,
-            iface.context_id,
-            opnum,
-            &iface.ipid,
-            stub,
-            iface.auth_context_id,
-        )?;
-        if pdu.len() > usize::from(self.max_xmit) {
-            return Err(Error::Protocol(format!(
-                "{} request of {} bytes exceeds max_xmit_frag {}; request fragmentation is not implemented",
-                iface.name,
-                pdu.len(),
-                self.max_xmit
-            )));
-        }
-        self.stream.write_all(&pdu)?;
-
-        let mut response = Vec::new();
-        loop {
-            let frag = read_pdu(&mut self.stream)?;
-            let frag_call_id = u32::from_le_bytes(frag[12..16].try_into().unwrap());
-            if frag_call_id != call_id {
-                return Err(Error::Protocol(format!(
-                    "response for call {frag_call_id}, expected {call_id}"
-                )));
-            }
-            if frag[2] != PTYPE_RESPONSE && frag[2] != PTYPE_FAULT {
-                return Err(Error::Protocol(format!(
-                    "unexpected PDU type 0x{:02x} in response",
-                    frag[2]
-                )));
-            }
-            response.extend(verify_signed_response_pdu(&mut iface.auth, &frag)?);
-            if is_last_fragment(&frag) {
-                break;
-            }
-        }
-        debug!(
-            interface = iface.name,
-            opnum,
-            len = response.len(),
-            "call complete"
-        );
-        tracing::trace!(stub = %hex::encode(&response), "response stub");
-        Ok(response)
+        Ok(self
+            .rpc
+            .call(&mut iface.ctx, opnum, Some(&iface.ipid), stub)?)
     }
 }
 
@@ -245,9 +137,7 @@ impl Error {
     /// WMI/DCOM call or an RPC-level access-denied fault).
     pub fn hresult(&self) -> Option<u32> {
         match self {
-            Error::Wmi(WmiProtoError::Hresult(hr)) | Error::Decode(WmioError::Hresult(hr)) => {
-                Some(*hr)
-            }
+            Error::Wmi(WmiProtoError::Hresult(hr)) => Some(*hr),
             Error::Activation(DcomError::AccessDenied) => Some(E_ACCESSDENIED),
             Error::Activation(DcomError::ServerUnavailable) => Some(0x8007_06BA),
             Error::Activation(DcomError::RemoteProcedureCallFailed) => Some(0x8007_06BE),
@@ -312,7 +202,12 @@ impl WmiClient {
         namespace: &str,
         timeout: Duration,
     ) -> Result<Self, Error> {
-        let (port, activation) = dcom::activate_level1_login(host, creds)?;
+        let (port, activation) = dcom::activate(
+            host,
+            creds,
+            &CLSID_WBEM_LEVEL1_LOGIN,
+            &IID_IWBEM_LEVEL1_LOGIN,
+        )?;
         // The advertised bindings name the server's own view of itself (which
         // may be unreachable behind NAT); keep dialing the address we were given.
         let mut conn = WmiConnection::open(host, port, creds, timeout)?;
@@ -419,9 +314,11 @@ impl WmiClient {
                 OPNUM_ENUM_NEXT,
                 &wmi_proto::encode_enum_next(&self.causality_id, WBEM_INFINITE, NEXT_BATCH),
             )?;
-            let batch = wmio::decode_next_response(&resp)?;
-            let done = batch.len() < NEXT_BATCH as usize;
-            rows.extend(batch);
+            let blobs = wmi_proto::parse_next_response(&resp)?;
+            let done = blobs.len() < NEXT_BATCH as usize;
+            for blob in blobs {
+                rows.push(decode_object(&blob.data)?);
+            }
             if done {
                 return Ok(rows);
             }

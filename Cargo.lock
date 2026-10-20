@@ -581,6 +581,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "fabi-dcerpc"
+version = "0.1.0"
+dependencies = [
+ "byteorder",
+ "hex",
+ "hex-literal",
+ "libc",
+ "sspi",
+ "thiserror 1.0.69",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
+name = "fabi-dcom"
+version = "0.1.0"
+dependencies = [
+ "byteorder",
+ "fabi-dcerpc",
+ "hex",
+ "hex-literal",
+ "thiserror 1.0.69",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fabi-wmio"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1139,13 +1174,15 @@ name = "linux-wmi"
 version = "0.2.0"
 dependencies = [
  "byteorder",
+ "fabi-dcerpc",
+ "fabi-dcom",
+ "fabi-wmio",
  "hex",
  "hex-literal",
  "kerbsec",
  "libc",
  "serde",
  "serde_json",
- "sspi",
  "thiserror 1.0.69",
  "tracing",
  "tracing-subscriber",

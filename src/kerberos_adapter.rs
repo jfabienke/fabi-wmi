@@ -29,7 +29,7 @@
 //! - ✅ **Credential caching**: Native support via `ccache` feature,
 //!   eliminating need for kinit subprocess calls.
 
-use crate::auth::{AuthError, AuthProvider, Credentials};
+use fabi_dcerpc::{AuthError, AuthProvider, Credentials, AUTH_TYPE_KERBEROS};
 use std::path::PathBuf;
 use std::time::Duration;
 use thiserror::Error;
@@ -372,7 +372,7 @@ impl KerberosClient {
                 let cache_string = Self::configure_cache(
                     config.cache_backend,
                     config.cache_path.clone(),
-                    &creds.username,
+                    creds.username(),
                 );
 
                 // Set the cache path in the builder
@@ -398,8 +398,8 @@ impl KerberosClient {
 
             // Note: Credentials will be acquired via kinit or cache
             // kerbsec uses the KRB5CCNAME environment variable
-            if !creds.username.is_empty() && !creds.password.is_empty() {
-                debug!("Credentials available for user: {}", creds.username);
+            if creds.validate().is_ok() {
+                debug!("Credentials available for user: {}", creds.username());
                 // Credentials are handled via the cache configuration above
             } else if config.keytab_path.is_some() {
                 // Keytab usage would be configured via environment
@@ -625,6 +625,10 @@ impl KerberosClient {
 }
 
 impl AuthProvider for KerberosClient {
+    fn auth_type(&self) -> u8 {
+        AUTH_TYPE_KERBEROS
+    }
+
     fn negotiate(&mut self) -> Result<Vec<u8>, AuthError> {
         // For DCE/RPC, this is the first leg (AP-REQ)
         self.bind_token().map_err(|_| AuthError::Creds)

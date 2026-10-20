@@ -5,6 +5,13 @@ use std::fmt;
 use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+/// `RPC_C_AUTHN_GSS_NEGOTIATE` (SPNEGO).
+pub const AUTH_TYPE_SPNEGO: u8 = 0x09;
+/// `RPC_C_AUTHN_WINNT` (NTLMSSP).
+pub const AUTH_TYPE_NTLM: u8 = 0x0A;
+/// `RPC_C_AUTHN_GSS_KERBEROS` (Kerberos v5).
+pub const AUTH_TYPE_KERBEROS: u8 = 0x10;
+
 #[derive(Error, Debug)]
 pub enum AuthError {
     #[error("username and password are required")]
@@ -46,7 +53,7 @@ impl Credentials {
         &self.domain
     }
 
-    pub(crate) fn validate(&self) -> Result<(), AuthError> {
+    pub fn validate(&self) -> Result<(), AuthError> {
         if self.username.is_empty() || self.password.is_empty() {
             return Err(AuthError::Creds);
         }
@@ -67,7 +74,25 @@ impl fmt::Debug for Credentials {
 /// A security context that authenticates one RPC association and protects its
 /// PDUs (MS-RPCE 2.2.2.11): the handshake tokens, and the per-PDU signature or
 /// encryption for the packet-integrity and packet-privacy levels.
-pub(crate) trait AuthProvider: Send {
+pub trait AuthProvider: Send {
+    /// Wire `auth_type` byte for `sec_trailer` (e.g. [`AUTH_TYPE_NTLM`],
+    /// [`AUTH_TYPE_KERBEROS`], [`AUTH_TYPE_SPNEGO`]).
+    fn auth_type(&self) -> u8 {
+        AUTH_TYPE_NTLM
+    }
+
+    /// Byte length of the `auth_value` (signature / GSS token) that
+    /// [`seal_rpc`](Self::seal_rpc) (`sealed = true`) or
+    /// [`sign_rpc`](Self::sign_rpc) (`sealed = false`) will return for a
+    /// padded stub of `padded_stub_len` bytes.
+    ///
+    /// Required before signing because `frag_length` and `auth_length` sit in
+    /// the signed PDU header.
+    fn auth_value_len(&mut self, sealed: bool, padded_stub_len: usize) -> Result<usize, AuthError> {
+        let _ = (sealed, padded_stub_len);
+        Ok(16)
+    }
+
     fn negotiate(&mut self) -> Result<Vec<u8>, AuthError>;
     fn respond(&mut self, challenge: &[u8]) -> Result<Vec<u8>, AuthError>;
 

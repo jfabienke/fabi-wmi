@@ -1,8 +1,7 @@
-//! MS-WMIO decoding: turn the objects returned by
-//! IEnumWbemClassObject::Next into JSON.
+//! MS-WMIO decoding: turn raw MS-WMIO encoding units (`IWbemClassObject`
+//! payloads) into JSON.
 //!
-//! Each returned IWbemClassObject is an OBJREF_CUSTOM wrapping a WMIO encoding
-//! unit. Instances are decoded, decorated or not, with scalar and array values
+//! Instances are decoded, decorated or not, with scalar and array values
 //! of every CIM type, embedded objects, and NULL / class-default handling from
 //! the NdTable. Class definitions and per-property instance qualifiers are
 //! rejected as unsupported rather than guessed at.
@@ -13,103 +12,21 @@ use thiserror::Error;
 pub enum WmioError {
     #[error("malformed WMIO data")]
     Malformed,
-    #[error("unexpected custom marshaler CLSID")]
-    NotWbemObject,
     #[error("bad WMIO signature {0:#010x}")]
     BadSignature(u32),
     #[error("WMIO object has an unsupported shape (decoration or per-property qualifiers)")]
     Unsupported,
     #[error("CIM type {0:#06x} not yet decoded")]
     UnsupportedType(u16),
-    #[error("enumeration failed (hr={0:#010x})")]
-    Hresult(u32),
 }
 
-/// HRESULT from IEnumWbemClassObject::Next when fewer objects than requested
-/// were returned, i.e. the enumeration is complete (MS-WMI 2.2.11).
-const WBEM_S_FALSE: u32 = 0x0000_0001;
-
-const OBJREF_SIGNATURE: &[u8; 4] = b"MEOW";
-const OBJREF_CUSTOM: u32 = 0x4;
-/// CLSID_WbemClassObject {4590F812-1D3A-11D0-891F-00AA004B2E24}, little-endian.
-const CLSID_WBEM_CLASS_OBJECT: [u8; 16] = hex_literal::hex!("12f890453a1dd011891f00aa004b2e24");
 /// MS-WMIO 2.2.1 encoding-unit signature.
-const WMIO_SIGNATURE: u32 = 0x1234_5678;
+pub const WMIO_SIGNATURE: u32 = 0x1234_5678;
 
 fn rd_u32(b: &[u8], off: usize) -> Result<u32, WmioError> {
     b.get(off..off + 4)
         .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
         .ok_or(WmioError::Malformed)
-}
-
-/// One IWbemClassObject returned from Next, as its raw MS-WMIO encoding unit.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WmioBlob {
-    pub data: Vec<u8>,
-}
-
-/// Extract the WMIO encoding units of every object in an
-/// IEnumWbemClassObject::Next response stub (ORPCTHAT, apObjects array,
-/// puReturned, HRESULT). Each object is an OBJREF_CUSTOM wrapping the WMIO data.
-pub(crate) fn parse_next_response(stub: &[u8]) -> Result<Vec<WmioBlob>, WmioError> {
-    // The call's HRESULT is the last 4 bytes; WBEM_S_FALSE ends the
-    // enumeration and is not an error.
-    let hr = stub
-        .len()
-        .checked_sub(4)
-        .map(|o| rd_u32(stub, o))
-        .ok_or(WmioError::Malformed)??;
-    if hr != 0 && hr != WBEM_S_FALSE {
-        return Err(WmioError::Hresult(hr));
-    }
-
-    // ORPCTHAT: flags, extensions pointer (null in practice).
-    let mut off = 8usize;
-    // apObjects: conformant+varying array of unique pointers.
-    let _max_count = rd_u32(stub, off)?;
-    off += 4;
-    let _offset = rd_u32(stub, off)?;
-    off += 4;
-    let actual = rd_u32(stub, off)? as usize;
-    off += 4;
-
-    let mut referents = Vec::with_capacity(actual);
-    for _ in 0..actual {
-        referents.push(rd_u32(stub, off)?);
-        off += 4;
-    }
-
-    let mut blobs = Vec::new();
-    for referent in referents {
-        if referent == 0 {
-            continue;
-        }
-        // MInterfacePointer: conformant struct { max_count, ulCntData, abData }.
-        let _mp_max = rd_u32(stub, off)?;
-        off += 4;
-        let cnt = rd_u32(stub, off)? as usize;
-        off += 4;
-        let objref = stub.get(off..off + cnt).ok_or(WmioError::Malformed)?;
-        // NDR aligns the next pointee to 4 bytes.
-        off = (off + cnt + 3) & !3;
-        blobs.push(WmioBlob {
-            data: parse_objref_custom(objref)?.to_vec(),
-        });
-    }
-    Ok(blobs)
-}
-
-/// Validate an OBJREF_CUSTOM for IWbemClassObject and return its WMIO payload.
-fn parse_objref_custom(objref: &[u8]) -> Result<&[u8], WmioError> {
-    // signature(4) flags(4) iid(16) clsid(16) cbExtension(4) size(4) pData[size]
-    if objref.get(0..4) != Some(OBJREF_SIGNATURE) || rd_u32(objref, 4)? != OBJREF_CUSTOM {
-        return Err(WmioError::Malformed);
-    }
-    if objref.get(24..40) != Some(&CLSID_WBEM_CLASS_OBJECT) {
-        return Err(WmioError::NotWbemObject);
-    }
-    let size = rd_u32(objref, 44)? as usize;
-    objref.get(48..48 + size).ok_or(WmioError::Malformed)
 }
 
 const OBJECT_FLAG_INSTANCE: u8 = 0x02;
@@ -234,22 +151,22 @@ pub(crate) struct ClassPart {
 
 /// CIM base types (MS-WMIO 2.2.7). Flags 0x2000 (array) and 0x4000 (BYREF)/
 /// inherited are masked off by the caller.
-pub(crate) const CIM_SINT16: u16 = 2;
-pub(crate) const CIM_SINT32: u16 = 3;
-pub(crate) const CIM_REAL32: u16 = 4;
-pub(crate) const CIM_REAL64: u16 = 5;
-pub(crate) const CIM_STRING: u16 = 8;
-pub(crate) const CIM_BOOLEAN: u16 = 11;
-pub(crate) const CIM_OBJECT: u16 = 13;
-pub(crate) const CIM_SINT8: u16 = 16;
-pub(crate) const CIM_UINT8: u16 = 17;
-pub(crate) const CIM_UINT16: u16 = 18;
-pub(crate) const CIM_UINT32: u16 = 19;
-pub(crate) const CIM_SINT64: u16 = 20;
-pub(crate) const CIM_UINT64: u16 = 21;
-pub(crate) const CIM_DATETIME: u16 = 101;
-pub(crate) const CIM_REFERENCE: u16 = 102;
-pub(crate) const CIM_CHAR16: u16 = 103;
+pub const CIM_SINT16: u16 = 2;
+pub const CIM_SINT32: u16 = 3;
+pub const CIM_REAL32: u16 = 4;
+pub const CIM_REAL64: u16 = 5;
+pub const CIM_STRING: u16 = 8;
+pub const CIM_BOOLEAN: u16 = 11;
+pub const CIM_OBJECT: u16 = 13;
+pub const CIM_SINT8: u16 = 16;
+pub const CIM_UINT8: u16 = 17;
+pub const CIM_UINT16: u16 = 18;
+pub const CIM_UINT32: u16 = 19;
+pub const CIM_SINT64: u16 = 20;
+pub const CIM_UINT64: u16 = 21;
+pub const CIM_DATETIME: u16 = 101;
+pub const CIM_REFERENCE: u16 = 102;
+pub const CIM_CHAR16: u16 = 103;
 
 /// Parse a CLASS_PART (MS-WMIO 2.2.15) at `start` within the WMIO blob.
 fn parse_class_part(wmio: &[u8], start: usize) -> Result<ClassPart, WmioError> {
@@ -319,18 +236,9 @@ fn parse_class_part(wmio: &[u8], start: usize) -> Result<ClassPart, WmioError> {
     })
 }
 
-/// Decode every object returned by an IEnumWbemClassObject::Next response into
-/// one JSON object per row — the entry point the WMI client calls on each batch.
-pub(crate) fn decode_next_response(stub: &[u8]) -> Result<Vec<serde_json::Value>, WmioError> {
-    parse_next_response(stub)?
-        .iter()
-        .map(|blob| decode_object(&blob.data))
-        .collect()
-}
-
 /// Decode one WMIO encoding unit (a CIM instance) into a JSON object of its
 /// property values. System properties (`__SERVER`, ...) are not included.
-pub(crate) fn decode_object(wmio: &[u8]) -> Result<serde_json::Value, WmioError> {
+pub fn decode_object(wmio: &[u8]) -> Result<serde_json::Value, WmioError> {
     let header = parse_object_header(wmio)?;
     decode_instance(wmio, header, 0)
 }
@@ -509,23 +417,23 @@ fn decode_scalar(
 mod tests {
     use super::*;
 
-    /// IEnumWbemClassObject::Next response the DC sent for the one-row query
-    /// SELECT ... FROM Win32_ComputerSystem (cleartext stub). Non-sensitive.
-    const NEXT_RESULT: &[u8] = include_bytes!("testdata/next_response_result.bin");
-
-    #[test]
-    fn parse_next_response_extracts_one_wmio_object() {
-        let blobs = parse_next_response(NEXT_RESULT).unwrap();
-        assert_eq!(blobs.len(), 1);
-        // The WMIO encoding unit starts with the 0x12345678 signature.
-        assert_eq!(&blobs[0].data[0..4], &WMIO_SIGNATURE.to_le_bytes());
-        assert_eq!(blobs[0].data.len(), 12010);
-    }
+    /// WMIO encoding unit for the one-row query
+    /// `SELECT ... FROM Win32_ComputerSystem`. Non-sensitive.
+    const WMIO_RESULT: &[u8] = include_bytes!("testdata/wmio_result.bin");
+    /// `SELECT * FROM Win32_Service WHERE Name = "Winmgmt"` from Windows Server
+    /// 2022: a decorated instance (ObjectFlags 0x06). Non-sensitive lab data.
+    const WMIO_SERVICE: &[u8] = include_bytes!("testdata/wmio_service.bin");
+    /// `SELECT * FROM Win32_NetworkAdapterConfiguration WHERE IPEnabled = TRUE`
+    /// from the same lab VM (QEMU NAT addressing): string and integer arrays.
+    const WMIO_NIC: &[u8] = include_bytes!("testdata/wmio_nic.bin");
+    /// `SELECT * FROM __Win32Provider WHERE Name = "CIMWin32"`: three
+    /// properties (Pure, PerLocale-/PerUserInitialization) carry NdTable 0b10,
+    /// i.e. take their value from the class default rather than the instance.
+    const WMIO_PROVIDER: &[u8] = include_bytes!("testdata/wmio_provider.bin");
 
     #[test]
     fn parse_object_header_reports_instance() {
-        let blobs = parse_next_response(NEXT_RESULT).unwrap();
-        let hdr = parse_object_header(&blobs[0].data).unwrap();
+        let hdr = parse_object_header(WMIO_RESULT).unwrap();
         assert!(hdr.is_instance, "the result row is a CIM instance");
         assert!(!hdr.has_decoration);
     }
@@ -542,9 +450,8 @@ mod tests {
 
     #[test]
     fn parse_class_part_decodes_win32_computersystem() {
-        let blobs = parse_next_response(NEXT_RESULT).unwrap();
         // Instance: ENCODING_UNIT(8) + ObjectFlags(1); CurrentClass.ClassPart at 9.
-        let cp = parse_class_part(&blobs[0].data, 9).unwrap();
+        let cp = parse_class_part(WMIO_RESULT, 9).unwrap();
         assert_eq!(cp.class_name, "Win32_ComputerSystem");
         let got: Vec<(&str, u16, usize)> = cp
             .properties
@@ -562,69 +469,9 @@ mod tests {
         );
     }
 
-    /// Next response that ended the enumeration: no objects, WBEM_S_FALSE.
-    const NEXT_END: [u8; 28] =
-        hex_literal::hex!("00000000000000000100000000000000000000000000000001000000");
-
-    #[test]
-    fn parse_next_response_end_of_enumeration_is_empty() {
-        assert_eq!(parse_next_response(&NEXT_END).unwrap(), vec![]);
-    }
-
-    #[test]
-    fn parse_next_response_accepts_wbem_s_false_with_objects() {
-        // A batch request that got fewer objects than asked for: S_FALSE.
-        let mut stub = NEXT_RESULT.to_vec();
-        let at = stub.len() - 4;
-        stub[at..].copy_from_slice(&1u32.to_le_bytes()); // WBEM_S_FALSE on the wire
-        assert_eq!(decode_next_response(&stub).unwrap().len(), 1);
-    }
-
-    #[test]
-    fn parse_next_response_reports_failure_hresult() {
-        let mut stub = NEXT_END;
-        stub[24..].copy_from_slice(&0x8004_1010u32.to_le_bytes()); // WBEM_E_INVALID_CLASS
-        assert_eq!(
-            parse_next_response(&stub),
-            Err(WmioError::Hresult(0x8004_1010))
-        );
-    }
-
-    #[test]
-    fn parse_next_response_aligns_between_objects() {
-        // Two copies of the fixture object. Its OBJREF length is not a multiple
-        // of 4, so the second MInterfacePointer starts after NDR alignment pad.
-        let cnt = rd_u32(NEXT_RESULT, 28).unwrap() as usize;
-        assert_ne!(cnt % 4, 0, "fixture must exercise the pad");
-        let pointee = &NEXT_RESULT[24..32 + cnt];
-        let pad = vec![0u8; (4 - cnt % 4) % 4];
-        let mut stub = NEXT_RESULT[..8].to_vec(); // ORPCTHAT
-        for v in [2u32, 0, 2, 0x0002_0000, 0x0002_0004] {
-            stub.extend_from_slice(&v.to_le_bytes()); // max, offset, actual, referents
-        }
-        for _ in 0..2 {
-            stub.extend_from_slice(pointee);
-            stub.extend_from_slice(&pad);
-        }
-        stub.extend_from_slice(&2u32.to_le_bytes()); // puReturned
-        stub.extend_from_slice(&0u32.to_le_bytes()); // S_OK
-        let rows = decode_next_response(&stub).unwrap();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0], rows[1]);
-    }
-
-    #[test]
-    fn decode_next_response_returns_one_row_per_object() {
-        let rows = decode_next_response(NEXT_RESULT).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["Name"], "DC01");
-        assert_eq!(rows[0]["Domain"], "test.local");
-    }
-
     #[test]
     fn decode_object_produces_the_query_row_json() {
-        let blobs = parse_next_response(NEXT_RESULT).unwrap();
-        let value = decode_object(&blobs[0].data).unwrap();
+        let value = decode_object(WMIO_RESULT).unwrap();
         assert_eq!(
             value,
             serde_json::json!({
@@ -636,23 +483,9 @@ mod tests {
         );
     }
 
-    /// `SELECT * FROM Win32_Service WHERE Name = "Winmgmt"` from Windows Server
-    /// 2022: a decorated instance (ObjectFlags 0x06). Non-sensitive lab data.
-    const NEXT_SERVICE: &[u8] = include_bytes!("testdata/next_response_service.bin");
-    /// `SELECT * FROM Win32_NetworkAdapterConfiguration WHERE IPEnabled = TRUE`
-    /// from the same lab VM (QEMU NAT addressing): string and integer arrays.
-    const NEXT_NIC: &[u8] = include_bytes!("testdata/next_response_nic.bin");
-
-    fn only_row(stub: &[u8]) -> serde_json::Value {
-        let mut rows = decode_next_response(stub).unwrap();
-        assert_eq!(rows.len(), 1);
-        rows.pop().unwrap()
-    }
-
     #[test]
     fn parse_object_header_skips_decoration() {
-        let blobs = parse_next_response(NEXT_SERVICE).unwrap();
-        let hdr = parse_object_header(&blobs[0].data).unwrap();
+        let hdr = parse_object_header(WMIO_SERVICE).unwrap();
         assert!(hdr.is_instance && hdr.has_decoration);
         // ObjectFlags at 8, then "\0WIN2022WMI\0" and "\0root\\cimv2\0".
         assert_eq!(hdr.body_offset, 9 + 12 + 12);
@@ -661,7 +494,7 @@ mod tests {
     #[test]
     fn decode_object_decodes_decorated_select_star_instance() {
         // Values cross-checked against Get-WmiObject on the same host.
-        let row = only_row(NEXT_SERVICE);
+        let row = decode_object(WMIO_SERVICE).unwrap();
         assert_eq!(row.as_object().unwrap().len(), 26);
         assert_eq!(row["Name"], "Winmgmt");
         assert_eq!(row["State"], "Running");
@@ -680,7 +513,7 @@ mod tests {
     #[test]
     fn decode_object_decodes_arrays() {
         use serde_json::json;
-        let row = only_row(NEXT_NIC);
+        let row = decode_object(WMIO_NIC).unwrap();
         assert_eq!(row.as_object().unwrap().len(), 61);
         assert_eq!(
             row["IPAddress"],
@@ -701,11 +534,6 @@ mod tests {
         assert_eq!(row["Index"], 1);
     }
 
-    /// `SELECT * FROM __Win32Provider WHERE Name = "CIMWin32"`: three
-    /// properties (Pure, PerLocale-/PerUserInitialization) carry NdTable 0b10,
-    /// i.e. take their value from the class default rather than the instance.
-    const NEXT_PROVIDER: &[u8] = include_bytes!("testdata/next_response_provider.bin");
-
     #[test]
     fn decode_object_takes_class_defaults() {
         // Matches Get-WmiObject on the same host, field for field.
@@ -721,20 +549,19 @@ mod tests {
             "SupportsQuotas": null, "SupportsSendStatus": null, "SupportsShutdown": null,
             "SupportsThrottling": null, "UnloadTimeout": null, "Version": null,
         });
-        assert_eq!(only_row(NEXT_PROVIDER), expected);
+        assert_eq!(decode_object(WMIO_PROVIDER).unwrap(), expected);
     }
 
     #[test]
     fn decode_value_decodes_embedded_object() {
         // A CIM_OBJECT value is a heap ref to ObjectEncodingLength + ObjectBlock.
         // Embed the service instance's ObjectBlock and expect the same row.
-        let blobs = parse_next_response(NEXT_SERVICE).unwrap();
-        let block = &blobs[0].data[8..];
+        let block = &WMIO_SERVICE[8..];
         let mut heap = vec![0u8; 3]; // embedded object not at heap offset 0
         heap.extend_from_slice(&(block.len() as u32).to_le_bytes());
         heap.extend_from_slice(block);
         let value = decode_value(CIM_OBJECT, false, &3u32.to_le_bytes(), 0, &heap, 0).unwrap();
-        assert_eq!(value, only_row(NEXT_SERVICE));
+        assert_eq!(value, decode_object(WMIO_SERVICE).unwrap());
         assert_eq!(
             decode_value(
                 CIM_OBJECT,
@@ -769,8 +596,7 @@ mod tests {
         // Windows zero-pads an instance encoding past the end of its heap
         // (service: data ends at 6271 of 6611 bytes, NIC: 12184 of 12263), so
         // cuts inside that padding still decode; any cut into data must error.
-        for (stub, data_end) in [(NEXT_SERVICE, 6271), (NEXT_NIC, 12184)] {
-            let blob = &parse_next_response(stub).unwrap()[0].data;
+        for (blob, data_end) in [(WMIO_SERVICE, 6271), (WMIO_NIC, 12184)] {
             for len in 8..blob.len() {
                 let mut cut = blob[..len].to_vec();
                 cut[4..8].copy_from_slice(&((len - 8) as u32).to_le_bytes());
@@ -832,14 +658,5 @@ mod tests {
         assert_eq!(encoded_string(&ascii, 0).unwrap(), "ABC");
         let uni = [1u8, b'A', 0, b'B', 0, 0, 0];
         assert_eq!(encoded_string(&uni, 0).unwrap(), "AB");
-    }
-
-    #[test]
-    fn parse_objref_custom_rejects_wrong_clsid() {
-        let mut objref = vec![0u8; 48];
-        objref[0..4].copy_from_slice(OBJREF_SIGNATURE);
-        objref[4..8].copy_from_slice(&OBJREF_CUSTOM.to_le_bytes());
-        // leave clsid zeroed -> not WbemClassObject
-        assert_eq!(parse_objref_custom(&objref), Err(WmioError::NotWbemObject));
     }
 }

@@ -1,3 +1,6 @@
+[workspace]
+members = ["crates/fabi-wmio", "crates/fabi-dcerpc", "crates/fabi-dcom"]
+
 [package]
 name = "linux-wmi"
 version = "0.2.0"
@@ -13,6 +16,9 @@ path = "examples/wmi_query.rs"
 
 [dependencies]
 byteorder = "1.5"
+fabi-dcerpc = { path = "crates/fabi-dcerpc" }
+fabi-dcom = { path = "crates/fabi-dcom" }
+fabi-wmio = { path = "crates/fabi-wmio" }
 hex = "0.4"
 hex-literal = "0.4"
 libc = "0.2"
@@ -22,8 +28,6 @@ thiserror = "1.0"
 tracing = "0.1"
 uuid = { version = "1.10", features = ["v4"] }
 zeroize = { version = "1.7", features = ["derive"] }
-# Pure-Rust SSPI (Devolutions sspi-rs): NTLM handshake and RPC message protection
-sspi = { version = "0.23", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 # Kerberos via the system GSS-API (internal kerbsec crate)

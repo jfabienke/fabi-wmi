@@ -13,7 +13,7 @@ use sspi::{
 
 use sspi::ntlm::NtlmConfig;
 
-use crate::auth::{AuthError, AuthProvider, Credentials};
+use crate::auth::{AuthError, AuthProvider, Credentials, AUTH_TYPE_NTLM};
 
 const SIGNATURE_LEN: usize = 16;
 
@@ -87,6 +87,18 @@ impl SspiNtlmClient {
 }
 
 impl AuthProvider for SspiNtlmClient {
+    fn auth_type(&self) -> u8 {
+        AUTH_TYPE_NTLM
+    }
+
+    fn auth_value_len(
+        &mut self,
+        _sealed: bool,
+        _padded_stub_len: usize,
+    ) -> Result<usize, AuthError> {
+        Ok(SIGNATURE_LEN)
+    }
+
     fn negotiate(&mut self) -> Result<Vec<u8>, AuthError> {
         self.step(None)
     }

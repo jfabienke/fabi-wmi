@@ -9,7 +9,10 @@
 #![allow(dead_code)]
 
 use byteorder::{LittleEndian, WriteBytesExt};
+use fabi_dcom::{find_std_objref, parse_m_interface_pointer, DcomError, ObjRef};
 use thiserror::Error;
+
+pub(crate) use fabi_dcom::{encode_orpcthis, encode_rem_release, InterfaceRef, IID_IREMUNKNOWN};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum WmiProtoError {
@@ -17,12 +20,15 @@ pub enum WmiProtoError {
     Malformed,
     #[error("response returned an unexpected interface")]
     WrongInterface,
+    #[error("unexpected custom marshaler CLSID")]
+    NotWbemObject,
     #[error("WMI call failed (hr={0:#010x})")]
     Hresult(u32),
 }
 
-/// IID of IRemUnknown, the OXID object used to release references.
-pub(crate) const IID_IREMUNKNOWN: [u8; 16] = hex_literal::hex!("3101000000000000c000000000000046");
+/// CLSID of WbemLevel1Login {8bc3f05e-d86b-11d0-a075-00c04fb68820}.
+pub(crate) const CLSID_WBEM_LEVEL1_LOGIN: [u8; 16] =
+    hex_literal::hex!("5ef0c38b6bd8d011a07500c04fb68820");
 /// IID of IWbemLevel1Login (activated from CLSID_WbemLevel1Login).
 pub(crate) const IID_IWBEM_LEVEL1_LOGIN: [u8; 16] =
     hex_literal::hex!("18ad09f36ad8d011a07500c04fb68820");
@@ -33,23 +39,10 @@ pub(crate) const IID_IWBEM_SERVICES: [u8; 16] =
 pub(crate) const IID_IENUM_WBEM_CLASS_OBJECT: [u8; 16] =
     hex_literal::hex!("e147790231d7ce11a357000000000001");
 
-/// COMVERSION used by current Windows: 5.7.
-const COMVERSION: [u8; 4] = [5, 0, 7, 0];
-
 /// Base NDR referent id for the first unique pointer in a stub. The exact
 /// value is immaterial to the server as long as referents are non-zero and
 /// distinct within a call; later pointers use REFERENT_BASE + 4*n.
 const REFERENT_BASE: u32 = 0x0002_0000;
-
-/// Encode an ORPCTHIS header (MS-DCOM 2.2.13.1): COMVERSION, flags, reserved,
-/// causality id, and a null extensions pointer. 32 bytes.
-pub(crate) fn encode_orpcthis(buf: &mut Vec<u8>, causality_id: &[u8; 16]) {
-    buf.extend_from_slice(&COMVERSION);
-    buf.write_u32::<LittleEndian>(0).unwrap(); // flags
-    buf.write_u32::<LittleEndian>(0).unwrap(); // reserved1
-    buf.extend_from_slice(causality_id); // cid
-    buf.write_u32::<LittleEndian>(0).unwrap(); // extensions: null
-}
 
 /// Pad `buf` to a 4-byte NDR boundary with the given fill byte.
 fn align4(buf: &mut Vec<u8>, fill: u8) {
@@ -138,14 +131,6 @@ pub(crate) fn encode_enum_next(causality_id: &[u8; 16], timeout: i32, count: u32
     buf
 }
 
-/// An interface pointer returned by the server: the IPID to address calls to
-/// and the public references held on it (released with RemRelease).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct InterfaceRef {
-    pub ipid: [u8; 16],
-    pub public_refs: u32,
-}
-
 /// Parse a response whose [out] parameter is an interface pointer (NTLMLogin,
 /// ExecQuery): confirm the call's HRESULT (last 4 bytes) is success, locate the
 /// returned OBJREF_STANDARD by its "MEOW" signature, check it is standard and
@@ -154,13 +139,6 @@ pub(crate) fn parse_interface_response(
     stub: &[u8],
     expected_iid: &[u8; 16],
 ) -> Result<InterfaceRef, WmiProtoError> {
-    const FLAGS_OFF: usize = 4;
-    const IID_OFF: usize = 8;
-    const PUBLIC_REFS_OFF: usize = 28; // sig(4)+flags(4)+iid(16)+std.flags(4)
-    const IPID_OFF: usize = 48; // sig(4)+flags(4)+iid(16)+std{flags(4)+crefs(4)+oxid(8)+oid(8)}
-    const OBJREF_END: usize = IPID_OFF + 16;
-    const OBJREF_STANDARD: u32 = 1;
-
     let hr = stub
         .len()
         .checked_sub(4)
@@ -171,58 +149,17 @@ pub(crate) fn parse_interface_response(
         return Err(WmiProtoError::Hresult(hr));
     }
 
-    // The OBJREF sits inside an MInterfacePointer wrapper (referent, max_count,
-    // ulCntData) that follows ORPCTHAT. Scan past ORPCTHAT (>= 8 bytes) so a
-    // "MEOW" in its flags/extensions pointer cannot be mistaken for the OBJREF.
+    // Scan past ORPCTHAT (>= 8 bytes) so a "MEOW" in its flags/extensions
+    // pointer cannot be mistaken for the OBJREF.
     const ORPCTHAT_MIN: usize = 8;
-    let scan = stub.get(ORPCTHAT_MIN..).ok_or(WmiProtoError::Malformed)?;
-    let meow = ORPCTHAT_MIN
-        + scan
-            .windows(4)
-            .position(|w| w == b"MEOW")
-            .ok_or(WmiProtoError::Malformed)?;
-    // Validate the MInterfacePointer: max_count and ulCntData (the 8 bytes
-    // before the OBJREF) must agree and bound the OBJREF within the stub.
-    if meow < 8 {
-        return Err(WmiProtoError::Malformed);
-    }
-    let max_count = u32::from_le_bytes(stub[meow - 8..meow - 4].try_into().unwrap()) as usize;
-    let cnt_data = u32::from_le_bytes(stub[meow - 4..meow].try_into().unwrap()) as usize;
-    if max_count != cnt_data || cnt_data < OBJREF_END || meow + cnt_data > stub.len() {
-        return Err(WmiProtoError::Malformed);
-    }
-    let objref = &stub[meow..meow + OBJREF_END];
-    if u32::from_le_bytes(objref[FLAGS_OFF..FLAGS_OFF + 4].try_into().unwrap()) != OBJREF_STANDARD {
-        return Err(WmiProtoError::Malformed);
-    }
-    if &objref[IID_OFF..IID_OFF + 16] != expected_iid {
-        return Err(WmiProtoError::WrongInterface);
-    }
-    Ok(InterfaceRef {
-        ipid: objref[IPID_OFF..IPID_OFF + 16].try_into().unwrap(),
-        public_refs: u32::from_le_bytes(
-            objref[PUBLIC_REFS_OFF..PUBLIC_REFS_OFF + 4]
-                .try_into()
-                .unwrap(),
-        ),
-    })
-}
-
-/// Encode the IRemUnknown::RemRelease (opnum 5) request stub (MS-DCOM
-/// 3.1.1.5.6.1.3): ORPCTHIS, cInterfaceRefs, then a conformant array of
-/// REMINTERFACEREF { ipid, cPublicRefs, cPrivateRefs }.
-pub(crate) fn encode_rem_release(causality_id: &[u8; 16], refs: &[InterfaceRef]) -> Vec<u8> {
-    let mut buf = Vec::new();
-    encode_orpcthis(&mut buf, causality_id);
-    buf.write_u16::<LittleEndian>(refs.len() as u16).unwrap();
-    align4(&mut buf, 0);
-    buf.write_u32::<LittleEndian>(refs.len() as u32).unwrap(); // max_count
-    for r in refs {
-        buf.extend_from_slice(&r.ipid);
-        buf.write_u32::<LittleEndian>(r.public_refs).unwrap();
-        buf.write_u32::<LittleEndian>(0).unwrap(); // cPrivateRefs
-    }
-    buf
+    let std =
+        find_std_objref(stub, ORPCTHAT_MIN, None, Some(expected_iid), true).map_err(
+            |e| match e {
+                DcomError::WrongInterface => WmiProtoError::WrongInterface,
+                _ => WmiProtoError::Malformed,
+            },
+        )?;
+    Ok(std.as_interface_ref())
 }
 
 /// Check a RemRelease response stub (ORPCTHAT, HRESULT).
@@ -239,9 +176,94 @@ pub(crate) fn parse_rem_release_response(stub: &[u8]) -> Result<(), WmiProtoErro
     Ok(())
 }
 
+/// HRESULT from IEnumWbemClassObject::Next when fewer objects than requested
+/// were returned, i.e. the enumeration is complete (MS-WMI 2.2.11).
+const WBEM_S_FALSE: u32 = 0x0000_0001;
+
+/// CLSID_WbemClassObject {4590F812-1D3A-11D0-891F-00AA004B2E24}, little-endian.
+const CLSID_WBEM_CLASS_OBJECT: [u8; 16] = hex_literal::hex!("12f890453a1dd011891f00aa004b2e24");
+
+fn rd_u32(b: &[u8], off: usize) -> Result<u32, WmiProtoError> {
+    b.get(off..off + 4)
+        .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
+        .ok_or(WmiProtoError::Malformed)
+}
+
+/// One IWbemClassObject returned from Next, as its raw MS-WMIO encoding unit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WmioBlob {
+    pub data: Vec<u8>,
+}
+
+/// Extract the WMIO encoding units of every object in an
+/// IEnumWbemClassObject::Next response stub (ORPCTHAT, apObjects array,
+/// puReturned, HRESULT). Each object is an OBJREF_CUSTOM wrapping the WMIO data.
+pub(crate) fn parse_next_response(stub: &[u8]) -> Result<Vec<WmioBlob>, WmiProtoError> {
+    // The call's HRESULT is the last 4 bytes; WBEM_S_FALSE ends the
+    // enumeration and is not an error.
+    let hr = stub
+        .len()
+        .checked_sub(4)
+        .map(|o| rd_u32(stub, o))
+        .ok_or(WmiProtoError::Malformed)??;
+    if hr != 0 && hr != WBEM_S_FALSE {
+        return Err(WmiProtoError::Hresult(hr));
+    }
+
+    // ORPCTHAT: flags, extensions pointer (null in practice).
+    let mut off = 8usize;
+    // apObjects: conformant+varying array of unique pointers.
+    let _max_count = rd_u32(stub, off)?;
+    off += 4;
+    let _offset = rd_u32(stub, off)?;
+    off += 4;
+    let actual = rd_u32(stub, off)? as usize;
+    off += 4;
+
+    let mut referents = Vec::with_capacity(actual);
+    for _ in 0..actual {
+        referents.push(rd_u32(stub, off)?);
+        off += 4;
+    }
+
+    let mut blobs = Vec::new();
+    for referent in referents {
+        if referent == 0 {
+            continue;
+        }
+        let (objref, end) =
+            parse_m_interface_pointer(stub, off).map_err(|_| WmiProtoError::Malformed)?;
+        // NDR aligns the next pointee to 4 bytes.
+        off = (end + 3) & !3;
+        let data = expect_wbem_custom(objref)?;
+        blobs.push(WmioBlob {
+            data: data.to_vec(),
+        });
+    }
+    Ok(blobs)
+}
+
+/// Validate an OBJREF_CUSTOM for IWbemClassObject and return its WMIO payload.
+fn parse_objref_custom(objref: &[u8]) -> Result<&[u8], WmiProtoError> {
+    expect_wbem_custom(ObjRef::parse(objref).map_err(|_| WmiProtoError::Malformed)?)
+}
+
+fn expect_wbem_custom(objref: ObjRef<'_>) -> Result<&[u8], WmiProtoError> {
+    match objref {
+        ObjRef::Custom { clsid, data, .. } => {
+            if clsid != CLSID_WBEM_CLASS_OBJECT {
+                return Err(WmiProtoError::NotWbemObject);
+            }
+            Ok(data)
+        }
+        ObjRef::Standard { .. } => Err(WmiProtoError::Malformed),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fabi_dcom::{OBJREF_CUSTOM, OBJREF_SIGNATURE};
 
     /// IWbemLevel1Login::NTLMLogin("//./root/cimv2") request stub impacket sent
     /// to a Windows Server 2022 DC (cleartext, accepted). Non-sensitive.
@@ -442,5 +464,81 @@ mod tests {
         assert_eq!(&buf[0..4], &[5, 0, 7, 0]);
         assert_eq!(&buf[12..28], &[0xAB; 16]);
         assert_eq!(&buf[28..32], &[0, 0, 0, 0]); // null extensions
+    }
+
+    /// IEnumWbemClassObject::Next response the DC sent for the one-row query
+    /// SELECT ... FROM Win32_ComputerSystem (cleartext stub). Non-sensitive.
+    const NEXT_RESULT: &[u8] = include_bytes!("testdata/next_response_result.bin");
+    const WMIO_RESULT: &[u8] = include_bytes!("../crates/fabi-wmio/src/testdata/wmio_result.bin");
+
+    #[test]
+    fn parse_next_response_extracts_one_wmio_object() {
+        let blobs = parse_next_response(NEXT_RESULT).unwrap();
+        assert_eq!(blobs.len(), 1);
+        assert_eq!(blobs[0].data, WMIO_RESULT);
+    }
+
+    /// Next response that ended the enumeration: no objects, WBEM_S_FALSE.
+    const NEXT_END: [u8; 28] =
+        hex_literal::hex!("00000000000000000100000000000000000000000000000001000000");
+
+    #[test]
+    fn parse_next_response_end_of_enumeration_is_empty() {
+        assert_eq!(parse_next_response(&NEXT_END).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn parse_next_response_accepts_wbem_s_false_with_objects() {
+        // A batch request that got fewer objects than asked for: S_FALSE.
+        let mut stub = NEXT_RESULT.to_vec();
+        let at = stub.len() - 4;
+        stub[at..].copy_from_slice(&1u32.to_le_bytes()); // WBEM_S_FALSE on the wire
+        assert_eq!(parse_next_response(&stub).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn parse_next_response_reports_failure_hresult() {
+        let mut stub = NEXT_END;
+        stub[24..].copy_from_slice(&0x8004_1010u32.to_le_bytes()); // WBEM_E_INVALID_CLASS
+        assert_eq!(
+            parse_next_response(&stub),
+            Err(WmiProtoError::Hresult(0x8004_1010))
+        );
+    }
+
+    #[test]
+    fn parse_next_response_aligns_between_objects() {
+        // Two copies of the fixture object. Its OBJREF length is not a multiple
+        // of 4, so the second MInterfacePointer starts after NDR alignment pad.
+        let cnt = rd_u32(NEXT_RESULT, 28).unwrap() as usize;
+        assert_ne!(cnt % 4, 0, "fixture must exercise the pad");
+        let pointee = &NEXT_RESULT[24..32 + cnt];
+        let pad = vec![0u8; (4 - cnt % 4) % 4];
+        let mut stub = NEXT_RESULT[..8].to_vec(); // ORPCTHAT
+        for v in [2u32, 0, 2, 0x0002_0000, 0x0002_0004] {
+            stub.extend_from_slice(&v.to_le_bytes()); // max, offset, actual, referents
+        }
+        for _ in 0..2 {
+            stub.extend_from_slice(pointee);
+            stub.extend_from_slice(&pad);
+        }
+        stub.extend_from_slice(&2u32.to_le_bytes()); // puReturned
+        stub.extend_from_slice(&0u32.to_le_bytes()); // S_OK
+        let blobs = parse_next_response(&stub).unwrap();
+        assert_eq!(blobs.len(), 2);
+        assert_eq!(blobs[0], blobs[1]);
+        assert_eq!(blobs[0].data, WMIO_RESULT);
+    }
+
+    #[test]
+    fn parse_objref_custom_rejects_wrong_clsid() {
+        let mut objref = vec![0u8; 48];
+        objref[0..4].copy_from_slice(OBJREF_SIGNATURE);
+        objref[4..8].copy_from_slice(&OBJREF_CUSTOM.to_le_bytes());
+        // leave clsid zeroed -> not WbemClassObject
+        assert_eq!(
+            parse_objref_custom(&objref),
+            Err(WmiProtoError::NotWbemObject)
+        );
     }
 }

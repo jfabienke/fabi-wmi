@@ -24,26 +24,20 @@ use std::sync::Mutex;
 use serde_json::Value;
 use tracing::debug;
 
-mod auth;
 mod client;
-mod dcom;
 #[cfg(feature = "kerberos")]
 mod kerberos_adapter;
-mod rpc;
-mod sspi_ntlm;
 #[cfg(any(test, feature = "test-support"))]
 mod test_support;
 mod wmi_proto;
-mod wmio;
 
-pub use auth::{AuthError, Credentials};
 pub use client::{query, Error, WmiClient, DEFAULT_TIMEOUT};
-pub use dcom::DcomError;
+pub use fabi_dcerpc::{AuthError, Credentials, RpcError};
+pub use fabi_dcom::DcomError;
+pub use fabi_wmio::WmioError;
 #[cfg(feature = "kerberos")]
 pub use kerberos_adapter::{KerberosCacheBackend, KerberosClient, KerberosConfig, KerberosError};
-pub use rpc::RpcError;
 pub use wmi_proto::WmiProtoError;
-pub use wmio::WmioError;
 
 /// Errors at the C ABI boundary: a WMI failure, or bad input from the caller.
 #[derive(thiserror::Error, Debug)]
