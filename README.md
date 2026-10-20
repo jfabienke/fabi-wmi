@@ -11,29 +11,34 @@ off Windows.
 
 ## Status
 
-Verified live against Windows Server 2022:
+Verified live against Windows Server 2022 and 2025:
 
 - WQL queries in any namespace, including `SELECT *`, association classes and
-  multi-batch result sets; one login reused across queries.
+  multi-batch result sets; one login reused across queries. Long queries are
+  split across RPC fragments.
 - Every CIM type, arrays, embedded objects, NULL and class-default values,
   checked field-for-field against `Get-WmiObject` on the same host.
+- WMI methods (`ExecMethod`), with or without input parameters; the input
+  object is built from the method's signature in the class definition.
+  Checked against `Invoke-CimMethod` with `StdRegProv.GetStringValue` and
+  `__SystemSecurity.GetSD`.
 - Errors carry the Windows HRESULT (e.g. `0x80070005` bad credentials,
-  `0x8004100E` invalid namespace, `0x80041010` invalid class).
+  `0x8004100E` invalid namespace, `0x80041010` invalid class,
+  `0x8004102E` invalid method).
 - Server-side references are released (IRemUnknown::RemRelease).
 
 Not yet:
 
-- **Kerberos.** Authentication is NTLMv2 only. The kerbsec-based
-  `KerberosClient` performs the handshake but is not wired into `WmiClient`.
-  NTLM for DCOM is being phased out of Windows; see
-  [docs/NTLM-DEPRECATION-TIMELINE.md](docs/NTLM-DEPRECATION-TIMELINE.md).
-- **ExecMethod** (`ExecuteStaticMethod` in the shim) returns "not implemented".
-- WQL longer than one RPC fragment (~2,000 characters) is rejected.
+- **Kerberos.** `WmiClient` authenticates with NTLMv2 only. The
+  `fabi-kerbsec`-based `KerberosClient` implements the RPC authentication
+  seam, including DCE-style signing and sealing, but `WmiClient` does not use
+  it and it has not run against a KDC. NTLM for DCOM is being phased out of
+  Windows; see [docs/NTLM-DEPRECATION-TIMELINE.md](docs/NTLM-DEPRECATION-TIMELINE.md).
 
 ## Usage
 
 ```rust
-use linux_wmi::{Credentials, WmiClient};
+use fabi_wmi::{Credentials, WmiClient};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -50,7 +55,13 @@ for p in wmi.query_as::<Process>("SELECT Name, ProcessId FROM Win32_Process")? {
     println!("{} {}", p.process_id, p.name);
 }
 let rows = wmi.query("SELECT * FROM Win32_OperatingSystem")?; // Vec<serde_json::Value>
-# Ok::<(), linux_wmi::Error>(())
+
+let out = wmi.exec_method("StdRegProv", "GetStringValue", &serde_json::json!({
+    "hDefKey": 2147483650u32, // HKEY_LOCAL_MACHINE
+    "sSubKeyName": r"SOFTWARE\Microsoft\Windows NT\CurrentVersion",
+    "sValueName": "ProductName",
+}))?; // output parameters as JSON: {"ReturnValue": 0, "sValue": "..."}
+# Ok::<(), fabi_wmi::Error>(())
 ```
 
 Values are as WMI returns them: DMTF datetimes stay strings
@@ -60,19 +71,22 @@ From the command line:
 
 ```bash
 cargo run --example wmi_query -- <host> <user> <password> <domain|""> 'SELECT Name FROM Win32_Service'
+cargo run --example wmi_method -- <host> <user> <password> <domain|""> __SystemSecurity GetSD
 ```
 
 ## Building
 
 ```bash
-cargo build                               # default: includes the `kerberos` feature (system GSS-API)
-cargo build --no-default-features         # NTLM only, no GSS-API toolchain needed
-cargo test --features test-support        # full test suite (golden tests against captured Windows bytes)
+cargo build                                   # default: the C ABI (`ffi`) and `kerberos` (system GSS-API)
+cargo build --no-default-features             # Rust API only, NTLM only, no GSS-API toolchain needed
+cargo test --workspace --features test-support  # full test suite (golden tests against captured Windows bytes)
 ```
 
-The `kerberos` feature builds `kerbsec` (`../kerbsec`) and binds the system
-GSS-API with bindgen. `.cargo/config.toml` points bindgen at the macOS Command
-Line Tools SDK, so a Homebrew/Zerobrew LLVM on `PATH` works.
+The `kerberos` feature builds `fabi-kerbsec` from `../kerbsec` and binds the
+system GSS-API with bindgen. Cargo reads `../kerbsec/Cargo.toml` even with the
+feature off, so check out kerbsec next to this repository. `.cargo/config.toml`
+points bindgen at the macOS Command Line Tools SDK, so a Homebrew/Zerobrew
+LLVM on `PATH` works.
 
 Windows targets need DCOM enabled, the account in "Distributed COM Users" (or
 an administrator), WMI namespace permissions, and the firewall open for RPC
