@@ -1,6 +1,6 @@
 # Crate split plan: from one client to generic RPC / DCOM / WMI / Kerberos crates
 
-Status: proposal, not started. Recorded 2026-10-20, after commit `81f0cdc`
+Status: proposal, not started. Recorded 2026-10-20, after commit `b6a9252`
 (legacy stack removed). The recommendation came from an Opus 4.8 design
 review in that session; this document records it with the code locations
 behind each point.
@@ -57,7 +57,7 @@ The thin layer. It activates exactly one hardcoded CLSID
 
 - Activation of an **arbitrary** CLSID/IID.
 - **OXID resolution** (IObjectExporter::ResolveOxid) — this existed as
-  `resolve_oxid` and was deleted in the `81f0cdc` cleanup; it must come back
+  `resolve_oxid` and was deleted in the `b6a9252` cleanup; it must come back
   for the general case (connecting to an already-activated object, or an
   object on a different string binding than the one activation returned).
 - **IRemUnknown2** lifecycle beyond release — we have RemRelease encoding
