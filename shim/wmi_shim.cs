@@ -1,8 +1,11 @@
 // Arqitekta.WmiShim/WMIHelper.cs
 using System;
 using System.Collections.Generic;
+using System.Dynamic;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Win32.SafeHandles;
 
 namespace Arqitekta.WmiShim
@@ -215,7 +218,7 @@ namespace Arqitekta.WmiShim
     {
         private SafeSessionHandle? _session;
         private readonly string _namespace;
-        private readonly JsonSerializerOptions _jsonOptions = new() { PropertyNameCaseInsensitive = true };
+        private readonly JsonSerializerOptions _jsonOptions = WmiJson.CreateOptions();
         private readonly uint _timeoutMs;
 
         public WMIHelper(
@@ -271,6 +274,17 @@ namespace Arqitekta.WmiShim
                 yield break;
             }
 
+            if (typeof(T) == typeof(object))
+            {
+                // Query<dynamic>: rows become ExpandoObjects so members bind by name.
+                using var doc = JsonDocument.Parse(json);
+                foreach (var row in doc.RootElement.EnumerateArray())
+                {
+                    yield return (T)WmiJson.ToDynamic(row)!;
+                }
+                yield break;
+            }
+
             var items = JsonSerializer.Deserialize<List<T>>(json, _jsonOptions) ?? new List<T>();
             foreach (var item in items)
             {
@@ -314,5 +328,138 @@ namespace Arqitekta.WmiShim
             _session?.Dispose();
             _session = null;
         }
+    }
+    /// JSON handling that matches what ORMi hands back on Windows: WMI's
+    /// DMTF datetimes and intervals bind to DateTime/DateTimeOffset/TimeSpan,
+    /// numbers WMI types as strings (e.g. BuildNumber) bind to numeric
+    /// properties, and dynamic rows are ExpandoObjects.
+    internal static class WmiJson
+    {
+        internal static JsonSerializerOptions CreateOptions()
+        {
+            var options = new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true,
+                NumberHandling = JsonNumberHandling.AllowReadingFromString,
+            };
+            options.Converters.Add(new DmtfDateTimeConverter());
+            options.Converters.Add(new DmtfDateTimeOffsetConverter());
+            options.Converters.Add(new DmtfTimeSpanConverter());
+            return options;
+        }
+
+        internal static object? ToDynamic(JsonElement element)
+        {
+            switch (element.ValueKind)
+            {
+                case JsonValueKind.Object:
+                    IDictionary<string, object?> obj = new ExpandoObject();
+                    foreach (var prop in element.EnumerateObject())
+                    {
+                        obj[prop.Name] = ToDynamic(prop.Value);
+                    }
+                    return obj;
+                case JsonValueKind.Array:
+                    var list = new List<object?>();
+                    foreach (var item in element.EnumerateArray())
+                    {
+                        list.Add(ToDynamic(item));
+                    }
+                    return list;
+                case JsonValueKind.String:
+                    return element.GetString();
+                case JsonValueKind.Number:
+                    if (element.TryGetInt64(out var l)) return l;
+                    if (element.TryGetUInt64(out var ul)) return ul;
+                    return element.GetDouble();
+                case JsonValueKind.True:
+                    return true;
+                case JsonValueKind.False:
+                    return false;
+                default:
+                    return null;
+            }
+        }
+    }
+
+    /// DMTF CIM_DATETIME / interval parsing (yyyymmddHHMMSS.mmmmmmsUUU and
+    /// ddddddddHHMMSS.mmmmmm:000).
+    internal static class Dmtf
+    {
+        internal static bool TryParseDateTime(string s, out DateTimeOffset value)
+        {
+            value = default;
+            if (s.Length != 25 || s[14] != '.' || (s[21] != '+' && s[21] != '-'))
+                return false;
+            if (!DateTime.TryParseExact(s.Substring(0, 14), "yyyyMMddHHmmss",
+                    CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
+                return false;
+            if (!int.TryParse(s.AsSpan(15, 6), NumberStyles.None, CultureInfo.InvariantCulture, out var micros) ||
+                !int.TryParse(s.AsSpan(22, 3), NumberStyles.None, CultureInfo.InvariantCulture, out var offsetMinutes))
+                return false;
+            if (s[21] == '-')
+                offsetMinutes = -offsetMinutes;
+            value = new DateTimeOffset(dt.AddTicks(micros * 10L), TimeSpan.FromMinutes(offsetMinutes));
+            return true;
+        }
+
+        internal static bool TryParseInterval(string s, out TimeSpan value)
+        {
+            value = default;
+            if (s.Length != 25 || s[14] != '.' || s[21] != ':')
+                return false;
+            var inv = CultureInfo.InvariantCulture;
+            if (!int.TryParse(s.AsSpan(0, 8), NumberStyles.None, inv, out var days) ||
+                !int.TryParse(s.AsSpan(8, 2), NumberStyles.None, inv, out var hours) ||
+                !int.TryParse(s.AsSpan(10, 2), NumberStyles.None, inv, out var minutes) ||
+                !int.TryParse(s.AsSpan(12, 2), NumberStyles.None, inv, out var seconds) ||
+                !int.TryParse(s.AsSpan(15, 6), NumberStyles.None, inv, out var micros))
+                return false;
+            value = new TimeSpan(days, hours, minutes, seconds) + TimeSpan.FromTicks(micros * 10L);
+            return true;
+        }
+    }
+
+    internal sealed class DmtfDateTimeConverter : JsonConverter<DateTime>
+    {
+        public override DateTime Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        {
+            var s = reader.GetString() ?? throw new JsonException("Expected a datetime string");
+            // ORMi (ManagementDateTimeConverter.ToDateTime) yields local time.
+            return Dmtf.TryParseDateTime(s, out var dmtf)
+                ? dmtf.LocalDateTime
+                : DateTime.Parse(s, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+        }
+
+        public override void Write(Utf8JsonWriter writer, DateTime value, JsonSerializerOptions options) =>
+            writer.WriteStringValue(value);
+    }
+
+    internal sealed class DmtfDateTimeOffsetConverter : JsonConverter<DateTimeOffset>
+    {
+        public override DateTimeOffset Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        {
+            var s = reader.GetString() ?? throw new JsonException("Expected a datetime string");
+            return Dmtf.TryParseDateTime(s, out var dmtf)
+                ? dmtf
+                : DateTimeOffset.Parse(s, CultureInfo.InvariantCulture);
+        }
+
+        public override void Write(Utf8JsonWriter writer, DateTimeOffset value, JsonSerializerOptions options) =>
+            writer.WriteStringValue(value);
+    }
+
+    internal sealed class DmtfTimeSpanConverter : JsonConverter<TimeSpan>
+    {
+        public override TimeSpan Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        {
+            var s = reader.GetString() ?? throw new JsonException("Expected an interval string");
+            return Dmtf.TryParseInterval(s, out var interval)
+                ? interval
+                : TimeSpan.Parse(s, CultureInfo.InvariantCulture);
+        }
+
+        public override void Write(Utf8JsonWriter writer, TimeSpan value, JsonSerializerOptions options) =>
+            writer.WriteStringValue(value.ToString("c", CultureInfo.InvariantCulture));
     }
 }
