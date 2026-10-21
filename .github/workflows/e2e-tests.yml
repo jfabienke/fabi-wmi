@@ -46,11 +46,11 @@ jobs:
         working-directory: linux-wmi
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         path: linux-wmi
 
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         repository: jfabienke/kerbsec
         ref: ${{ env.KERBSEC_REF }}
@@ -67,19 +67,19 @@ jobs:
         components: rustfmt, clippy
 
     - name: Cache cargo registry
-      uses: actions/cache@v3
+      uses: actions/cache@v6
       with:
         path: ~/.cargo/registry
         key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
 
     - name: Cache cargo index
-      uses: actions/cache@v3
+      uses: actions/cache@v6
       with:
         path: ~/.cargo/git
         key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
 
     - name: Cache target
-      uses: actions/cache@v3
+      uses: actions/cache@v6
       with:
         path: linux-wmi/target
         key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
@@ -88,7 +88,7 @@ jobs:
       run: cargo build --lib --release
 
     - name: Upload library artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: linux-wmi-library
         path: linux-wmi/target/release/libfabi_wmi.so
@@ -99,21 +99,22 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      actions: read
       checks: write # dorny/test-reporter publishes a check run
     strategy:
       matrix:
         dotnet: ['10.0.x']
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Setup .NET
-      uses: actions/setup-dotnet@v3
+      uses: actions/setup-dotnet@v6
       with:
         dotnet-version: ${{ matrix.dotnet }}
 
     - name: Download library artifact
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: linux-wmi-library
         path: target/release
@@ -166,14 +167,14 @@ jobs:
           --filter "Category!=LongRunning"
 
     - name: Upload test results
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       if: always()
       with:
         name: test-results-${{ matrix.dotnet }}
         path: tests/e2e-dotnet/TestResults/*.trx
 
     - name: Test Report
-      uses: dorny/test-reporter@v1
+      uses: dorny/test-reporter@v3
       if: always()
       with:
         name: .NET E2E Tests Report
@@ -190,18 +191,18 @@ jobs:
         working-directory: linux-wmi
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         path: linux-wmi
 
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         repository: jfabienke/kerbsec
         ref: ${{ env.KERBSEC_REF }}
         path: kerbsec
 
     - name: Setup .NET
-      uses: actions/setup-dotnet@v3
+      uses: actions/setup-dotnet@v6
       with:
         dotnet-version: '10.0.x'
 
@@ -232,7 +233,7 @@ jobs:
           --filter "Category=Priority0"
 
     - name: Upload Windows test results
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       if: always()
       with:
         name: windows-test-results
@@ -245,15 +246,15 @@ jobs:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Setup .NET
-      uses: actions/setup-dotnet@v3
+      uses: actions/setup-dotnet@v6
       with:
         dotnet-version: '10.0.x'
 
     - name: Download library artifact
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: linux-wmi-library
         path: target/release
@@ -278,7 +279,7 @@ jobs:
           --output ./coverage.opencover.xml
 
     - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v3
+      uses: codecov/codecov-action@v7
       with:
         files: ./tests/e2e-dotnet/coverage.opencover.xml
         flags: e2e-tests
