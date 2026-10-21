@@ -244,6 +244,8 @@ jobs:
     needs: test-dotnet
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || github.event_name == 'pull_request'
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
     steps:
     - uses: actions/checkout@v7
@@ -278,9 +280,13 @@ jobs:
           --format opencover \
           --output ./coverage.opencover.xml
 
+    # Tokenless uploads get 429 from codecov.io, and the action still exits 0,
+    # so upload only once a CODECOV_TOKEN secret is configured.
     - name: Upload coverage to Codecov
+      if: env.CODECOV_TOKEN != ''
       uses: codecov/codecov-action@v7
       with:
+        token: ${{ env.CODECOV_TOKEN }}
         files: ./tests/e2e-dotnet/coverage.opencover.xml
         flags: e2e-tests
         name: e2e-coverage
