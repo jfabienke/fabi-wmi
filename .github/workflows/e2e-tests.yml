@@ -102,7 +102,7 @@ jobs:
       checks: write # dorny/test-reporter publishes a check run
     strategy:
       matrix:
-        dotnet: ['9.0.x']
+        dotnet: ['10.0.x']
 
     steps:
     - uses: actions/checkout@v4
@@ -130,7 +130,7 @@ jobs:
       run: dotnet build --configuration Release --no-restore
 
     - name: Copy library to test output
-      run: cp target/release/libfabi_wmi.so tests/e2e-dotnet/bin/Release/net9.0/
+      run: cp target/release/libfabi_wmi.so tests/e2e-dotnet/bin/Release/net10.0/
 
     - name: Run tests (mock mode)
       if: github.event_name != 'workflow_dispatch' || github.event.inputs.skip_network_tests == 'true'
@@ -203,7 +203,7 @@ jobs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v3
       with:
-        dotnet-version: '9.0.x'
+        dotnet-version: '10.0.x'
 
     - name: Setup Rust
       uses: dtolnay/rust-toolchain@stable
@@ -250,7 +250,7 @@ jobs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v3
       with:
-        dotnet-version: '9.0.x'
+        dotnet-version: '10.0.x'
 
     - name: Download library artifact
       uses: actions/download-artifact@v4
@@ -271,7 +271,7 @@ jobs:
         WMI_TEST_SKIPNETWORKTESTS: true
         WMI_TEST_SKIPAUTHTESTS: true
       run: |
-        coverlet bin/Debug/net9.0/E2ETests.dll \
+        coverlet bin/Debug/net10.0/E2ETests.dll \
           --target "dotnet" \
           --targetargs "test --no-build --configuration Debug" \
           --format opencover \

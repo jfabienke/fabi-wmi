@@ -141,7 +141,7 @@ dotnet build --configuration Debug --no-restore
 
 # Copy the Rust library to the test output directory
 if [[ -n "${LIB_FILE:-}" ]]; then
-    TEST_OUTPUT="${TEST_DIR}/bin/Debug/net8.0"
+    TEST_OUTPUT="${TEST_DIR}/bin/Debug/net10.0"
     echo "📄 Copying library to test output: ${TEST_OUTPUT}"
     cp "${LIB_FILE}" "${TEST_OUTPUT}/"
 

@@ -32,7 +32,7 @@ cargo fmt --all && cargo clippy --workspace --all-targets
 
 - `.cargo/config.toml` (same in kerbsec) sets `BINDGEN_EXTRA_CLANG_ARGS_<apple target>` to the Command Line Tools SDK. Without it, a non-Apple libclang on `PATH` (Homebrew/Zerobrew LLVM) fails in `libgssapi-sys` with `'inttypes.h' file not found`. If your SDK lives elsewhere, set the variable in your environment.
 - `tests/kerberos_adapter_test.rs` needs the `kerberos` feature.
-- .NET E2E suite: `tests/e2e-dotnet` (net9.0, xUnit). Mock mode: `WMI_TEST_SKIPNETWORKTESTS=true WMI_TEST_SKIPAUTHTESTS=true dotnet test`. Live mode reads `WMI_TEST_DEFAULTHOST/USERNAME/PASSWORD/DOMAIN`. CI (`.github/workflows/e2e-tests.yml`) copies `libfabi_wmi.so` into the test output dir.
+- .NET E2E suite: `tests/e2e-dotnet` (net10.0, xUnit). Mock mode: `WMI_TEST_SKIPNETWORKTESTS=true WMI_TEST_SKIPAUTHTESTS=true dotnet test`. Live mode reads `WMI_TEST_DEFAULTHOST/USERNAME/PASSWORD/DOMAIN`. CI (`.github/workflows/e2e-tests.yml`) copies `libfabi_wmi.so` into the test output dir.
 
 ### Running against a live host
 

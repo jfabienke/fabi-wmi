@@ -4,7 +4,7 @@ This directory contains comprehensive end-to-end tests that validate the entire 
 
 ## Prerequisites
 
-- .NET 8 SDK or later
+- .NET 10 SDK or later
 - A Windows host with:
   - WMI service running
   - RPC Endpoint Mapper accessible (port 135)
@@ -120,7 +120,7 @@ jobs:
     - uses: actions/checkout@v3
     - uses: actions/setup-dotnet@v3
       with:
-        dotnet-version: '9.0.x'
+        dotnet-version: '10.0.x'
 
     - name: Build Rust library
       run: cargo build --lib
