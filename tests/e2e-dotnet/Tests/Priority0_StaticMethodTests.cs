@@ -187,8 +187,8 @@ namespace LinuxWmi.E2ETests.Tests
                 null
             );
 
-            // Assert
-            result.Should().NotBeNull();
+            // Assert (extension methods don't bind on a dynamic receiver)
+            ((object?)result).Should().NotBeNull();
 
             Output.WriteLine($"✅ Static method without parameters succeeded");
         }

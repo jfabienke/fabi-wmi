@@ -288,7 +288,8 @@ namespace LinuxWmi.E2ETests.Tests
             var result = wmi.QueryFirstOrDefault<dynamic>(query);
 
             // Assert
-            result.Should().BeNull("QueryFirstOrDefault with no matches should return null");
+            // Extension methods don't bind on a dynamic receiver; assert through object
+            ((object?)result).Should().BeNull("QueryFirstOrDefault with no matches should return null");
 
             Output.WriteLine("✅ QueryFirstOrDefault with no results correctly returned null");
         }
@@ -306,7 +307,7 @@ namespace LinuxWmi.E2ETests.Tests
             var system = wmi.QueryFirstOrDefault<dynamic>(query);
 
             // Assert
-            system.Should().NotBeNull("Win32_ComputerSystem should return an instance");
+            ((object?)system).Should().NotBeNull("Win32_ComputerSystem should return an instance");
 
             // Note: Array handling depends on JSON serialization
             // The Roles property might be null or an array
