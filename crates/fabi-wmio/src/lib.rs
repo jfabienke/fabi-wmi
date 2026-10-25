@@ -207,6 +207,11 @@ fn parse_class_part(wmio: &[u8], start: usize) -> Result<ClassPart, WmioError> {
     // PropertyLookupTable: count, then count * { NameRef, PropInfoRef }.
     let property_count = rd_u32(wmio, off)? as usize;
     off += 4;
+    // Each lookup entry is 8 bytes. A count the blob can't hold is malformed,
+    // and would otherwise size both allocations below straight from the wire.
+    if property_count > wmio.len().saturating_sub(off) / 8 {
+        return Err(WmioError::Malformed);
+    }
     let mut lookups = Vec::with_capacity(property_count);
     for _ in 0..property_count {
         let name_ref = rd_u32(wmio, off)? as usize;

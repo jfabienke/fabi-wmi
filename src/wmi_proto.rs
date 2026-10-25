@@ -290,6 +290,11 @@ pub(crate) fn parse_next_response(stub: &[u8]) -> Result<Vec<WmioBlob>, WmiProto
     off += 4;
     let actual = rd_u32(stub, off)? as usize;
     off += 4;
+    // Each referent is 4 bytes. A count the stub can't hold is malformed, and
+    // would otherwise size an allocation straight from the wire.
+    if actual > stub.len().saturating_sub(off) / 4 {
+        return Err(WmiProtoError::Malformed);
+    }
 
     let mut referents = Vec::with_capacity(actual);
     for _ in 0..actual {
