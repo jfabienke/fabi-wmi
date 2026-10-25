@@ -133,3 +133,22 @@ jobs:
     - uses: EmbarkStudios/cargo-deny-action@v2.1.1
       with:
         manifest-path: linux-wmi/Cargo.toml
+
+  c-header:
+    name: C header (cbindgen)
+    runs-on: ubuntu-26.04
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        path: linux-wmi
+    - uses: actions/checkout@v7
+      with:
+        repository: jfabienke/kerbsec
+        ref: ${{ env.KERBSEC_REF }}
+        path: kerbsec
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: taiki-e/install-action@v2.87.31
+      with:
+        tool: cbindgen@0.29.4
+    # include/linux_wmi.h must match what cbindgen generates from src/lib.rs.
+    - run: cbindgen --verify -o include/linux_wmi.h

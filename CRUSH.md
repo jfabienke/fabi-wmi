@@ -113,7 +113,7 @@ Compile this skeleton in your .NET project to verify compatibility; replace stub
 
 ## Commands
 - Build: `cargo build --lib --release`
-- Headers: `cbindgen --lang c --output include/linux_wmi.h`
+- Headers: `cbindgen -o include/linux_wmi.h` (settings in `cbindgen.toml`)
 - Test: Run C# unit tests with shim vs ORMi on Windows.
 
 ## Implementation Plan
