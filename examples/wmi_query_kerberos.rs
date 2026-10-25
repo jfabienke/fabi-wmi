@@ -3,8 +3,9 @@
 //!
 //! Usage: wmi_query_kerberos <host-fqdn> <REALM> <wql> [<wql> ...]
 //! The ticket comes from the credential cache (`kinit`, `KRB5CCNAME`) and the
-//! SPN is host/<host-fqdn>. Needs Linux, where kerbsec's DCE/RPC IOV runs.
-//! The namespace defaults to root/cimv2; set WMI_NAMESPACE to change it.
+//! SPN is host/<host-fqdn>; set WMI_SPN to use another, e.g. to connect to an
+//! IP address. The namespace defaults to root/cimv2; set WMI_NAMESPACE to
+//! change it.
 //! RUST_LOG=fabi_wmi=debug shows the protocol steps.
 use fabi_wmi::{Auth, KerberosConfig, WmiClient, DEFAULT_TIMEOUT};
 
@@ -21,8 +22,8 @@ fn main() {
     }
     let host = &args[1];
     let namespace = std::env::var("WMI_NAMESPACE").unwrap_or_else(|_| "root/cimv2".into());
-    let auth =
-        Auth::Kerberos(KerberosConfig::new(args[2].as_str()).with_spn(format!("host/{host}")));
+    let spn = std::env::var("WMI_SPN").unwrap_or_else(|_| format!("host/{host}"));
+    let auth = Auth::Kerberos(KerberosConfig::new(args[2].as_str()).with_spn(spn));
 
     let mut client = match WmiClient::connect_with(host, &auth, &namespace, DEFAULT_TIMEOUT) {
         Ok(client) => client,
