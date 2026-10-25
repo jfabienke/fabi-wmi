@@ -2,8 +2,8 @@
 
 Query Windows Management Instrumentation (WMI) on Windows hosts from Linux or
 macOS, in Rust, without Windows components or agents: DCOM activation and
-MS-RPC over TCP, NTLMv2 authentication, and an MS-WMIO decoder that turns
-WMI objects into JSON.
+MS-RPC over TCP, NTLMv2 or Kerberos authentication, and an MS-WMIO decoder that
+turns WMI objects into JSON.
 
 A C ABI and a C# shim emulating part of the .NET ORMi API
 (`WMIHelper.Query<T>`, `QueryFirstOrDefault<T>`) let existing .NET code run
@@ -25,15 +25,16 @@ Verified live against Windows Server 2022 and 2025:
 - Errors carry the Windows HRESULT (e.g. `0x80070005` bad credentials,
   `0x8004100E` invalid namespace, `0x80041010` invalid class,
   `0x8004102E` invalid method).
+- Kerberos (`Auth::Kerberos`, with a ticket from `kinit`) against a Windows
+  Server 2022 domain controller, from Linux. NTLM for DCOM is being phased out
+  of Windows; see [docs/NTLM-DEPRECATION-TIMELINE.md](docs/NTLM-DEPRECATION-TIMELINE.md).
 - Server-side references are released (IRemUnknown::RemRelease).
 
 Not yet:
 
-- **Kerberos.** `WmiClient` authenticates with NTLMv2 only. The
-  `fabi-kerbsec`-based `KerberosClient` implements the RPC authentication
-  seam, including DCE-style signing and sealing, but `WmiClient` does not use
-  it and it has not run against a KDC. NTLM for DCOM is being phased out of
-  Windows; see [docs/NTLM-DEPRECATION-TIMELINE.md](docs/NTLM-DEPRECATION-TIMELINE.md).
+- **Kerberos on macOS.** Kerberos needs DCE IOV protection, which Apple's
+  GSS.framework does not export; on macOS, run it in a Linux container.
+- **Kerberos through the C ABI and the .NET shim**, which are NTLM-only.
 
 ## Usage
 
@@ -78,15 +79,16 @@ cargo run --example wmi_method -- <host> <user> <password> <domain|""> __SystemS
 
 ```bash
 cargo build                                   # default: the C ABI (`ffi`) and `kerberos` (system GSS-API)
-cargo build --no-default-features             # Rust API only, NTLM only, no GSS-API toolchain needed
+cargo build --no-default-features             # Rust API only, NTLM only
 cargo test --workspace --features test-support  # full test suite (golden tests against captured Windows bytes)
 ```
 
-The `kerberos` feature builds `fabi-kerbsec` from `../kerbsec` and binds the
-system GSS-API with bindgen. Cargo reads `../kerbsec/Cargo.toml` even with the
-feature off, so check out kerbsec next to this repository. `.cargo/config.toml`
-points bindgen at the macOS Command Line Tools SDK, so a Homebrew/Zerobrew
-LLVM on `PATH` works.
+The `kerberos` feature builds `fabi-kerbsec` from `../kerbsec`, which loads the
+system GSS-API library the first time Kerberos is used (`libgssapi-krb5-2` on
+Debian/Ubuntu, `krb5-libs` on Fedora/RHEL, GSS.framework on macOS). Building
+needs no Kerberos packages or C toolchain, and NTLM works on hosts without the
+library. Cargo reads `../kerbsec/Cargo.toml` even with the feature off, so
+check out kerbsec next to this repository.
 
 Windows targets need DCOM enabled, the account in "Distributed COM Users" (or
 an administrator), WMI namespace permissions, and the firewall open for RPC

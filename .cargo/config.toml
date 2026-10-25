@@ -1,7 +1,0 @@
-# bindgen (via kerbsec -> libgssapi-sys) can pick up a non-Apple libclang, e.g. a Homebrew
-# or Zerobrew LLVM on PATH, which does not know where the macOS SDK lives and
-# then fails with "'inttypes.h' file not found". Point it at the Command Line
-# Tools SDK on Apple targets. A value already set in the environment wins.
-[env]
-BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_darwin = "-isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
-BINDGEN_EXTRA_CLANG_ARGS_x86_64_apple_darwin = "-isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"

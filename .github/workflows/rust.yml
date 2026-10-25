@@ -73,11 +73,6 @@ jobs:
         repository: jfabienke/kerbsec
         ref: ${{ env.KERBSEC_REF }}
         path: kerbsec
-    # bindgen in libgssapi-sys (via kerbsec) needs the GSS-API headers.
-    - name: Install GSS-API headers
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libkrb5-dev
     - uses: dtolnay/rust-toolchain@stable
       with:
         components: clippy
@@ -98,10 +93,6 @@ jobs:
         repository: jfabienke/kerbsec
         ref: ${{ env.KERBSEC_REF }}
         path: kerbsec
-    - name: Install GSS-API headers
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libkrb5-dev
     - uses: dtolnay/rust-toolchain@stable
     - uses: Swatinem/rust-cache@v2.9.3
       with:

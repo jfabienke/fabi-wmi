@@ -41,6 +41,8 @@ deny = [
     { crate = "aws-lc-sys", reason = "bundled C crypto; use RustCrypto" },
     { crate = "aws-lc-rs", reason = "bundled C crypto; use RustCrypto" },
     { crate = "ring", reason = "bundled C and assembly crypto; use RustCrypto" },
+    { crate = "bindgen", reason = "kerbsec declares GSS-API by hand and loads it at run time" },
+    { crate = "clang-sys", reason = "libclang belongs to bindgen; see bindgen" },
 ]
 
 [sources]
