@@ -609,14 +609,13 @@ dependencies = [
 
 [[package]]
 name = "fabi-kerbsec"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bytes",
  "hickory-resolver",
  "libc",
  "libgssapi",
- "pkg-config",
  "ring",
  "rustls",
  "subtle",
@@ -1155,8 +1154,6 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 [[package]]
 name = "libgssapi"
 version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "834339e86b2561169d45d3b01741967fee3e5716c7d0b6e33cd4e3b34c9558cd"
 dependencies = [
  "bitflags 2.13.2",
  "bytes",

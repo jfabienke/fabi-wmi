@@ -35,7 +35,8 @@ fn kerberos_client_implements_dcerpc_auth_provider() {
     let mut client = KerberosClient::new("server.example.com", config, creds).unwrap();
 
     assert_eq!(client.auth_type(), AUTH_TYPE_KERBEROS);
-    assert_eq!(client.auth_value_len(true, 32).unwrap(), 60);
+    // Before establishment: the MS-KILE AES sizes (sealed tokens carry one block of EC)
+    assert_eq!(client.auth_value_len(true, 32).unwrap(), 76);
     assert_eq!(client.auth_value_len(false, 12).unwrap(), 28);
     assert!(client.auth_value_len(true, 12).is_err());
 

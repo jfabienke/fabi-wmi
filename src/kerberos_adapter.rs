@@ -317,8 +317,7 @@ impl KerberosClient {
             let mut builder = KerbsecConfig::builder()
                 .realm(&config.realm)
                 .target_host(&target_host)
-                .dns_timeout(Duration::from_secs(5))
-                .gss_timeout(Duration::from_secs(30));
+                .dns_timeout(Duration::from_secs(5));
 
             // Map auth level
             let auth_level = match config.auth_level {
