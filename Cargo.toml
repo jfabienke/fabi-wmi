@@ -39,13 +39,16 @@ uuid = { version = "1.10", features = ["v4"] }
 zeroize = { version = "1.7", features = ["derive"] }
 
 [target.'cfg(unix)'.dependencies]
-# Kerberos via the system GSS-API (fabi-kerbsec crate)
-fabi-kerbsec = { path = "../kerbsec", version = "0.3.0", features = ["dns", "runtime", "trace", "ccache", "channel-bindings", "channel-bindings-rustls", "iov"], optional = true }
+# Kerberos via the system GSS-API (fabi-kerbsec crate). Only the DCE/RPC pieces:
+# kerbsec's DNS, async runtime and rustls channel-binding features go unused here.
+fabi-kerbsec = { path = "../kerbsec", version = "0.3.0", default-features = false, features = ["channel-bindings", "iov"], optional = true }
 
 [features]
 default = ["ffi", "kerberos"]
 ffi = []
 kerberos = ["fabi-kerbsec"]
+# kerbsec's own tracing spans (GSS calls, handshake steps)
+kerberos-trace = ["kerberos", "fabi-kerbsec/trace"]
 # In-process stub backend for the C ABI (LINUX_WMI_USE_STUB=1)
 test-support = []
 test-gss-mock = []
