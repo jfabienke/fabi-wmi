@@ -95,6 +95,9 @@ pub struct KerberosConfig {
     /// Credential cache configuration
     pub cache_backend: KerberosCacheBackend,
     pub cache_path: Option<PathBuf>,
+    /// Use the cache named by `cache_backend`/`cache_path` instead of the default one
+    /// (`KRB5CCNAME`, where `kinit` puts tickets). Off by default: with no path the
+    /// FILE backend names a fresh per-process file that holds no tickets.
     pub enable_cache: bool,
     /// Channel binding configuration
     pub require_channel_bindings: bool,
@@ -125,7 +128,7 @@ impl KerberosConfig {
             prefer_spnego: false,
             cache_backend: KerberosCacheBackend::File,
             cache_path: None,
-            enable_cache: true,
+            enable_cache: false,
             require_channel_bindings: false,
             channel_binding_data: None,
             enable_dce_style: true,    // Default: enabled for DCE/RPC
@@ -159,7 +162,8 @@ impl KerberosConfig {
         self
     }
 
-    /// Enable or disable credential caching
+    /// Use the configured credential cache instead of the default one (see
+    /// [`enable_cache`](Self::enable_cache))
     pub fn with_caching(mut self, enable: bool) -> Self {
         self.enable_cache = enable;
         self
