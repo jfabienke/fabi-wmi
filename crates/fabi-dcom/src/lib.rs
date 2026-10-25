@@ -401,7 +401,7 @@ pub fn activate_with(
 /// [`activate_with`] at `auth_level`, e.g. `AUTH_LEVEL_PKT_INTEGRITY` for a
 /// security provider that can sign DCE/RPC PDUs but not seal them. Windows'
 /// DCOM hardening (KB5004442) requires at least packet integrity.
-#[instrument(level = "debug", skip_all, fields(host, auth_level))]
+#[instrument(level = "debug", skip_all, fields(host = %host, auth_level = auth_level))]
 pub fn activate_with_level(
     host: &str,
     clsid: &[u8; 16],
