@@ -13,7 +13,7 @@ Rust WMI client workspace (`fabi-*` crates) for Linux/macOS: queries and invokes
 | `fabi-wmio` | `crates/fabi-wmio` | MS-WMIO binary object block decoder (`decode_object_block`) and method input instance encoder (`spawn_instance`, `extract_method_in_params`, `encode_method_in_params`) |
 | `fabi-dcerpc` | `crates/fabi-dcerpc` | DCE/RPC connection-oriented PDU framing, request/response fragmentation, `RpcConnection`, generalized `AuthProvider` SSP trait, and `SspiNtlmClient` |
 | `fabi-dcom` | `crates/fabi-dcom` | OXID resolution (`resolve_oxid`, `IOXIDResolver::ResolveOxid`), generalized `remote_activation` (`IRemoteSCMActivator` / `IActivation`), consolidated `ObjRef`/`StdObjRef`/`MInterfacePointer`/`DualStringArray` marshaling (`encode_custom_m_interface_pointer`), and `encode_rem_release` (`IRemUnknown::RemRelease`) |
-| `fabi-kerbsec` | `../kerbsec` | GSS-API Kerberos v5 security context with 4-buffer `GSS_C_DCE_STYLE` IOV protection (`SIGN_ONLY` header/trailer, `DATA` stub, `HEADER` `auth_value`) |
+| `fabi-kerbsec` | `../kerbsec` | GSS-API Kerberos v5 security context with 4-buffer `GSS_C_DCE_STYLE` IOV protection (`SIGN_ONLY` header/trailer, `DATA` stub, `HEADER` `auth_value`); native IOV needs Linux with its `iov` feature |
 | `fabi-wmi` | `.` (root) | High-level `WmiClient` (`query`, `query_as`, `exec_method`, `exec_method_as`), MS-WMI ORPC encoders/decoders (`src/wmi_proto.rs`), `KerberosClient` (`AuthProvider` bridge), C ABI (`src/lib.rs`, `ffi` feature), and .NET shim (`shim/wmi_shim.cs`) |
 
 ## Build & Test
@@ -27,8 +27,10 @@ cargo test --workspace --features test-support           # full Rust workspace s
 cargo test --no-default-features                         # pure Rust rlib without ffi or kerberos
 cargo test --features test-support <test_name>           # single test (substring match)
 cargo test --features test-support --test integration    # single integration-test file
-cargo fmt --all && cargo clippy --workspace --all-targets
+cargo fmt && cargo clippy --workspace --all-targets      # not `fmt --all`: see below
 ```
+
+- Plain `cargo fmt` formats every workspace member. `cargo fmt --all` also formats local path dependencies, i.e. `../kerbsec` and its vendored `libgssapi`, which is kept as upstream wrote it.
 
 - `.cargo/config.toml` (same in kerbsec) sets `BINDGEN_EXTRA_CLANG_ARGS_<apple target>` to the Command Line Tools SDK. Without it, a non-Apple libclang on `PATH` (Homebrew/Zerobrew LLVM) fails in `libgssapi-sys` with `'inttypes.h' file not found`. If your SDK lives elsewhere, set the variable in your environment.
 - `tests/kerberos_adapter_test.rs` needs the `kerberos` feature.
