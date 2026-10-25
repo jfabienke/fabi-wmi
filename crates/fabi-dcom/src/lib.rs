@@ -389,12 +389,25 @@ pub fn activate(
 
 /// Run `IActivation::RemoteActivation` (MS-DCOM 3.1.2.5.1.1) for `clsid` and
 /// `iid` over a connection authenticated by `auth` at packet privacy.
-#[instrument(level = "debug", skip_all, fields(host))]
 pub fn activate_with(
     host: &str,
     clsid: &[u8; 16],
     iid: &[u8; 16],
     auth: impl AuthProvider + 'static,
+) -> Result<(u16, ActivationResponse), DcomError> {
+    activate_with_level(host, clsid, iid, auth, AUTH_LEVEL_PKT_PRIVACY)
+}
+
+/// [`activate_with`] at `auth_level`, e.g. `AUTH_LEVEL_PKT_INTEGRITY` for a
+/// security provider that can sign DCE/RPC PDUs but not seal them. Windows'
+/// DCOM hardening (KB5004442) requires at least packet integrity.
+#[instrument(level = "debug", skip_all, fields(host, auth_level))]
+pub fn activate_with_level(
+    host: &str,
+    clsid: &[u8; 16],
+    iid: &[u8; 16],
+    auth: impl AuthProvider + 'static,
+    auth_level: u8,
 ) -> Result<(u16, ActivationResponse), DcomError> {
     let mut conn = RpcConnection::connect(host, 135, CONNECT_TIMEOUT, RPC_IO_TIMEOUT).map_err(
         |e| match e {
@@ -406,7 +419,7 @@ pub fn activate_with(
         .bind_context(
             "IActivation",
             &IID_IACTIVATION,
-            AUTH_LEVEL_PKT_PRIVACY,
+            auth_level,
             HandshakeStyle::AlterContext,
             Box::new(auth),
         )
