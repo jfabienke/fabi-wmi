@@ -18,6 +18,11 @@ path = "examples/wmi_query.rs"
 name = "wmi_method"
 path = "examples/wmi_method.rs"
 
+[[example]]
+name = "wmi_query_kerberos"
+path = "examples/wmi_query_kerberos.rs"
+required-features = ["kerberos"]
+
 [dependencies]
 byteorder = "1.5"
 fabi-dcerpc = { path = "crates/fabi-dcerpc" }

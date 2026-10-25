@@ -3,8 +3,9 @@
 //! Follows the sequence a working reference client uses against Windows
 //! (MS-WMI 3.2.3, MS-DCOM 3.2.4): activate CLSID_WbemLevel1Login on port 135,
 //! open one TCP connection to the port the activation advertised, and give each
-//! interface its own presentation context *and* its own NTLM security context at
-//! RPC_C_AUTHN_LEVEL_PKT_INTEGRITY (bind or alter_context, challenge, auth3).
+//! interface its own presentation context *and* its own security context at
+//! RPC_C_AUTHN_LEVEL_PKT_INTEGRITY (bind or alter_context, then auth3): NTLM, or
+//! Kerberos with [`Auth::Kerberos`].
 //! Requests carry the target IPID as the object UUID; stubs are signed, not
 //! sealed.
 
@@ -19,11 +20,14 @@ use crate::wmi_proto::{
     IID_IREMUNKNOWN, IID_IWBEM_LEVEL1_LOGIN, IID_IWBEM_SERVICES,
 };
 use fabi_dcerpc::{
-    fault_to_hresult, AuthError, BoundContext, Credentials, HandshakeStyle, RpcConnection,
-    RpcError, SspiNtlmClient, AUTH_LEVEL_PKT_INTEGRITY, RPC_IO_TIMEOUT,
+    fault_to_hresult, AuthError, AuthProvider, BoundContext, Credentials, HandshakeStyle,
+    RpcConnection, RpcError, SspiNtlmClient, AUTH_LEVEL_PKT_INTEGRITY, RPC_IO_TIMEOUT,
 };
 use fabi_dcom::{self as dcom, DcomError};
 use fabi_wmio::{decode_object, encode_method_in_params, WmioError};
+
+#[cfg(feature = "kerberos")]
+use crate::kerberos_adapter::{KerberosClient, KerberosConfig, KerberosError};
 
 /// Everything that can go wrong talking to WMI. [`Error::hresult`] gives the
 /// Windows status code when the server reported one.
@@ -43,6 +47,9 @@ pub enum Error {
     Deserialize(#[from] serde_json::Error),
     #[error("protocol error: {0}")]
     Protocol(String),
+    #[cfg(feature = "kerberos")]
+    #[error("Kerberos setup failed: {0}")]
+    Kerberos(#[from] KerberosError),
 }
 
 impl From<std::io::Error> for Error {
@@ -71,20 +78,53 @@ struct BoundInterface {
     ipid: [u8; 16],
 }
 
+/// How [`WmiClient`] authenticates the security contexts it creates.
+#[derive(Debug, Clone)]
+pub enum Auth {
+    /// NTLMv2 with a password.
+    Ntlm(Credentials),
+    /// Kerberos with a ticket from the credential cache (`kinit`). The SPN is
+    /// `host/<host>` unless the config overrides it. kerbsec's DCE/RPC
+    /// protection runs on Linux only.
+    #[cfg(feature = "kerberos")]
+    Kerberos(KerberosConfig),
+}
+
+#[cfg(feature = "kerberos")]
+fn kerberos_client(host: &str, config: &KerberosConfig) -> Result<KerberosClient, Error> {
+    // The ticket comes from the cache, so the client needs no password.
+    Ok(KerberosClient::new(
+        host,
+        config.clone(),
+        Credentials::new("", ""),
+    )?)
+}
+
+impl Auth {
+    /// A fresh security context for `host`.
+    fn provider(&self, host: &str) -> Result<Box<dyn AuthProvider>, Error> {
+        Ok(match self {
+            Auth::Ntlm(creds) => Box::new(SspiNtlmClient::new(creds, &format!("host/{host}"))?),
+            #[cfg(feature = "kerberos")]
+            Auth::Kerberos(config) => Box::new(kerberos_client(host, config)?),
+        })
+    }
+}
+
 /// The RPC connection to the server's WMI object exporter.
 struct WmiConnection {
     rpc: RpcConnection,
-    creds: Credentials,
-    target_name: String,
+    auth: Auth,
+    host: String,
 }
 
 impl WmiConnection {
-    fn open(host: &str, port: u16, creds: &Credentials, timeout: Duration) -> Result<Self, Error> {
+    fn open(host: &str, port: u16, auth: &Auth, timeout: Duration) -> Result<Self, Error> {
         let rpc = RpcConnection::connect(host, port, CONNECT_TIMEOUT, timeout)?;
         Ok(Self {
             rpc,
-            creds: creds.clone(),
-            target_name: format!("host/{host}"),
+            auth: auth.clone(),
+            host: host.to_string(),
         })
     }
 
@@ -93,20 +133,20 @@ impl WmiConnection {
     }
 
     /// Add a presentation context for `iid` (bind for the first, alter_context
-    /// afterwards) and authenticate a fresh NTLM context for it.
+    /// afterwards) and authenticate a fresh security context for it.
     fn bind_interface(
         &mut self,
         name: &'static str,
         iid: &[u8; 16],
         ipid: [u8; 16],
     ) -> Result<BoundInterface, Error> {
-        let auth = SspiNtlmClient::new(&self.creds, &self.target_name)?;
+        let auth = self.auth.provider(&self.host)?;
         let ctx = self.rpc.bind_context(
             name,
             iid,
             AUTH_LEVEL_PKT_INTEGRITY,
             HandshakeStyle::Auth3,
-            Box::new(auth),
+            auth,
         )?;
         Ok(BoundInterface { ctx, ipid })
     }
@@ -207,15 +247,28 @@ impl WmiClient {
         namespace: &str,
         timeout: Duration,
     ) -> Result<Self, Error> {
-        let (port, activation) = dcom::activate(
-            host,
-            creds,
-            &CLSID_WBEM_LEVEL1_LOGIN,
-            &IID_IWBEM_LEVEL1_LOGIN,
-        )?;
+        Self::connect_with(host, &Auth::Ntlm(creds.clone()), namespace, timeout)
+    }
+
+    /// Like [`connect_with_timeout`](Self::connect_with_timeout), authenticating
+    /// with `auth` (NTLM or Kerberos).
+    pub fn connect_with(
+        host: &str,
+        auth: &Auth,
+        namespace: &str,
+        timeout: Duration,
+    ) -> Result<Self, Error> {
+        let (clsid, iid) = (&CLSID_WBEM_LEVEL1_LOGIN, &IID_IWBEM_LEVEL1_LOGIN);
+        let (port, activation) = match auth {
+            Auth::Ntlm(creds) => dcom::activate(host, creds, clsid, iid)?,
+            #[cfg(feature = "kerberos")]
+            Auth::Kerberos(config) => {
+                dcom::activate_with(host, clsid, iid, kerberos_client(host, config)?)?
+            }
+        };
         // The advertised bindings name the server's own view of itself (which
         // may be unreachable behind NAT); keep dialing the address we were given.
-        let mut conn = WmiConnection::open(host, port, creds, timeout)?;
+        let mut conn = WmiConnection::open(host, port, auth, timeout)?;
         let causality_id = *uuid::Uuid::new_v4().as_bytes();
         let login_ref = InterfaceRef {
             ipid: activation.ipid,

@@ -22,7 +22,7 @@ mod kerberos_adapter;
 mod test_support;
 mod wmi_proto;
 
-pub use client::{exec_method, query, Error, WmiClient, DEFAULT_TIMEOUT};
+pub use client::{exec_method, query, Auth, Error, WmiClient, DEFAULT_TIMEOUT};
 pub use fabi_dcerpc::{AuthError, Credentials, RpcError};
 pub use fabi_dcom::DcomError;
 pub use fabi_wmio::WmioError;
