@@ -1,0 +1,128 @@
+name: Rust
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'src/**'
+      - 'crates/**'
+      - 'tests/**'
+      - 'examples/**'
+      - 'include/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/**'
+      - 'deny.toml'
+      - 'cbindgen.toml'
+      - '.github/workflows/rust.yml'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'src/**'
+      - 'crates/**'
+      - 'tests/**'
+      - 'examples/**'
+      - 'include/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/**'
+      - 'deny.toml'
+      - 'cbindgen.toml'
+      - '.github/workflows/rust.yml'
+  workflow_dispatch:
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+  # Cargo.toml path-depends on ../kerbsec, so every job checks out both repos
+  # side by side (see e2e-tests.yml).
+  KERBSEC_REF: master
+
+defaults:
+  run:
+    working-directory: linux-wmi
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-26.04
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        path: linux-wmi
+    - uses: actions/checkout@v7
+      with:
+        repository: jfabienke/kerbsec
+        ref: ${{ env.KERBSEC_REF }}
+        path: kerbsec
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt
+    # Not `--all`: that also formats the ../kerbsec path dependency.
+    - run: cargo fmt -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-26.04
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        path: linux-wmi
+    - uses: actions/checkout@v7
+      with:
+        repository: jfabienke/kerbsec
+        ref: ${{ env.KERBSEC_REF }}
+        path: kerbsec
+    # bindgen in libgssapi-sys (via kerbsec) needs the GSS-API headers.
+    - name: Install GSS-API headers
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libkrb5-dev
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy
+    - uses: Swatinem/rust-cache@v2.9.3
+      with:
+        workspaces: linux-wmi
+    - run: cargo clippy --workspace --all-targets --features test-support -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-26.04
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        path: linux-wmi
+    - uses: actions/checkout@v7
+      with:
+        repository: jfabienke/kerbsec
+        ref: ${{ env.KERBSEC_REF }}
+        path: kerbsec
+    - name: Install GSS-API headers
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libkrb5-dev
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2.9.3
+      with:
+        workspaces: linux-wmi
+    - name: Test (default features + test-support)
+      run: cargo test --workspace --features test-support
+    - name: Test (no default features)
+      run: cargo test --no-default-features
+
+  deny:
+    name: Dependencies (cargo-deny)
+    runs-on: ubuntu-26.04
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        path: linux-wmi
+    - uses: actions/checkout@v7
+      with:
+        repository: jfabienke/kerbsec
+        ref: ${{ env.KERBSEC_REF }}
+        path: kerbsec
+    - uses: EmbarkStudios/cargo-deny-action@v2.1.1
+      with:
+        manifest-path: linux-wmi/Cargo.toml
