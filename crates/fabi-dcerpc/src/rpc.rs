@@ -29,7 +29,11 @@ pub enum RpcError {
 
 impl From<AuthError> for RpcError {
     fn from(err: AuthError) -> Self {
-        RpcError::Protection(err.to_string())
+        match err {
+            // Its message already says protection failed; don't say it twice.
+            AuthError::Protection(why) => RpcError::Protection(why),
+            other => RpcError::Protection(other.to_string()),
+        }
     }
 }
 
@@ -335,9 +339,7 @@ pub fn build_request_fragment_pdu(
     let pad_align = if sealed { 16 } else { 4 };
     let pad = (pad_align - stub_chunk.len() % pad_align) % pad_align;
     let padded_stub_len = stub_chunk.len() + pad;
-    let auth_value_len = auth
-        .auth_value_len(sealed, padded_stub_len)
-        .map_err(|err| RpcError::Protection(err.to_string()))?;
+    let auth_value_len = auth.auth_value_len(sealed, padded_stub_len)?;
     let auth_type = auth.auth_type();
     let header_len = if object_ipid.is_some() {
         REQUEST_HEADER_WITH_OBJECT_LEN
@@ -378,8 +380,7 @@ pub fn build_request_fragment_pdu(
         auth.seal_rpc(head, body, trailer)
     } else {
         auth.sign_rpc(head, body, trailer)
-    }
-    .map_err(|err| RpcError::Protection(err.to_string()))?;
+    }?;
     if auth_value.len() != auth_value_len {
         return Err(RpcError::Protocol(format!(
             "unexpected auth_value length {} (expected {auth_value_len})",
@@ -463,9 +464,7 @@ pub fn build_request_pdus(
         REQUEST_HEADER_LEN
     };
     let pad = (pad_align - stub.len() % pad_align) % pad_align;
-    let auth_len = auth
-        .auth_value_len(sealed, stub.len() + pad)
-        .map_err(|err| RpcError::Protection(err.to_string()))?;
+    let auth_len = auth.auth_value_len(sealed, stub.len() + pad)?;
     let single_len = header_len + stub.len() + pad + SEC_TRAILER_LEN + auth_len;
 
     if single_len <= usize::from(max_xmit) {
@@ -568,8 +567,7 @@ pub fn verify_signed_response_pdu(
         &pdu[RESPONSE_HEADER_LEN..trailer_at],
         &pdu[trailer_at..trailer_at + SEC_TRAILER_LEN],
         &pdu[frag_len - auth_len..],
-    )
-    .map_err(|err| RpcError::Protection(err.to_string()))?;
+    )?;
     Ok(pdu[RESPONSE_HEADER_LEN..stub_end].to_vec())
 }
 
@@ -621,8 +619,7 @@ pub fn unseal_response_pdu(auth: &mut dyn AuthProvider, pdu: &[u8]) -> Result<Ve
     let (head, rest) = plain.split_at_mut(RESPONSE_HEADER_LEN);
     let (body, tail) = rest.split_at_mut(trailer_at - RESPONSE_HEADER_LEN);
     let (trailer, auth_value) = tail.split_at_mut(SEC_TRAILER_LEN);
-    auth.unseal_rpc(head, body, trailer, auth_value)
-        .map_err(|err| RpcError::Protection(err.to_string()))?;
+    auth.unseal_rpc(head, body, trailer, auth_value)?;
     Ok(plain)
 }
 
@@ -904,6 +901,15 @@ mod tests {
     fn check_frag_len_rejects_overflow() {
         assert!(check_frag_len(u16::MAX as usize).is_ok());
         assert!(check_frag_len(u16::MAX as usize + 1).is_err());
+    }
+
+    #[test]
+    fn protection_errors_are_prefixed_once() {
+        let err = RpcError::from(AuthError::Protection("bad signature".into()));
+        assert_eq!(
+            err.to_string(),
+            "RPC message protection failed: bad signature"
+        );
     }
 
     // PDUs a reference client exchanged with Windows Server 2022, up to (not
