@@ -33,9 +33,8 @@ env:
   CARGO_TERM_COLOR: always
   # Cargo.toml path-depends on ../kerbsec, and Cargo reads that manifest even
   # with the kerberos feature off, so every cargo job checks out both repos
-  # side by side. The fabi-kerbsec rename lives on this branch until it is
-  # merged; switch to master then.
-  KERBSEC_REF: fix/macos-bindgen-sdk
+  # side by side.
+  KERBSEC_REF: master
 
 jobs:
   build-library:
