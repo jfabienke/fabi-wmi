@@ -1,0 +1,48 @@
+# cargo-deny configuration: advisories, licenses, banned crates and sources.
+# Run locally with `cargo deny check` (cargo-deny 0.20 or later).
+
+[graph]
+# The supported hosts. Windows-only crates would otherwise dominate the
+# duplicate-version warnings.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+all-features = true
+
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2023-0071", reason = "rsa (via sspi -> picky): Marvin timing attack on RSA decryption, which the NTLM path never performs; no fixed release exists" },
+]
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+]
+private = { ignore = true }
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies (the workspace crates and ../kerbsec) carry no version.
+allow-wildcard-paths = true
+# Policy: no third-party C compiled into the build. OS libraries are used only
+# where the OS holds the credentials (Kerberos via the system GSS-API).
+deny = [
+    { crate = "cc", reason = "compiles C; keep the build pure Rust" },
+    { crate = "cmake", reason = "compiles C; keep the build pure Rust" },
+    { crate = "openssl-sys", reason = "bundled or system OpenSSL; use RustCrypto" },
+    { crate = "aws-lc-sys", reason = "bundled C crypto; use RustCrypto" },
+    { crate = "aws-lc-rs", reason = "bundled C crypto; use RustCrypto" },
+    { crate = "ring", reason = "bundled C and assembly crypto; use RustCrypto" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

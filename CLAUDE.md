@@ -28,7 +28,10 @@ cargo test --no-default-features                         # pure Rust rlib withou
 cargo test --features test-support <test_name>           # single test (substring match)
 cargo test --features test-support --test integration    # single integration-test file
 cargo fmt && cargo clippy --workspace --all-targets      # not `fmt --all`: see below
+cargo deny check                                         # advisories, licenses, banned crates (deny.toml)
 ```
+
+- Dependency policy: no third-party C compiled into the build. OS libraries are used only where the OS holds the credentials (the system GSS-API for Kerberos); everything else is pure Rust. `deny.toml` bans the crates that compile C (`cc`, `cmake`, `ring`, `aws-lc-*`, `openssl-sys`); CI (`.github/workflows/rust.yml`) runs fmt, clippy, tests and cargo-deny.
 
 - Plain `cargo fmt` formats every workspace member. `cargo fmt --all` also formats local path dependencies, i.e. `../kerbsec` and its vendored `libgssapi`, which is kept as upstream wrote it.
 
