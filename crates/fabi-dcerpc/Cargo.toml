@@ -9,6 +9,6 @@ hex = "0.4"
 hex-literal = "0.4"
 libc = "0.2"
 sspi = { version = "0.23", default-features = false }
-thiserror = "1.0"
+thiserror = "2"
 tracing = "0.1"
 zeroize = { version = "1.7", features = ["derive"] }
