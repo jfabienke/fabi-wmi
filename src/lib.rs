@@ -67,8 +67,20 @@ mod ffi {
 
     type Result<T> = std::result::Result<T, FfiError>;
 
+    /// 0 on success. On failure, the server's HRESULT when one is known (e.g.
+    /// 0x80070005 E_ACCESSDENIED, 0x8004100E WBEM_E_INVALID_NAMESPACE, read as a
+    /// negative int32), otherwise -1; `*out_err` then holds a message to free
+    /// with `wmi_free_err`.
+    #[allow(non_camel_case_types)]
+    pub type wmi_status_t = i32;
+
+    /// Requested DCOM authentication level (the .NET shim passes its
+    /// `WmiAuthLevel`). Only logged: activation runs at packet privacy and WMI
+    /// calls at packet integrity.
+    #[allow(non_camel_case_types)]
+    pub type wmi_auth_flags_t = u32;
+
     /// Opaque session handle for the C ABI.
-    #[repr(C)]
     pub struct WmiSession {
         inner: *mut InnerSession,
     }
@@ -351,7 +363,7 @@ mod ffi {
     }
 
     #[no_mangle]
-    /// Create a new WMI session.
+    /// Creates a session; does no network I/O.
     ///
     /// # Safety
     ///
@@ -363,10 +375,10 @@ mod ffi {
         username: *const c_char,
         password: *const c_char,
         domain: *const c_char,
-        auth_flags: u32,
+        auth_flags: wmi_auth_flags_t,
         out_sess: *mut *mut WmiSession,
         out_err: *mut *mut c_char,
-    ) -> i32 {
+    ) -> wmi_status_t {
         if out_sess.is_null() {
             set_error(out_err, Some("out_sess pointer was null".into()));
             return -1;
@@ -418,21 +430,8 @@ mod ffi {
     }
 
     #[no_mangle]
-    /// Release a session created with `wmi_session_new`.
-    ///
-    /// # Safety
-    ///
-    /// `sess` must be either null or a pointer obtained from `wmi_session_new` that
-    /// has not already been freed.
-    pub unsafe extern "C" fn wmi_session_free(sess: *mut WmiSession) {
-        if sess.is_null() {
-            return;
-        }
-        drop(Box::from_raw(sess));
-    }
-
-    #[no_mangle]
-    /// Bind an existing session to a namespace.
+    /// Activates WMI on the host and logs in to the namespace (e.g.
+    /// "root\\cimv2"); bad hosts, credentials and namespaces fail here.
     ///
     /// # Safety
     ///
@@ -442,7 +441,7 @@ mod ffi {
         sess: *mut WmiSession,
         ns: *const c_char,
         out_err: *mut *mut c_char,
-    ) -> i32 {
+    ) -> wmi_status_t {
         if sess.is_null() {
             set_error(out_err, Some("Session pointer was null".into()));
             return -1;
@@ -471,7 +470,8 @@ mod ffi {
     }
 
     #[no_mangle]
-    /// Execute a WQL query and return the JSON payload.
+    /// Runs a WQL query; `*out_json` is a JSON array with one object per row.
+    /// `timeout_ms` bounds each network read/write (0 = default, 30 s).
     ///
     /// # Safety
     ///
@@ -485,7 +485,7 @@ mod ffi {
         out_json: *mut *mut u8,
         out_len: *mut usize,
         out_err: *mut *mut c_char,
-    ) -> i32 {
+    ) -> wmi_status_t {
         if sess.is_null() || wql.is_null() {
             set_error(out_err, Some("Invalid session or WQL".into()));
             return -1;
@@ -512,29 +512,32 @@ mod ffi {
     }
 
     #[no_mangle]
-    /// Execute a WMI method and return the JSON payload.
+    /// Calls a method on a class (e.g. "StdRegProv") or an instance path (e.g.
+    /// "Win32_Service.Name=\"Winmgmt\""). `in_params_json` is a JSON object of
+    /// input parameters (NULL = none); `*out_json` is the output parameters,
+    /// including ReturnValue. `timeout_ms` as for `wmi_exec_query_json`.
     ///
     /// # Safety
     ///
-    /// `sess` must be valid. `class`, `method`, and `in_params_json` must be
-    /// UTF-8 C strings (the params pointer may be null to imply `{}`). The caller
-    /// must free the returned JSON buffer with `wmi_free_json`.
+    /// `sess` must be valid. `path_or_class`, `method`, and `in_params_json`
+    /// must be UTF-8 C strings (the params pointer may be null to imply `{}`).
+    /// The caller must free the returned JSON buffer with `wmi_free_json`.
     pub unsafe extern "C" fn wmi_exec_method_json(
         sess: *mut WmiSession,
-        class: *const c_char,
+        path_or_class: *const c_char,
         method: *const c_char,
         in_params_json: *const c_char,
         timeout_ms: u32,
         out_json: *mut *mut u8,
         out_len: *mut usize,
         out_err: *mut *mut c_char,
-    ) -> i32 {
-        if sess.is_null() || class.is_null() || method.is_null() {
+    ) -> wmi_status_t {
+        if sess.is_null() || path_or_class.is_null() || method.is_null() {
             set_error(out_err, Some("Invalid session or method inputs".into()));
             return -1;
         }
 
-        let class = CStr::from_ptr(class).to_string_lossy().to_string();
+        let class = CStr::from_ptr(path_or_class).to_string_lossy().to_string();
         let method = CStr::from_ptr(method).to_string_lossy().to_string();
         let params_json = if !in_params_json.is_null() {
             CStr::from_ptr(in_params_json).to_string_lossy().to_string()
@@ -566,6 +569,20 @@ mod ffi {
             }
         };
         copy_json_to_out(out_json, out_len, out_err, &result)
+    }
+
+    #[no_mangle]
+    /// Releases the session and the server-side references it holds.
+    ///
+    /// # Safety
+    ///
+    /// `sess` must be either null or a pointer obtained from `wmi_session_new` that
+    /// has not already been freed.
+    pub unsafe extern "C" fn wmi_session_free(sess: *mut WmiSession) {
+        if sess.is_null() {
+            return;
+        }
+        drop(Box::from_raw(sess));
     }
 
     #[no_mangle]
