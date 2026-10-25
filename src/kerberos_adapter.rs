@@ -676,8 +676,11 @@ impl AuthProvider for KerberosClient {
     }
 
     fn negotiate(&mut self) -> Result<Vec<u8>, AuthError> {
-        // For DCE/RPC, this is the first leg (AP-REQ)
-        self.bind_token().map_err(|_| AuthError::Creds)
+        // For DCE/RPC, this is the first leg (AP-REQ). Keep the cause (no ticket,
+        // unknown SPN, unreachable KDC, no GSS-API library): as with NTLM, it is
+        // the error text callers see.
+        self.bind_token()
+            .map_err(|e| AuthError::Protection(e.to_string()))
     }
 
     fn respond(&mut self, challenge: &[u8]) -> Result<Vec<u8>, AuthError> {
@@ -686,7 +689,7 @@ impl AuthProvider for KerberosClient {
         match self.process_bind_ack(challenge) {
             Ok(Some(third_leg)) => Ok(third_leg),
             Ok(None) => Ok(Vec::new()), // Context established, no third leg needed
-            Err(_) => Err(AuthError::Creds),
+            Err(e) => Err(AuthError::Protection(e.to_string())),
         }
     }
 
