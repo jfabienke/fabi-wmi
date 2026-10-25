@@ -26,14 +26,13 @@ Verified live against Windows Server 2022 and 2025:
   `0x8004100E` invalid namespace, `0x80041010` invalid class,
   `0x8004102E` invalid method).
 - Kerberos (`Auth::Kerberos`, with a ticket from `kinit`) against a Windows
-  Server 2022 domain controller, from Linux. NTLM for DCOM is being phased out
-  of Windows; see [docs/NTLM-DEPRECATION-TIMELINE.md](docs/NTLM-DEPRECATION-TIMELINE.md).
+  Server 2022 domain controller, from Linux and from macOS (Apple's
+  GSS.framework). NTLM for DCOM is being phased out of Windows; see
+  [docs/NTLM-DEPRECATION-TIMELINE.md](docs/NTLM-DEPRECATION-TIMELINE.md).
 - Server-side references are released (IRemUnknown::RemRelease).
 
 Not yet:
 
-- **Kerberos on macOS.** Kerberos needs DCE IOV protection, which Apple's
-  GSS.framework does not export; on macOS, run it in a Linux container.
 - **Kerberos through the C ABI and the .NET shim**, which are NTLM-only.
 
 ## Usage

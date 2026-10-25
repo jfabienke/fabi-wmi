@@ -309,6 +309,23 @@ impl KerberosClient {
         }
     }
 
+    /// Whether Kerberos can seal DCE/RPC PDUs (packet privacy) on this host.
+    ///
+    /// Sealing needs kerbsec's DCE IOV: Linux, and a GSS-API library with the
+    /// IOV functions (MIT Kerberos, Heimdal). Apple's GSS.framework does not
+    /// export them, so on macOS Kerberos signs only (packet integrity).
+    #[must_use]
+    pub fn supports_privacy() -> bool {
+        #[cfg(feature = "kerberos")]
+        {
+            fabi_kerbsec::ffi::has_iov_support()
+        }
+        #[cfg(not(feature = "kerberos"))]
+        {
+            false
+        }
+    }
+
     /// Create a new Kerberos client
     pub fn new(
         target_host: impl Into<String>,
@@ -654,6 +671,12 @@ impl AuthProvider for KerberosClient {
     fn auth_value_len(&mut self, sealed: bool, padded_stub_len: usize) -> Result<usize, AuthError> {
         #[cfg(feature = "kerberos")]
         {
+            if sealed && !Self::supports_privacy() {
+                return Err(AuthError::Protection(
+                    "Kerberos packet privacy needs DCE IOV (Linux with MIT Kerberos or Heimdal)"
+                        .into(),
+                ));
+            }
             if let Some(ref ctx) = self.context {
                 return ctx
                     .dce_auth_value_len(sealed, padded_stub_len)

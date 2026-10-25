@@ -19,6 +19,8 @@ use crate::wmi_proto::{
     self, InterfaceRef, WmiProtoError, CLSID_WBEM_LEVEL1_LOGIN, IID_IENUM_WBEM_CLASS_OBJECT,
     IID_IREMUNKNOWN, IID_IWBEM_LEVEL1_LOGIN, IID_IWBEM_SERVICES,
 };
+#[cfg(feature = "kerberos")]
+use fabi_dcerpc::AUTH_LEVEL_PKT_PRIVACY;
 use fabi_dcerpc::{
     fault_to_hresult, AuthError, AuthProvider, BoundContext, Credentials, HandshakeStyle,
     RpcConnection, RpcError, SspiNtlmClient, AUTH_LEVEL_PKT_INTEGRITY, RPC_IO_TIMEOUT,
@@ -84,8 +86,9 @@ pub enum Auth {
     /// NTLMv2 with a password.
     Ntlm(Credentials),
     /// Kerberos with a ticket from the credential cache (`kinit`). The SPN is
-    /// `host/<host>` unless the config overrides it. kerbsec's DCE/RPC
-    /// protection runs on Linux only.
+    /// `host/<host>` unless the config overrides it. Activation is sealed where
+    /// kerbsec can seal DCE/RPC PDUs (Linux) and signed elsewhere (macOS); WMI
+    /// calls are signed either way.
     #[cfg(feature = "kerberos")]
     Kerberos(KerberosConfig),
 }
@@ -263,7 +266,15 @@ impl WmiClient {
             Auth::Ntlm(creds) => dcom::activate(host, creds, clsid, iid)?,
             #[cfg(feature = "kerberos")]
             Auth::Kerberos(config) => {
-                dcom::activate_with(host, clsid, iid, kerberos_client(host, config)?)?
+                // Sealing needs kerbsec's DCE IOV. Without it, activate at packet
+                // integrity: the minimum Windows' DCOM hardening accepts, and it
+                // needs only MIC tokens, which every GSS-API has.
+                let level = if KerberosClient::supports_privacy() {
+                    AUTH_LEVEL_PKT_PRIVACY
+                } else {
+                    AUTH_LEVEL_PKT_INTEGRITY
+                };
+                dcom::activate_with_level(host, clsid, iid, kerberos_client(host, config)?, level)?
             }
         };
         // The advertised bindings name the server's own view of itself (which
