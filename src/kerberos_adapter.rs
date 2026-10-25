@@ -224,6 +224,8 @@ pub struct KerberosClient {
     auth_state: AuthState,
     session_key: Option<Vec<u8>>,
     ccache_path: Option<PathBuf>,
+    /// The connection agreed on header signing; see [`AuthProvider::set_header_signing`].
+    header_signing: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -430,6 +432,7 @@ impl KerberosClient {
                 auth_state: AuthState::Initial,
                 session_key: None,
                 ccache_path,
+                header_signing: false,
             })
         }
 
@@ -627,6 +630,22 @@ impl KerberosClient {
     }
 }
 
+/// The PDU header and `sec_trailer` to sign: both when the connection agreed on
+/// header signing, neither otherwise (MS-RPCE 3.3.1.5.2.2). Windows checks the
+/// signature over exactly these, and an empty `SIGN_ONLY` buffer adds nothing.
+#[cfg(feature = "kerberos")]
+fn signed_segments<'a>(
+    header_signing: bool,
+    header: &'a [u8],
+    sec_trailer: &'a [u8],
+) -> (&'a [u8], &'a [u8]) {
+    if header_signing {
+        (header, sec_trailer)
+    } else {
+        (&[], &[])
+    }
+}
+
 impl AuthProvider for KerberosClient {
     fn auth_type(&self) -> u8 {
         AUTH_TYPE_KERBEROS
@@ -652,6 +671,10 @@ impl AuthProvider for KerberosClient {
         }
     }
 
+    fn set_header_signing(&mut self, negotiated: bool) {
+        self.header_signing = negotiated;
+    }
+
     fn negotiate(&mut self) -> Result<Vec<u8>, AuthError> {
         // For DCE/RPC, this is the first leg (AP-REQ)
         self.bind_token().map_err(|_| AuthError::Creds)
@@ -675,6 +698,7 @@ impl AuthProvider for KerberosClient {
     ) -> Result<Vec<u8>, AuthError> {
         #[cfg(feature = "kerberos")]
         {
+            let (header, sec_trailer) = signed_segments(self.header_signing, header, sec_trailer);
             if self.auth_state != AuthState::Established {
                 return Err(AuthError::Protection(
                     "Kerberos context not established".into(),
@@ -706,6 +730,7 @@ impl AuthProvider for KerberosClient {
     ) -> Result<(), AuthError> {
         #[cfg(feature = "kerberos")]
         {
+            let (header, sec_trailer) = signed_segments(self.header_signing, header, sec_trailer);
             if self.auth_state != AuthState::Established {
                 return Err(AuthError::Protection(
                     "Kerberos context not established".into(),
@@ -736,15 +761,16 @@ impl AuthProvider for KerberosClient {
     ) -> Result<Vec<u8>, AuthError> {
         #[cfg(feature = "kerberos")]
         {
+            let (header, sec_trailer) = signed_segments(self.header_signing, header, sec_trailer);
             if self.auth_state != AuthState::Established {
                 return Err(AuthError::Protection(
                     "Kerberos context not established".into(),
                 ));
             }
             if let Some(ref mut ctx) = self.context {
-                let mut stub_copy = stub.to_vec();
+                // Packet integrity is a MIC over the signed segments (MS-RPCE 3.3.1.5.2.2)
                 return ctx
-                    .wrap_dce_iov(header, &mut stub_copy, sec_trailer, false)
+                    .get_mic(&[header, stub, sec_trailer].concat())
                     .map_err(|e| AuthError::Protection(e.to_string()));
             }
             Err(AuthError::Protection(
@@ -768,15 +794,15 @@ impl AuthProvider for KerberosClient {
     ) -> Result<(), AuthError> {
         #[cfg(feature = "kerberos")]
         {
+            let (header, sec_trailer) = signed_segments(self.header_signing, header, sec_trailer);
             if self.auth_state != AuthState::Established {
                 return Err(AuthError::Protection(
                     "Kerberos context not established".into(),
                 ));
             }
             if let Some(ref mut ctx) = self.context {
-                let mut stub_copy = stub.to_vec();
                 return ctx
-                    .unwrap_dce_iov(header, &mut stub_copy, sec_trailer, auth_value, false)
+                    .verify_mic(&[header, stub, sec_trailer].concat(), auth_value)
                     .map_err(|e| AuthError::Protection(e.to_string()));
             }
             Err(AuthError::Protection(
@@ -809,3 +835,21 @@ impl Drop for KerberosClient {
 }
 
 // Config builder implementation is in kerberos.rs
+
+#[cfg(all(test, feature = "kerberos"))]
+mod tests {
+    use super::signed_segments;
+
+    #[test]
+    fn header_and_trailer_are_signed_only_with_header_signing() {
+        let (header, sec_trailer) = ([0x05u8; 24], [0x10u8; 8]);
+        assert_eq!(
+            signed_segments(true, &header, &sec_trailer),
+            (&header[..], &sec_trailer[..])
+        );
+        assert_eq!(
+            signed_segments(false, &header, &sec_trailer),
+            (&[][..], &[][..])
+        );
+    }
+}
