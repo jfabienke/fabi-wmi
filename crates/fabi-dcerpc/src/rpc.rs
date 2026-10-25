@@ -45,6 +45,9 @@ pub const PTYPE_AUTH3: u8 = 0x10;
 
 pub const PFC_FIRST_FRAG: u8 = 0x01;
 pub const PFC_LAST_FRAG: u8 = 0x02;
+/// In bind, bind_ack, alter_context and alter_context_resp PDUs: the sender
+/// supports header signing (MS-RPCE 2.2.2.3); elsewhere `PFC_PENDING_CANCEL`.
+pub const PFC_SUPPORT_HEADER_SIGN: u8 = 0x04;
 const PFC_FIRST_LAST: u8 = PFC_FIRST_FRAG | PFC_LAST_FRAG;
 const PFC_OBJECT_UUID: u8 = 0x80;
 
@@ -176,6 +179,8 @@ pub struct BindAck {
     /// empty when the PDU carries none (an alter_context_resp that completes a
     /// handshake).
     pub auth_token: Vec<u8>,
+    /// The server set `PFC_SUPPORT_HEADER_SIGN`.
+    pub header_signing: bool,
 }
 
 /// Parse a bind_ack or alter_context_resp: check it is `expected_ptype` and
@@ -216,6 +221,7 @@ pub fn parse_bind_ack(pdu: &[u8], expected_ptype: u8) -> Result<BindAck, RpcErro
         return Err(malformed());
     }
     let max_xmit = u16_at(16)?;
+    let header_signing = pdu[3] & PFC_SUPPORT_HEADER_SIGN != 0;
     // max_xmit, max_recv, assoc_group (8), then port_any_t secondary address.
     let sec_addr_len = u16_at(24)? as usize;
     let mut off = 26 + sec_addr_len;
@@ -237,6 +243,7 @@ pub fn parse_bind_ack(pdu: &[u8], expected_ptype: u8) -> Result<BindAck, RpcErro
             max_xmit,
             auth_type: 0,
             auth_token: Vec::new(),
+            header_signing,
         });
     }
     let trailer_at = frag_len
@@ -253,6 +260,7 @@ pub fn parse_bind_ack(pdu: &[u8], expected_ptype: u8) -> Result<BindAck, RpcErro
         max_xmit,
         auth_type,
         auth_token: pdu[frag_len - auth_len..].to_vec(),
+        header_signing,
     })
 }
 
@@ -662,6 +670,9 @@ pub struct RpcConnection<S = TcpStream> {
     call_id: u32,
     next_context_id: u16,
     max_xmit: u16,
+    /// Header signing agreed for this connection (MS-RPCE 3.3.1.5.2.2); `None`
+    /// until the first authenticated bind or alter_context settles it.
+    header_signing: Option<bool>,
 }
 
 impl RpcConnection<TcpStream> {
@@ -704,6 +715,7 @@ impl<S: Read + Write> RpcConnection<S> {
             call_id: 0,
             next_context_id: 0,
             max_xmit: MAX_FRAG,
+            header_signing: None,
         }
     }
 
@@ -737,8 +749,13 @@ impl<S: Read + Write> RpcConnection<S> {
         };
         let call_id = self.next_call_id();
 
+        // MS-RPCE 3.3.1.5.2.2: the first authenticated bind or alter_context at
+        // integrity or higher offers header signing, and the reply settles it
+        // for the connection.
+        let offer_header_signing =
+            self.header_signing.is_none() && auth_level >= AUTH_LEVEL_PKT_INTEGRITY;
         let negotiate = auth.negotiate()?;
-        self.stream.write_all(&build_bind_pdu_with_auth_type(
+        let mut pdu = build_bind_pdu_with_auth_type(
             ptype,
             call_id,
             context_id,
@@ -747,7 +764,11 @@ impl<S: Read + Write> RpcConnection<S> {
             auth_level,
             auth_context_id,
             &negotiate,
-        ))?;
+        );
+        if offer_header_signing {
+            pdu[3] |= PFC_SUPPORT_HEADER_SIGN;
+        }
+        self.stream.write_all(&pdu)?;
         let ack = parse_bind_ack(&read_pdu(&mut self.stream)?, ack_ptype)?;
         if ack.auth_type != 0 && ack.auth_type != auth_type {
             return Err(RpcError::Protocol(format!(
@@ -758,6 +779,14 @@ impl<S: Read + Write> RpcConnection<S> {
         if context_id == 0 {
             self.max_xmit = ack.max_xmit.min(MAX_FRAG);
         }
+        if offer_header_signing {
+            self.header_signing = Some(ack.header_signing);
+            debug!(
+                header_signing = ack.header_signing,
+                "header signing negotiated"
+            );
+        }
+        auth.set_header_signing(self.header_signing.unwrap_or(false));
 
         if !ack.auth_token.is_empty() {
             let authenticate = auth.respond(&ack.auth_token)?;
@@ -1154,5 +1183,107 @@ mod tests {
             let trailer_at = pdu.len() - 28 - 8;
             assert_eq!(pdu[trailer_at], 0x10);
         }
+    }
+
+    #[test]
+    fn parse_bind_ack_reports_header_signing() {
+        let mut ack = ack_with_token(&REF_BIND_ACK, b"token");
+        assert!(!parse_bind_ack(&ack, PTYPE_BIND_ACK).unwrap().header_signing);
+        ack[3] |= PFC_SUPPORT_HEADER_SIGN;
+        assert!(parse_bind_ack(&ack, PTYPE_BIND_ACK).unwrap().header_signing);
+    }
+
+    /// Canned server replies in, client PDUs out.
+    struct Duplex {
+        replies: std::io::Cursor<Vec<u8>>,
+        sent: Vec<u8>,
+    }
+
+    impl Read for Duplex {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.replies.read(buf)
+        }
+    }
+
+    impl Write for Duplex {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.sent.write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Records what `set_header_signing` reports; never protects a PDU.
+    struct HeaderSignRecorder(std::sync::Arc<std::sync::Mutex<Vec<bool>>>);
+
+    impl AuthProvider for HeaderSignRecorder {
+        fn negotiate(&mut self) -> Result<Vec<u8>, AuthError> {
+            Ok(vec![1, 2, 3])
+        }
+        fn respond(&mut self, _challenge: &[u8]) -> Result<Vec<u8>, AuthError> {
+            Ok(Vec::new())
+        }
+        fn set_header_signing(&mut self, negotiated: bool) {
+            self.0.lock().unwrap().push(negotiated);
+        }
+        fn seal_rpc(&mut self, _: &[u8], _: &mut [u8], _: &[u8]) -> Result<Vec<u8>, AuthError> {
+            unreachable!()
+        }
+        fn unseal_rpc(
+            &mut self,
+            _: &[u8],
+            _: &mut [u8],
+            _: &[u8],
+            _: &[u8],
+        ) -> Result<(), AuthError> {
+            unreachable!()
+        }
+        fn sign_rpc(&mut self, _: &[u8], _: &[u8], _: &[u8]) -> Result<Vec<u8>, AuthError> {
+            unreachable!()
+        }
+        fn verify_rpc(&mut self, _: &[u8], _: &[u8], _: &[u8], _: &[u8]) -> Result<(), AuthError> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn first_authenticated_bind_offers_header_signing() {
+        let mut bind_ack = ack_with_token(&REF_BIND_ACK, b"challenge");
+        bind_ack[3] |= PFC_SUPPORT_HEADER_SIGN;
+        let alter_resp = ack_with_token(&REF_ALTER_RESP, b"challenge");
+        let mut conn = RpcConnection::from_stream(Duplex {
+            replies: std::io::Cursor::new([bind_ack, alter_resp].concat()),
+            sent: Vec::new(),
+        });
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        for name in ["first", "second"] {
+            conn.bind_context(
+                name,
+                &[0x11; 16],
+                AUTH_LEVEL_PKT_INTEGRITY,
+                HandshakeStyle::Auth3,
+                Box::new(HeaderSignRecorder(seen.clone())),
+            )
+            .unwrap();
+        }
+
+        let sent = &conn.stream.sent;
+        let bind_len = u16::from_le_bytes([sent[8], sent[9]]) as usize;
+        assert_eq!(sent[2], PTYPE_BIND);
+        assert_ne!(
+            sent[3] & PFC_SUPPORT_HEADER_SIGN,
+            0,
+            "the first bind offers it"
+        );
+        assert_eq!(sent[bind_len + 2], PTYPE_ALTER_CONTEXT);
+        assert_eq!(
+            sent[bind_len + 3] & PFC_SUPPORT_HEADER_SIGN,
+            0,
+            "later ones do not"
+        );
+        // The server's answer applies to every context on the connection.
+        assert_eq!(*seen.lock().unwrap(), [true, true]);
     }
 }

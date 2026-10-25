@@ -96,6 +96,15 @@ pub trait AuthProvider: Send {
     fn negotiate(&mut self) -> Result<Vec<u8>, AuthError>;
     fn respond(&mut self, challenge: &[u8]) -> Result<Vec<u8>, AuthError>;
 
+    /// Whether the connection agreed on header signing (MS-RPCE 3.3.1.5.2.2),
+    /// reported once the bind response arrives. Without it, the PDU header and
+    /// `sec_trailer` get no protection, so a provider that signs them only when
+    /// agreed (Kerberos) must leave them out of the signature. The default does
+    /// nothing: NTLM always signs the whole PDU.
+    fn set_header_signing(&mut self, negotiated: bool) {
+        let _ = negotiated;
+    }
+
     /// Packet privacy: encrypt `stub` in place and return the auth_value
     /// signing `header || stub || sec_trailer` (plaintext).
     fn seal_rpc(
