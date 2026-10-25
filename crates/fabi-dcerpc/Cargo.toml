@@ -14,3 +14,7 @@ sspi = { version = "0.23", default-features = false }
 thiserror = "2"
 tracing = "0.1"
 zeroize = { version = "1.7", features = ["derive"] }
+
+[dev-dependencies]
+fabi-testkit = { path = "../fabi-testkit" }
+proptest = { version = "1.12", default-features = false, features = ["std"] }

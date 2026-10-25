@@ -1100,4 +1100,74 @@ mod tests {
         assert_eq!(decoded["Index"], json!(42));
         assert_eq!(decoded["MACAddress"], json!(null));
     }
+
+    /// The decoders read what a server sent: whatever the bytes, they must
+    /// return (Ok or Err), never panic or abort.
+    mod properties {
+        use super::*;
+        use fabi_testkit::{bytes, config, mutated, mutated_any};
+        use proptest::prelude::*;
+        use serde_json::json;
+
+        const UNITS: &[&[u8]] = &[
+            WMIO_RESULT,
+            WMIO_SERVICE,
+            WMIO_NIC,
+            WMIO_PROVIDER,
+            WMIO_STDREGPROV_CLASS,
+        ];
+
+        /// Set the ENCODING_UNIT length to the buffer's, so a mutated unit gets
+        /// past the header check and into the object body.
+        fn with_length_fixed(mut unit: Vec<u8>) -> Vec<u8> {
+            if unit.len() >= 8 {
+                let len = (unit.len() - 8) as u32;
+                unit[4..8].copy_from_slice(&len.to_le_bytes());
+            }
+            unit
+        }
+
+        fn signed_unit(body: Vec<u8>) -> Vec<u8> {
+            let mut unit = WMIO_SIGNATURE.to_le_bytes().to_vec();
+            unit.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            unit.extend(body);
+            unit
+        }
+
+        proptest! {
+            #![proptest_config(config())]
+
+            #[test]
+            fn decode_object_never_panics_on_random_bytes(b in bytes(512)) {
+                let _ = decode_object(&b);
+                let _ = decode_object(&signed_unit(b));
+            }
+
+            #[test]
+            fn decode_object_never_panics_on_mutated_units(
+                unit in mutated_any(UNITS),
+                fix_length in any::<bool>(),
+            ) {
+                let unit = if fix_length { with_length_fixed(unit) } else { unit };
+                let _ = decode_object(&unit);
+            }
+
+            #[test]
+            fn spawn_instance_never_panics_on_mutated_templates(
+                unit in mutated_any(UNITS).prop_map(with_length_fixed),
+            ) {
+                let props = json!({ "Name": "x", "Index": 1, "IPAddress": ["192.0.2.1"] });
+                let _ = spawn_instance(&unit, props.as_object().unwrap());
+            }
+
+            #[test]
+            fn method_params_never_panic_on_mutated_classes(
+                class in mutated(WMIO_STDREGPROV_CLASS).prop_map(with_length_fixed),
+            ) {
+                let params = json!({ "hDefKey": 2_147_483_650_u32, "sSubKeyName": "a", "sValueName": "b" });
+                let _ = extract_method_in_params(&class, "GetStringValue");
+                let _ = encode_method_in_params(&class, "GetStringValue", params.as_object().unwrap());
+            }
+        }
+    }
 }

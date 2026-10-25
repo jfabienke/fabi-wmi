@@ -13,3 +13,7 @@ hex-literal = "1.1"
 thiserror = "2"
 tracing = "0.1"
 uuid = { version = "1.10", features = ["v4"] }
+
+[dev-dependencies]
+fabi-testkit = { path = "../fabi-testkit" }
+proptest = { version = "1.12", default-features = false, features = ["std"] }

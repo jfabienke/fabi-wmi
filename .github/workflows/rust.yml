@@ -110,6 +110,13 @@ jobs:
       run: cargo test --workspace --features test-support
     - name: Test (no default features)
       run: cargo test --no-default-features
+    # With overcommit, an allocation sized from a hostile length field succeeds
+    # lazily and the bug stays hidden; under an address-space limit (as hardened
+    # services run) it aborts the process. Run the parser properties that way.
+    - name: Parser properties under an 8 GiB address-space limit
+      run: |
+        ulimit -v 8388608
+        cargo test --workspace --no-default-features properties
 
   deny:
     name: Dependencies (cargo-deny)

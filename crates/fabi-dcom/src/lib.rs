@@ -935,4 +935,70 @@ mod tests {
             }
         );
     }
+
+    /// Everything here parses stubs a server sent: whatever the bytes, the
+    /// parsers must return (Ok or Err), never panic or abort.
+    mod properties {
+        use super::*;
+        use fabi_testkit::{bytes, config, mutated};
+        use proptest::prelude::*;
+
+        /// The ResolveOxid reply carried inside the activation response, as in
+        /// `resolve_oxid_stub_and_response_round_trip`.
+        fn resolve_oxid_reply() -> Vec<u8> {
+            let mut resp = WINDOWS_ACTIVATION_STUB[16..PHR_OFFSET - 4].to_vec();
+            resp.extend_from_slice(&0u32.to_le_bytes());
+            resp
+        }
+
+        fn activation_stub() -> impl Strategy<Value = Vec<u8>> {
+            prop_oneof![bytes(512), mutated(WINDOWS_ACTIVATION_STUB)]
+        }
+
+        proptest! {
+            #![proptest_config(config())]
+
+            #[test]
+            fn activation_replies_never_panic(stub in activation_stub()) {
+                let _ = parse_activation_stub(&stub, None);
+                let _ = parse_activation_stub(&stub, Some(&IID_IWBEM_LEVEL1_LOGIN));
+            }
+
+            #[test]
+            fn resolve_oxid_replies_never_panic(
+                stub in prop_oneof![bytes(512), mutated(resolve_oxid_reply())],
+            ) {
+                let _ = parse_resolve_oxid_stub(&stub);
+            }
+
+            #[test]
+            fn rem_release_replies_never_panic(stub in bytes(64)) {
+                let _ = parse_rem_release_response(&stub);
+            }
+
+            /// The marshaled-object parsers take a start offset into the
+            /// stub; try every offset, including ones past the end.
+            #[test]
+            fn object_reference_parsers_never_panic(
+                stub in activation_stub(),
+                at in any::<usize>(),
+                require_wrapper_bounds in any::<bool>(),
+            ) {
+                let at = at % (stub.len() + 16);
+                let _ = parse_m_interface_pointer(&stub, at);
+                let _ = find_std_objref(&stub, at, None, None, require_wrapper_bounds);
+                let _ = find_std_objref(
+                    &stub,
+                    at,
+                    Some(&[0; 8]),
+                    Some(&IID_IWBEM_LEVEL1_LOGIN),
+                    require_wrapper_bounds,
+                );
+                let _ = ObjRef::parse(stub.get(at..).unwrap_or_default());
+                let mut cursor = Cursor::new(stub.as_slice());
+                cursor.set_position(at as u64);
+                let _ = parse_dual_string_array(&mut cursor);
+            }
+        }
+    }
 }

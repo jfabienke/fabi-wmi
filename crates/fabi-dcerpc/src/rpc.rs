@@ -1286,4 +1286,95 @@ mod tests {
         // The server's answer applies to every context on the connection.
         assert_eq!(*seen.lock().unwrap(), [true, true]);
     }
+
+    /// Everything here parses PDUs a server sent: whatever the bytes, the
+    /// parsers must return (Ok or Err), never panic or abort.
+    mod properties {
+        use super::*;
+        use fabi_testkit::{bytes, config, mutated, mutated_any};
+        use proptest::prelude::*;
+
+        const REPLIES: &[&[u8]] = &[
+            &REF_BIND_ACK,
+            &REF_ALTER_RESP,
+            &REF_ALTER_RESP_NO_AUTH,
+            &REF_ACCESS_DENIED_FAULT,
+        ];
+
+        /// A single-fragment authenticated response at `auth_level`, built the
+        /// way requests are (no object UUID, so the header matches a response's).
+        fn authenticated_response(auth_level: u8) -> Vec<u8> {
+            let mut ssp = DummyVariableSsp {
+                auth_type: 0x10,
+                sig_len: 28,
+            };
+            let mut pdus =
+                build_request_pdus(&mut ssp, 1, 0, 0, None, &[0xAB; 40], auth_level, 0, 4096)
+                    .unwrap();
+            let mut pdu = pdus.remove(0);
+            pdu[2] = PTYPE_RESPONSE;
+            pdu
+        }
+
+        fn ssp() -> DummyVariableSsp {
+            DummyVariableSsp {
+                auth_type: 0x10,
+                sig_len: 28,
+            }
+        }
+
+        /// The seeds must be valid, so mutations start from PDUs the
+        /// verifiers accept.
+        #[test]
+        fn authenticated_response_seeds_verify() {
+            let signed = authenticated_response(AUTH_LEVEL_PKT_INTEGRITY);
+            assert!(verify_signed_response_pdu(&mut ssp(), &signed).is_ok());
+            let sealed = authenticated_response(AUTH_LEVEL_PKT_PRIVACY);
+            assert_eq!(
+                unseal_response_stub(&mut ssp(), &sealed).unwrap(),
+                [0xAB; 40]
+            );
+        }
+
+        proptest! {
+            #![proptest_config(config())]
+
+            #[test]
+            fn bind_replies_never_panic(
+                pdu in prop_oneof![bytes(256), mutated_any(REPLIES)],
+                ptype in prop_oneof![Just(PTYPE_BIND_ACK), Just(PTYPE_ALTER_CONTEXT_RESP)],
+            ) {
+                let _ = parse_bind_ack(&pdu, ptype);
+                let _ = fault_status(&pdu);
+                let _ = is_last_fragment(&pdu);
+            }
+
+            #[test]
+            fn read_pdu_never_panics(
+                stream in prop_oneof![bytes(256), mutated_any(REPLIES)],
+            ) {
+                let _ = read_pdu(&mut stream.as_slice());
+            }
+
+            #[test]
+            fn signed_responses_never_panic(
+                pdu in prop_oneof![
+                    bytes(256),
+                    mutated(authenticated_response(AUTH_LEVEL_PKT_INTEGRITY)),
+                ],
+            ) {
+                let _ = verify_signed_response_pdu(&mut ssp(), &pdu);
+            }
+
+            #[test]
+            fn sealed_responses_never_panic(
+                pdu in prop_oneof![
+                    bytes(256),
+                    mutated(authenticated_response(AUTH_LEVEL_PKT_PRIVACY)),
+                ],
+            ) {
+                let _ = unseal_response_stub(&mut ssp(), &pdu);
+            }
+        }
+    }
 }

@@ -742,4 +742,50 @@ mod tests {
             Err(WmiProtoError::Hresult(0x8004_102E))
         );
     }
+
+    /// Everything here parses stubs a server sent: whatever the bytes, the
+    /// parsers must return (Ok or Err), never panic or abort.
+    mod properties {
+        use super::*;
+        use fabi_testkit::{bytes, config, mutated, mutated_any};
+        use proptest::prelude::*;
+
+        const INTERFACE_REPLIES: &[&[u8]] = &[NTLMLOGIN_RESP, EXECQUERY_RESP];
+        const OBJECT_REPLIES: &[&[u8]] = &[GETSTRINGVALUE_RESPONSE, GETSD_RESPONSE];
+
+        proptest! {
+            #![proptest_config(config())]
+
+            #[test]
+            fn interface_replies_never_panic(
+                stub in prop_oneof![bytes(256), mutated_any(INTERFACE_REPLIES)],
+            ) {
+                for iid in [&IID_IWBEM_SERVICES, &IID_IENUM_WBEM_CLASS_OBJECT] {
+                    let _ = parse_interface_response(&stub, iid);
+                }
+                let _ = parse_rem_release_response(&stub);
+            }
+
+            /// The query path end to end: Next reply, then each object in it.
+            #[test]
+            fn next_replies_never_panic(
+                stub in prop_oneof![bytes(512), mutated(NEXT_RESULT)],
+            ) {
+                if let Ok(blobs) = parse_next_response(&stub) {
+                    for blob in blobs {
+                        let _ = fabi_wmio::decode_object(&blob.data);
+                    }
+                }
+            }
+
+            #[test]
+            fn object_replies_never_panic(
+                stub in prop_oneof![bytes(512), mutated_any(OBJECT_REPLIES)],
+            ) {
+                if let Ok(Some(blob)) = parse_single_object_response(&stub) {
+                    let _ = fabi_wmio::decode_object(&blob.data);
+                }
+            }
+        }
+    }
 }

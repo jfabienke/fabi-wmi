@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/fabi-wmio", "crates/fabi-dcerpc", "crates/fabi-dcom"]
+members = ["crates/fabi-wmio", "crates/fabi-dcerpc", "crates/fabi-dcom", "crates/fabi-testkit"]
 
 [package]
 name = "fabi-wmi"
@@ -54,5 +54,7 @@ test-support = []
 test-gss-mock = []
 
 [dev-dependencies]
+fabi-testkit = { path = "crates/fabi-testkit" }
 hex = "0.4"
+proptest = { version = "1.12", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

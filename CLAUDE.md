@@ -15,6 +15,7 @@ Rust WMI client workspace (`fabi-*` crates) for Linux/macOS: queries and invokes
 | `fabi-dcom` | `crates/fabi-dcom` | OXID resolution (`resolve_oxid`, `IOXIDResolver::ResolveOxid`), generalized `remote_activation` (`IRemoteSCMActivator` / `IActivation`), consolidated `ObjRef`/`StdObjRef`/`MInterfacePointer`/`DualStringArray` marshaling (`encode_custom_m_interface_pointer`), and `encode_rem_release` (`IRemUnknown::RemRelease`) |
 | `fabi-kerbsec` | `../kerbsec` | GSS-API Kerberos v5 security context with 4-buffer `GSS_C_DCE_STYLE` IOV protection (`SIGN_ONLY` header/trailer, `DATA` stub, `HEADER` `auth_value`); native IOV needs Linux with its `iov` feature |
 | `fabi-wmi` | `.` (root) | High-level `WmiClient` (`query`, `query_as`, `exec_method`, `exec_method_as`), MS-WMI ORPC encoders/decoders (`src/wmi_proto.rs`), `KerberosClient` (`AuthProvider` bridge), C ABI (`src/lib.rs`, `ffi` feature), and .NET shim (`shim/wmi_shim.cs`) |
+| `fabi-testkit` | `crates/fabi-testkit` | Dev-only: proptest strategies (random bytes, mutated captures) for the parsers' never-panic properties |
 
 ## Build & Test
 
@@ -26,6 +27,7 @@ cargo build --lib --release                              # what CI builds
 cargo test --workspace --features test-support           # full Rust workspace suite
 cargo test --no-default-features                         # pure Rust rlib without ffi or kerberos
 cargo test --features test-support <test_name>           # single test (substring match)
+PROPTEST_CASES=100000 cargo test --workspace properties   # deeper run of the parser never-panic properties (default 1000 cases)
 cargo test --features test-support --test integration    # single integration-test file
 cargo fmt && cargo clippy --workspace --all-targets      # not `fmt --all`: see below
 cargo deny check                                         # advisories, licenses, banned crates (deny.toml)

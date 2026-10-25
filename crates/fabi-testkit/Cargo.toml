@@ -1,0 +1,10 @@
+[package]
+name = "fabi-testkit"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Proptest strategies for the fabi-* parser properties (dev-dependency only)"
+
+[dependencies]
+proptest = { version = "1.12", default-features = false, features = ["std"] }
