@@ -5,7 +5,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use byteorder::{LittleEndian, WriteBytesExt};
 use thiserror::Error;
@@ -276,17 +276,22 @@ pub fn fault_status(pdu: &[u8]) -> Option<u32> {
         .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
 }
 
-/// Read one PDU (fragment) from `stream`.
-pub fn read_pdu(stream: &mut impl Read) -> Result<Vec<u8>, RpcError> {
-    let mut header = [0u8; 16];
-    stream.read_exact(&mut header)?;
+/// The `frag_length` in a PDU header, which must at least cover the header.
+fn fragment_len(header: &[u8; 16]) -> Result<usize, RpcError> {
     let frag_len = usize::from(u16::from_le_bytes([header[8], header[9]]));
     if frag_len < 16 {
         return Err(RpcError::Protocol(format!(
             "invalid fragment length {frag_len}"
         )));
     }
-    let mut pdu = vec![0u8; frag_len];
+    Ok(frag_len)
+}
+
+/// Read one PDU (fragment) from `stream`.
+pub fn read_pdu(stream: &mut impl Read) -> Result<Vec<u8>, RpcError> {
+    let mut header = [0u8; 16];
+    stream.read_exact(&mut header)?;
+    let mut pdu = vec![0u8; fragment_len(&header)?];
     pdu[..16].copy_from_slice(&header);
     stream.read_exact(&mut pdu[16..])?;
     Ok(pdu)
@@ -659,9 +664,46 @@ pub struct BoundContext {
     pub auth: Box<dyn AuthProvider>,
 }
 
+/// Most bytes one response may take on the wire, all its fragments together.
+/// A 32-object `Next` batch of large WMI objects is a few hundred KiB, so this
+/// only stops a server that never finishes.
+pub const MAX_RESPONSE_LEN: usize = 32 << 20;
+
+/// How many I/O timeouts one exchange may take in total. A read may wait one
+/// I/O timeout for the server to start answering; the rest is for the answer
+/// to arrive. A server that trickles bytes cannot hold a call open longer.
+const EXCHANGE_TIMEOUTS: u32 = 4;
+
+/// A stream an [`RpcConnection`] runs over. Besides reading and writing, the
+/// connection shortens the read timeout as an exchange nears its deadline.
+pub trait RpcStream: Read + Write {
+    /// Make each following read wait at most `timeout`.
+    fn set_read_timeout(&mut self, timeout: Duration) -> std::io::Result<()>;
+}
+
+impl RpcStream for TcpStream {
+    fn set_read_timeout(&mut self, timeout: Duration) -> std::io::Result<()> {
+        TcpStream::set_read_timeout(self, Some(timeout))
+    }
+}
+
+/// What is left to one exchange: a call, or one round trip of a bind.
+struct Exchange {
+    /// `None` when the I/O timeout is so long that the limit cannot be
+    /// represented; the exchange then has no deadline.
+    deadline: Option<Instant>,
+    /// Bytes the rest of the response may take.
+    room: usize,
+}
+
 /// A connection-oriented DCE/RPC client association over a stream, owning the
 /// socket, presentation-context handshakes, call dispatch, and fragment
 /// splitting/reassembly.
+///
+/// Each exchange, from sending a request to reading the end of its response,
+/// must finish within four I/O timeouts, and the response may take at most
+/// [`MAX_RESPONSE_LEN`] bytes. Breaking either limit fails the exchange with
+/// the rest of the response unread, so the connection is unusable afterwards.
 pub struct RpcConnection<S = TcpStream> {
     stream: S,
     call_id: u32,
@@ -670,6 +712,11 @@ pub struct RpcConnection<S = TcpStream> {
     /// Header signing agreed for this connection (MS-RPCE 3.3.1.5.2.2); `None`
     /// until the first authenticated bind or alter_context settles it.
     header_signing: Option<bool>,
+    /// How long one read or write may block.
+    io_timeout: Duration,
+    /// The read timeout last set on the stream; `None` until one is set.
+    read_timeout: Option<Duration>,
+    max_response_len: usize,
 }
 
 impl RpcConnection<TcpStream> {
@@ -694,18 +741,23 @@ impl RpcConnection<TcpStream> {
         Ok(conn)
     }
 
-    /// Change the read/write timeout on the underlying TCP stream.
+    /// Change the read/write timeout on the underlying TCP stream. An exchange
+    /// may take four times this in total.
     pub fn set_timeout(&mut self, timeout: Duration) -> Result<(), RpcError> {
         // A zero Duration means "no timeout" to the socket API; never allow it.
-        let timeout = Some(timeout.max(Duration::from_millis(1)));
-        self.stream.set_read_timeout(timeout)?;
-        self.stream.set_write_timeout(timeout)?;
+        let timeout = timeout.max(Duration::from_millis(1));
+        self.stream.set_read_timeout(Some(timeout))?;
+        self.stream.set_write_timeout(Some(timeout))?;
+        self.io_timeout = timeout;
+        self.read_timeout = Some(timeout);
         Ok(())
     }
 }
 
-impl<S: Read + Write> RpcConnection<S> {
+impl<S: RpcStream> RpcConnection<S> {
     /// Wrap an existing stream (e.g. a `TcpStream` or an in-memory test pipe).
+    /// The connection sets its read timeout from here on, assuming an I/O
+    /// timeout of [`RPC_IO_TIMEOUT`].
     pub fn from_stream(stream: S) -> Self {
         Self {
             stream,
@@ -713,6 +765,9 @@ impl<S: Read + Write> RpcConnection<S> {
             next_context_id: 0,
             max_xmit: MAX_FRAG,
             header_signing: None,
+            io_timeout: RPC_IO_TIMEOUT,
+            read_timeout: None,
+            max_response_len: MAX_RESPONSE_LEN,
         }
     }
 
@@ -723,6 +778,84 @@ impl<S: Read + Write> RpcConnection<S> {
     fn next_call_id(&mut self) -> u32 {
         self.call_id += 1;
         self.call_id
+    }
+
+    /// Start an exchange: its deadline and how much response it may read.
+    fn exchange(&self) -> Exchange {
+        Exchange {
+            deadline: self
+                .io_timeout
+                .checked_mul(EXCHANGE_TIMEOUTS)
+                .and_then(|limit| Instant::now().checked_add(limit)),
+            room: self.max_response_len,
+        }
+    }
+
+    fn overdue(&self) -> RpcError {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
+                "the server did not finish answering within {:?}",
+                self.io_timeout.saturating_mul(EXCHANGE_TIMEOUTS)
+            ),
+        )
+        .into()
+    }
+
+    /// Fill `buf` from the stream by `deadline`. Each read waits at most the
+    /// I/O timeout, and less once the deadline is closer than that.
+    fn read_by(&mut self, deadline: Option<Instant>, buf: &mut [u8]) -> Result<(), RpcError> {
+        let mut filled = 0;
+        while filled < buf.len() {
+            let wait = match deadline {
+                Some(deadline) => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Err(self.overdue());
+                    }
+                    left.min(self.io_timeout)
+                }
+                None => self.io_timeout,
+            };
+            if self.read_timeout != Some(wait) {
+                self.stream.set_read_timeout(wait)?;
+                self.read_timeout = Some(wait);
+            }
+            match self.stream.read(&mut buf[filled..]) {
+                Ok(0) => return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into()),
+                Ok(n) => filled += n,
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                // A read shortened to end at the deadline ran out.
+                Err(err)
+                    if wait < self.io_timeout
+                        && matches!(
+                            err.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) =>
+                {
+                    return Err(self.overdue());
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+        Ok(())
+    }
+
+    /// Read one PDU (fragment) within what is left to `exchange`.
+    fn read_fragment(&mut self, exchange: &mut Exchange) -> Result<Vec<u8>, RpcError> {
+        let mut header = [0u8; 16];
+        self.read_by(exchange.deadline, &mut header)?;
+        let frag_len = fragment_len(&header)?;
+        exchange.room = exchange.room.checked_sub(frag_len).ok_or_else(|| {
+            RpcError::Protocol(format!(
+                "response longer than {} bytes",
+                self.max_response_len
+            ))
+        })?;
+        let mut pdu = vec![0u8; frag_len];
+        pdu[..16].copy_from_slice(&header);
+        self.read_by(exchange.deadline, &mut pdu[16..])?;
+        Ok(pdu)
     }
 
     /// Bind a presentation context for `abstract_syntax` (`PTYPE_BIND` for the
@@ -765,8 +898,9 @@ impl<S: Read + Write> RpcConnection<S> {
         if offer_header_signing {
             pdu[3] |= PFC_SUPPORT_HEADER_SIGN;
         }
+        let mut exchange = self.exchange();
         self.stream.write_all(&pdu)?;
-        let ack = parse_bind_ack(&read_pdu(&mut self.stream)?, ack_ptype)?;
+        let ack = parse_bind_ack(&self.read_fragment(&mut exchange)?, ack_ptype)?;
         if ack.auth_type != 0 && ack.auth_type != auth_type {
             return Err(RpcError::Protocol(format!(
                 "server answered with auth type {}, expected {}",
@@ -800,6 +934,7 @@ impl<S: Read + Write> RpcConnection<S> {
                     }
                     HandshakeStyle::AlterContext => {
                         let alter_call_id = self.next_call_id();
+                        let mut exchange = self.exchange();
                         self.stream.write_all(&build_bind_pdu_with_auth_type(
                             PTYPE_ALTER_CONTEXT,
                             alter_call_id,
@@ -810,7 +945,10 @@ impl<S: Read + Write> RpcConnection<S> {
                             auth_context_id,
                             &authenticate,
                         ))?;
-                        parse_bind_ack(&read_pdu(&mut self.stream)?, PTYPE_ALTER_CONTEXT_RESP)?;
+                        parse_bind_ack(
+                            &self.read_fragment(&mut exchange)?,
+                            PTYPE_ALTER_CONTEXT_RESP,
+                        )?;
                     }
                 }
             }
@@ -849,13 +987,15 @@ impl<S: Read + Write> RpcConnection<S> {
             ctx.auth_context_id,
             self.max_xmit,
         )?;
+        let mut exchange = self.exchange();
         for pdu in &pdus {
             self.stream.write_all(pdu)?;
         }
 
         let mut response = Vec::new();
+        let mut first = true;
         loop {
-            let frag = read_pdu(&mut self.stream)?;
+            let frag = self.read_fragment(&mut exchange)?;
             let frag_call_id = u32::from_le_bytes(frag[12..16].try_into().unwrap());
             if frag_call_id != call_id {
                 return Err(RpcError::Protocol(format!(
@@ -868,6 +1008,16 @@ impl<S: Read + Write> RpcConnection<S> {
                     frag[2]
                 )));
             }
+            // Only the first fragment of a response is marked first. (A fault
+            // ends the call wherever it arrives.)
+            if frag[2] == PTYPE_RESPONSE && (frag[3] & PFC_FIRST_FRAG != 0) != first {
+                return Err(RpcError::Protocol(if first {
+                    "response does not start with a first fragment".into()
+                } else {
+                    "a later response fragment is marked first".into()
+                }));
+            }
+            first = false;
             let chunk = match ctx.auth_level {
                 AUTH_LEVEL_PKT_PRIVACY => unseal_response_stub(&mut *ctx.auth, &frag)?,
                 AUTH_LEVEL_PKT_INTEGRITY => verify_signed_response_pdu(&mut *ctx.auth, &frag)?,
@@ -1220,6 +1370,189 @@ mod tests {
         }
     }
 
+    impl RpcStream for Duplex {
+        fn set_read_timeout(&mut self, _timeout: Duration) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn replying(fragments: &[Vec<u8>]) -> RpcConnection<Duplex> {
+        RpcConnection::from_stream(Duplex {
+            replies: std::io::Cursor::new(fragments.concat()),
+            sent: Vec::new(),
+        })
+    }
+
+    fn signing_ssp() -> DummyVariableSsp {
+        DummyVariableSsp {
+            auth_type: AUTH_TYPE_NTLM,
+            sig_len: 16,
+        }
+    }
+
+    /// A signed response fragment for call 1 with the given `PFC_*` flags.
+    fn response_fragment(flags: u8, stub: &[u8]) -> Vec<u8> {
+        let mut pdu = build_request_pdus(
+            &mut signing_ssp(),
+            1,
+            0,
+            0,
+            None,
+            stub,
+            AUTH_LEVEL_PKT_INTEGRITY,
+            0,
+            MAX_FRAG,
+        )
+        .unwrap()
+        .remove(0);
+        pdu[2] = PTYPE_RESPONSE;
+        pdu[3] = flags;
+        pdu
+    }
+
+    /// Make the first call on `conn`, signed.
+    fn signed_call<S: RpcStream>(conn: &mut RpcConnection<S>) -> Result<Vec<u8>, RpcError> {
+        let mut ctx = BoundContext {
+            name: "test",
+            context_id: 0,
+            auth_context_id: 0,
+            auth_level: AUTH_LEVEL_PKT_INTEGRITY,
+            auth: Box::new(signing_ssp()),
+        };
+        conn.call(&mut ctx, 0, None, &[0; 8])
+    }
+
+    #[test]
+    fn call_reassembles_fragments_in_order() {
+        let mut conn = replying(&[
+            response_fragment(PFC_FIRST_FRAG, &[1; 8]),
+            response_fragment(0, &[2; 4]),
+            response_fragment(PFC_LAST_FRAG, &[3; 4]),
+        ]);
+        assert_eq!(
+            signed_call(&mut conn).unwrap(),
+            [&[1; 8][..], &[2; 4], &[3; 4]].concat()
+        );
+    }
+
+    #[test]
+    fn a_timeout_too_long_to_multiply_means_no_deadline() {
+        let mut conn = replying(&[response_fragment(PFC_FIRST_FRAG | PFC_LAST_FRAG, &[1; 8])]);
+        conn.io_timeout = Duration::MAX;
+        assert!(conn.exchange().deadline.is_none());
+        assert_eq!(signed_call(&mut conn).unwrap(), [1; 8]);
+    }
+
+    #[test]
+    fn call_rejects_misplaced_first_fragments() {
+        let unmarked_start = vec![response_fragment(PFC_LAST_FRAG, &[1; 4])];
+        let marked_twice = vec![
+            response_fragment(PFC_FIRST_FRAG, &[1; 4]),
+            response_fragment(PFC_FIRST_FRAG | PFC_LAST_FRAG, &[2; 4]),
+        ];
+        for fragments in [unmarked_start, marked_twice] {
+            let err = signed_call(&mut replying(&fragments)).unwrap_err();
+            assert!(matches!(err, RpcError::Protocol(_)), "{err}");
+        }
+    }
+
+    #[test]
+    fn call_stops_at_the_response_length_limit() {
+        let first = response_fragment(PFC_FIRST_FRAG, &[1; 16]);
+        let mut conn = replying(&[first.clone(), response_fragment(PFC_LAST_FRAG, &[2; 16])]);
+        conn.max_response_len = first.len() + 10;
+        let err = signed_call(&mut conn).unwrap_err();
+        assert!(err.to_string().contains("response longer than"), "{err}");
+        // The second fragment's header said it would not fit; its body stays unread.
+        assert_eq!(conn.stream.replies.position() as usize, first.len() + 16);
+    }
+
+    /// Sends one byte per `delay` and times out reads like a socket, keeping
+    /// every read timeout it is given.
+    struct Trickle {
+        bytes: std::collections::VecDeque<u8>,
+        delay: Duration,
+        timeout: Duration,
+        timeouts: Vec<Duration>,
+    }
+
+    impl Read for Trickle {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.timeout < self.delay {
+                std::thread::sleep(self.timeout);
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            std::thread::sleep(self.delay);
+            match (self.bytes.pop_front(), buf.first_mut()) {
+                (Some(byte), Some(slot)) => {
+                    *slot = byte;
+                    Ok(1)
+                }
+                _ => Ok(0),
+            }
+        }
+    }
+
+    impl Write for Trickle {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl RpcStream for Trickle {
+        fn set_read_timeout(&mut self, timeout: Duration) -> std::io::Result<()> {
+            self.timeout = timeout;
+            self.timeouts.push(timeout);
+            Ok(())
+        }
+    }
+
+    fn trickling(delay: Duration, io_timeout: Duration) -> RpcConnection<Trickle> {
+        let mut conn = RpcConnection::from_stream(Trickle {
+            bytes: response_fragment(PFC_FIRST_FRAG | PFC_LAST_FRAG, &[1; 64]).into(),
+            delay,
+            timeout: Duration::MAX,
+            timeouts: Vec::new(),
+        });
+        conn.io_timeout = io_timeout;
+        conn
+    }
+
+    #[test]
+    fn a_trickling_server_cannot_outlast_the_call_deadline() {
+        // Each byte arrives well within the I/O timeout, but the 100-odd bytes
+        // take longer than four of them.
+        let mut conn = trickling(Duration::from_millis(2), Duration::from_millis(10));
+        let started = Instant::now();
+        let err = signed_call(&mut conn).unwrap_err();
+        assert!(
+            matches!(&err, RpcError::Io(e) if e.kind() == std::io::ErrorKind::TimedOut),
+            "{err}"
+        );
+        assert!(
+            err.to_string().contains("did not finish answering"),
+            "{err}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        // Near the deadline, reads were cut to the time left.
+        assert!(*conn.stream.timeouts.last().unwrap() < conn.io_timeout);
+    }
+
+    #[test]
+    fn a_silent_server_still_fails_at_the_io_timeout() {
+        let mut conn = trickling(Duration::from_secs(5), Duration::from_millis(10));
+        let started = Instant::now();
+        let err = signed_call(&mut conn).unwrap_err();
+        assert!(
+            matches!(&err, RpcError::Io(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+            "{err}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
     /// Records what `set_header_signing` reports; never protects a PDU.
     struct HeaderSignRecorder(std::sync::Arc<std::sync::Mutex<Vec<bool>>>);
 
@@ -1380,6 +1713,28 @@ mod tests {
                 ],
             ) {
                 let _ = unseal_response_stub(&mut ssp(), &pdu);
+            }
+
+            #[test]
+            fn calls_never_panic(
+                replies in prop_oneof![
+                    bytes(512),
+                    mutated(response_fragment(PFC_FIRST_FRAG | PFC_LAST_FRAG, &[0xAB; 40])),
+                    mutated(
+                        [
+                            response_fragment(PFC_FIRST_FRAG, &[1; 16]),
+                            response_fragment(PFC_LAST_FRAG, &[2; 16]),
+                        ]
+                        .concat()
+                    ),
+                ],
+            ) {
+                let mut conn = RpcConnection::from_stream(Duplex {
+                    replies: std::io::Cursor::new(replies),
+                    sent: Vec::new(),
+                });
+                conn.max_response_len = 256;
+                let _ = signed_call(&mut conn);
             }
         }
     }
