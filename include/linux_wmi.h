@@ -55,7 +55,8 @@ wmi_status_t wmi_namespace_open(WmiSession *sess, const char *ns, char **out_err
 
 /**
  * Runs a WQL query; `*out_json` is a JSON array with one object per row.
- * `timeout_ms` bounds each network read/write (0 = default, 30 s).
+ * `timeout_ms` bounds each network read/write (0 = default, 30 s), and
+ * each request to the server must be answered within four times that.
  *
  * # Safety
  *

@@ -243,7 +243,7 @@ impl WmiClient {
     }
 
     /// Like [`connect`](Self::connect); `timeout` bounds each network read and
-    /// write on the WMI connection.
+    /// write on the WMI connection, and each RPC call to four times that.
     pub fn connect_with_timeout(
         host: &str,
         creds: &Credentials,
@@ -313,7 +313,8 @@ impl WmiClient {
         })
     }
 
-    /// Change the bound on each network read/write for later calls.
+    /// Change the bound on each network read/write (and on each RPC call, four
+    /// times this) for later calls.
     pub fn set_timeout(&mut self, timeout: Duration) -> Result<(), Error> {
         self.conn.set_timeout(timeout)
     }

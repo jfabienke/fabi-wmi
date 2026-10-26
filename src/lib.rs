@@ -256,7 +256,8 @@ mod ffi {
             Ok(f(client)?)
         }
 
-        /// Run `wql`; `timeout_ms` bounds each network read/write (0 = default).
+        /// Run `wql`; `timeout_ms` bounds each network read/write, and each
+        /// request-response exchange to four times that (0 = default).
         pub(super) fn exec_query(&self, wql: &str, timeout_ms: u32) -> Result<String> {
             let values = match &self.backend {
                 #[cfg(any(test, feature = "test-support"))]
@@ -274,8 +275,8 @@ mod ffi {
                 .map_err(|err| FfiError::Invalid(format!("Serialize query result failed: {err}")))
         }
 
-        /// Invoke `method` on `class` with `params`; `timeout_ms` bounds each
-        /// network read/write (0 = default).
+        /// Invoke `method` on `class` with `params`; `timeout_ms` as for
+        /// [`Self::exec_query`].
         pub(super) fn exec_method(
             &self,
             class: &str,
@@ -471,7 +472,8 @@ mod ffi {
 
     #[no_mangle]
     /// Runs a WQL query; `*out_json` is a JSON array with one object per row.
-    /// `timeout_ms` bounds each network read/write (0 = default, 30 s).
+    /// `timeout_ms` bounds each network read/write (0 = default, 30 s), and
+    /// each request to the server must be answered within four times that.
     ///
     /// # Safety
     ///
