@@ -18,7 +18,7 @@ namespace LinuxWmi.E2ETests.Infrastructure
             if (Config.VerboseLogging)
             {
                 Output.WriteLine($"Test Configuration:");
-                Output.WriteLine($"  Host: {Config.Host}");
+                Output.WriteLine($"  Host: {(Config.StubBackend ? "<stub backend>" : Config.Host)}");
                 Output.WriteLine($"  Username: {Config.Username}");
                 Output.WriteLine($"  Domain: {(string.IsNullOrEmpty(Config.Domain) ? "<local>" : Config.Domain)}");
                 Output.WriteLine($"  Timeout: {Config.DefaultTimeout}");
@@ -43,10 +43,12 @@ namespace LinuxWmi.E2ETests.Infrastructure
 
         /// <summary>
         /// Live tests need a Windows host: they are skipped when none is
-        /// configured or when network tests are disabled.
+        /// configured, when network tests are disabled, or when the library runs
+        /// on its stub backend.
         /// </summary>
         protected void SkipIfNetworkTestsDisabled()
         {
+            Skip.If(Config.StubBackend, "The library runs on its stub backend (LINUX_WMI_USE_STUB=1)");
             Skip.If(Config.SkipNetworkTests, "Network tests are disabled in configuration");
             Skip.If(string.IsNullOrEmpty(Config.Host), "No test host: set WMI_TEST_DEFAULTHOST and its credentials");
         }
@@ -55,6 +57,12 @@ namespace LinuxWmi.E2ETests.Infrastructure
         {
             SkipIfNetworkTestsDisabled();
             Skip.If(Config.SkipAuthTests, "Authentication tests are disabled in configuration");
+        }
+
+        protected void SkipUnlessStubBackend()
+        {
+            Skip.IfNot(Config.StubBackend,
+                "Stub tests need LINUX_WMI_USE_STUB=1 and a library built with --features test-support");
         }
 
         protected WmiException AssertWmiException(Action action, int? expectedCode = null, string? messageContains = null)

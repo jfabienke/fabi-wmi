@@ -39,7 +39,7 @@ cargo deny check                                         # advisories, licenses,
 
 - Building needs no Kerberos packages: kerbsec loads the system GSS-API at run time (its `src/ffi`). Running Kerberos needs `libgssapi-krb5-2` (Debian/Ubuntu), `krb5-libs` (Fedora/RHEL) or macOS's GSS.framework; without it, `Auth::Kerberos` fails at connect with "GSS-API unavailable". `KERBSEC_GSSAPI_LIBRARY` overrides the library.
 - `tests/kerberos_adapter_test.rs` needs the `kerberos` feature.
-- .NET E2E suite: `tests/e2e-dotnet` (net10.0, xUnit). Mock mode: `WMI_TEST_SKIPNETWORKTESTS=true WMI_TEST_SKIPAUTHTESTS=true dotnet test`. Live mode reads `WMI_TEST_DEFAULTHOST/USERNAME/PASSWORD/DOMAIN`. CI (`.github/workflows/e2e-tests.yml`) copies `libfabi_wmi.so` into the test output dir.
+- .NET E2E suite: `tests/e2e-dotnet` (net10.0, xUnit; see its README). Stub mode (what CI runs): a library built with `--features test-support` and `LINUX_WMI_USE_STUB=1` (`examples/run_dotnet_tests.sh --stub`); live mode reads `WMI_TEST_DEFAULTHOST/USERNAME/PASSWORD/DOMAIN`. Each test skips itself unless its mode is configured. CI (`.github/workflows/e2e-tests.yml`) copies `libfabi_wmi.so` into the test output dir.
 
 ### Running against a live host
 
@@ -55,7 +55,7 @@ Kerberos runs on Linux and macOS. Activation is sealed where kerbsec can seal DC
 
 Read-only methods for live checks: `__SystemSecurity GetSD` (no input parameters) and `StdRegProv GetStringValue '{"hDefKey":2147483650,"sSubKeyName":"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion","sValueName":"ProductName"}'` (GetObject + input object + ExecMethod). Ground truth: `Invoke-CimMethod` over WinRM.
 
-The .NET suite runs live with `WMI_TEST_DEFAULTHOST/USERNAME/PASSWORD` (and `WMI_TEST_TESTHOSTS_PRIMARY_*`) after copying `target/release/libfabi_wmi.{so,dylib}` into its output dir; with only a newer .NET runtime installed, set `DOTNET_ROLL_FORWARD=Major`.
+The .NET suite runs live with `WMI_TEST_DEFAULTHOST/USERNAME/PASSWORD/DOMAIN` after copying `target/release/libfabi_wmi.{so,dylib}` into its output dir; with only a newer .NET runtime installed, set `DOTNET_ROLL_FORWARD=Major`.
 
 ### Environment variables
 
