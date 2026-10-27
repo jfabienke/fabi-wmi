@@ -13,9 +13,7 @@ targets = [
 all-features = true
 
 [advisories]
-ignore = [
-    { id = "RUSTSEC-2023-0071", reason = "rsa (via sspi -> picky): Marvin timing attack on RSA decryption, which the NTLM path never performs; no fixed release exists" },
-]
+ignore = []
 
 [licenses]
 allow = [
