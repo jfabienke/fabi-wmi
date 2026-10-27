@@ -22,12 +22,28 @@ pub enum AuthError {
 
 /// Credentials for a Windows account. `domain` is empty for a local account.
 /// The password is wiped from memory when the value is dropped.
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone)]
 pub struct Credentials {
     pub(crate) username: String,
     pub(crate) password: String,
     pub(crate) domain: String,
 }
+
+impl Zeroize for Credentials {
+    fn zeroize(&mut self) {
+        self.username.zeroize();
+        self.password.zeroize();
+        self.domain.zeroize();
+    }
+}
+
+impl Drop for Credentials {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for Credentials {}
 
 impl Credentials {
     /// Credentials for a local account on the target host.
@@ -159,5 +175,12 @@ mod tests {
         let shown = format!("{creds:?}");
         assert!(shown.contains("admin") && shown.contains("CORP"));
         assert!(!shown.contains("hunter2"));
+    }
+
+    #[test]
+    fn zeroize_clears_every_field() {
+        let mut creds = Credentials::new("admin", "hunter2").with_domain("CORP");
+        creds.zeroize();
+        assert!(creds.username.is_empty() && creds.password.is_empty() && creds.domain.is_empty());
     }
 }

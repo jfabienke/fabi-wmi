@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use hmac::{Hmac, KeyInit, Mac};
 use md4::{Digest, Md4};
 use md5::Md5;
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::auth::{AuthError, AuthProvider, Credentials, AUTH_TYPE_NTLM};
 
@@ -314,13 +314,20 @@ impl Session {
     }
 }
 
-#[derive(Zeroize, ZeroizeOnDrop)]
 struct Direction {
     signing_key: [u8; 16],
     /// One RC4 stream for the whole direction: every sealed stub and every
     /// signature's checksum continues it.
     sealing: Rc4,
     seq: u32,
+}
+
+impl Drop for Direction {
+    fn drop(&mut self) {
+        // `sealing` wipes itself.
+        self.signing_key.zeroize();
+        self.seq.zeroize();
+    }
 }
 
 impl Direction {
@@ -359,11 +366,18 @@ impl Direction {
 }
 
 /// RC4, the cipher NTLM seals with, keeping its state across messages.
-#[derive(Zeroize, ZeroizeOnDrop)]
 struct Rc4 {
     s: [u8; 256],
     i: u8,
     j: u8,
+}
+
+impl Drop for Rc4 {
+    fn drop(&mut self) {
+        self.s.zeroize();
+        self.i.zeroize();
+        self.j.zeroize();
+    }
 }
 
 impl Rc4 {
