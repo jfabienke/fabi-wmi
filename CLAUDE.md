@@ -84,7 +84,7 @@ Request flow (C ABI → `client::WmiClient`):
 - `docs/NTLM-DEPRECATION-TIMELINE.md`: why Kerberos matters (Windows 11 24H2 blocks NTLM for DCOM).
 - `docs/INTEGRATION_TESTING.md`: Windows target setup (DCOM enabled, user in "Distributed COM Users", `root\CIMV2` permissions, RPC firewall rules; capture with Wireshark filter `dcerpc`).
 
-## Conventions (from AGENTS.md)
+## Conventions
 
 - Imperative commit subjects, one concern per commit.
 - Keep `unsafe` minimal and annotated.
