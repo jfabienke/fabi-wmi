@@ -15,7 +15,7 @@ md-5 = { version = "0.11", default-features = false }
 md4 = { version = "0.11", default-features = false }
 thiserror = "2"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
-zeroize = "1.7"
+zeroize = "1.9"
 
 [dev-dependencies]
 hex = "0.4"
