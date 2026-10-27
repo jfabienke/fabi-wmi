@@ -36,7 +36,6 @@ serde = "1.0"
 serde_json = "1.0"
 thiserror = "2"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
-uuid = { version = "1.10", features = ["v4"] }
 
 [target.'cfg(unix)'.dependencies]
 # Kerberos via the system GSS-API (fabi-kerbsec crate). Only the DCE/RPC pieces:

@@ -87,6 +87,16 @@ pub fn encode_orpcthis(buf: &mut Vec<u8>, causality_id: &[u8; 16]) {
     buf.write_u32::<LittleEndian>(0).unwrap(); // extensions: null
 }
 
+/// A new causality id for ORPCTHIS: a random (version 4) GUID, in the wire
+/// layout of MS-DTYP 2.3.4.2, where the version is the high nibble of byte 7.
+pub fn new_causality_id() -> Result<[u8; 16], DcomError> {
+    let mut id = [0; 16];
+    getrandom::fill(&mut id).map_err(std::io::Error::other)?;
+    id[7] = (id[7] & 0x0f) | 0x40;
+    id[8] = (id[8] & 0x3f) | 0x80;
+    Ok(id)
+}
+
 fn align4(buf: &mut Vec<u8>, fill: u8) {
     while !buf.len().is_multiple_of(4) {
         buf.push(fill);
@@ -447,7 +457,7 @@ pub fn build_remote_activation_stub(
     const UNIQUE_REFERENT: u32 = 0x0002_0000;
 
     let mut stub = Vec::new();
-    encode_orpcthis(&mut stub, uuid::Uuid::new_v4().as_bytes());
+    encode_orpcthis(&mut stub, &new_causality_id()?);
 
     stub.extend_from_slice(clsid); // Clsid
     stub.write_u32::<LittleEndian>(0).unwrap(); // pwszObjectName: null
@@ -723,6 +733,17 @@ mod tests {
     use super::*;
 
     const IID_IWBEM_LEVEL1_LOGIN: [u8; 16] = hex_literal::hex!("18ad09f36ad8d011a07500c04fb68820");
+
+    #[test]
+    fn causality_ids_are_random_version_4_guids() {
+        let a = new_causality_id().unwrap();
+        let b = new_causality_id().unwrap();
+        assert_ne!(a, b);
+        for id in [a, b] {
+            assert_eq!(id[7] >> 4, 4, "version 4 in Data3's high nibble");
+            assert_eq!(id[8] >> 6, 0b10, "RFC 4122 variant");
+        }
+    }
 
     #[test]
     fn remote_activation_stub_matches_ms_dcom_ndr_layout() {
