@@ -567,7 +567,7 @@ mod tests {
             "Win32_Process"
         );
         assert_eq!(
-            class_name_from_path(r#"\\SAI-NAV009-2\root\cimv2:Win32_Process.Handle="724""#),
+            class_name_from_path(r#"\\WIN-TEST\root\cimv2:Win32_Process.Handle="724""#),
             "Win32_Process"
         );
         assert_eq!(class_name_from_path("MySingleton=@"), "MySingleton");
