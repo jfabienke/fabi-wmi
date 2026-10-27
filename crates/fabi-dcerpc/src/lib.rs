@@ -3,12 +3,13 @@
 //! message protection.
 
 mod auth;
+mod ntlm;
 mod rpc;
-mod sspi_ntlm;
 
 pub use auth::{
     AuthError, AuthProvider, Credentials, AUTH_TYPE_KERBEROS, AUTH_TYPE_NTLM, AUTH_TYPE_SPNEGO,
 };
+pub use ntlm::NtlmClient;
 pub use rpc::{
     build_auth3_pdu, build_auth3_pdu_with_auth_type, build_bind_pdu, build_bind_pdu_with_auth_type,
     build_request_fragment_pdu, build_request_pdus, build_sealed_request_pdu,
@@ -19,4 +20,3 @@ pub use rpc::{
     PTYPE_ALTER_CONTEXT, PTYPE_ALTER_CONTEXT_RESP, PTYPE_AUTH3, PTYPE_BIND, PTYPE_BIND_ACK,
     PTYPE_BIND_NAK, PTYPE_FAULT, PTYPE_REQUEST, PTYPE_RESPONSE, RPC_IO_TIMEOUT,
 };
-pub use sspi_ntlm::SspiNtlmClient;

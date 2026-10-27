@@ -10,8 +10,8 @@ use thiserror::Error;
 use tracing::{debug, error, info, instrument, warn};
 
 use fabi_dcerpc::{
-    fault_to_hresult, AuthError, AuthProvider, Credentials, HandshakeStyle, RpcConnection,
-    RpcError, SspiNtlmClient, AUTH_LEVEL_PKT_PRIVACY, RPC_IO_TIMEOUT,
+    fault_to_hresult, AuthError, AuthProvider, Credentials, HandshakeStyle, NtlmClient,
+    RpcConnection, RpcError, AUTH_LEVEL_PKT_PRIVACY, RPC_IO_TIMEOUT,
 };
 
 #[derive(Error, Debug)]
@@ -379,12 +379,7 @@ pub fn activate(
     clsid: &[u8; 16],
     iid: &[u8; 16],
 ) -> Result<(u16, ActivationResponse), DcomError> {
-    activate_with(
-        host,
-        clsid,
-        iid,
-        SspiNtlmClient::new(creds, &format!("host/{host}"))?,
-    )
+    activate_with(host, clsid, iid, NtlmClient::new(creds)?)
 }
 
 /// Run `IActivation::RemoteActivation` (MS-DCOM 3.1.2.5.1.1) for `clsid` and
@@ -610,11 +605,7 @@ pub fn resolve_oxid(
     creds: &Credentials,
     oxid: &[u8; 8],
 ) -> Result<OxidResolution, DcomError> {
-    resolve_oxid_with(
-        host,
-        oxid,
-        SspiNtlmClient::new(creds, &format!("host/{host}"))?,
-    )
+    resolve_oxid_with(host, oxid, NtlmClient::new(creds)?)
 }
 
 /// Resolve `oxid` via `IObjectExporter::ResolveOxid` (opnum 0) on port 135
