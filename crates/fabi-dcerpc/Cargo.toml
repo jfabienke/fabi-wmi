@@ -16,7 +16,7 @@ md-5 = "0.11"
 md4 = "0.11"
 thiserror = "2"
 tracing = "0.1"
-zeroize = { version = "1.7", features = ["derive"] }
+zeroize = "1.7"
 
 [dev-dependencies]
 fabi-testkit = { path = "../fabi-testkit" }
