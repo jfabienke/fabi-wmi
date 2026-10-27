@@ -196,20 +196,22 @@ impl Error {
     }
 
     /// Whether the connection can no longer be used after this error (I/O
-    /// failure, timeout, or a protocol desync) as opposed to a call that
-    /// failed cleanly on a healthy connection.
+    /// failure, timeout, a protocol desync, or the server no longer knowing
+    /// our objects) as opposed to a call that failed cleanly on a healthy
+    /// connection.
     pub fn is_connection_lost(&self) -> bool {
-        !matches!(
-            self,
-            Error::Wmi(_)
-                | Error::Decode(_)
-                | Error::Deserialize(_)
-                | Error::Rpc(RpcError::Fault { .. })
-        )
+        match self {
+            Error::Rpc(RpcError::Fault { status, .. }) => *status == RPC_E_DISCONNECTED,
+            Error::Wmi(_) | Error::Decode(_) | Error::Deserialize(_) => false,
+            _ => true,
+        }
     }
 }
 
 const E_ACCESSDENIED: u32 = 0x8007_0005;
+/// The fault for a call on an IPID the server does not know: it has released
+/// the objects behind this connection, so none of its interfaces work any more.
+const RPC_E_DISCONNECTED: u32 = 0x8001_0108;
 /// What Windows returns for ExecMethod on a method the class does not have.
 const WBEM_E_INVALID_METHOD: u32 = 0x8004_102E;
 
@@ -571,5 +573,20 @@ mod tests {
             "Win32_Process"
         );
         assert_eq!(class_name_from_path("MySingleton=@"), "MySingleton");
+    }
+
+    #[test]
+    fn only_a_fault_for_released_objects_loses_the_connection() {
+        let fault = |status| {
+            Error::Rpc(RpcError::Fault {
+                status,
+                did_not_execute: true,
+            })
+        };
+        assert!(fault(RPC_E_DISCONNECTED).is_connection_lost());
+        assert!(!fault(5).is_connection_lost()); // access denied
+        assert!(!fault(0x8007_06D1).is_connection_lost()); // opnum out of range
+        assert!(!Error::Wmi(WmiProtoError::Hresult(0x8004_1010)).is_connection_lost());
+        assert!(Error::Protocol("desync".into()).is_connection_lost());
     }
 }
