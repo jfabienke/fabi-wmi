@@ -276,27 +276,6 @@ pub fn fault_status(pdu: &[u8]) -> Option<u32> {
         .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
 }
 
-/// The `frag_length` in a PDU header, which must at least cover the header.
-fn fragment_len(header: &[u8; 16]) -> Result<usize, RpcError> {
-    let frag_len = usize::from(u16::from_le_bytes([header[8], header[9]]));
-    if frag_len < 16 {
-        return Err(RpcError::Protocol(format!(
-            "invalid fragment length {frag_len}"
-        )));
-    }
-    Ok(frag_len)
-}
-
-/// Read one PDU (fragment) from `stream`.
-pub fn read_pdu(stream: &mut impl Read) -> Result<Vec<u8>, RpcError> {
-    let mut header = [0u8; 16];
-    stream.read_exact(&mut header)?;
-    let mut pdu = vec![0u8; fragment_len(&header)?];
-    pdu[..16].copy_from_slice(&header);
-    stream.read_exact(&mut pdu[16..])?;
-    Ok(pdu)
-}
-
 pub const AUTH_LEVEL_PKT_PRIVACY: u8 = 0x06;
 pub const AUTH_LEVEL_PKT_INTEGRITY: u8 = 0x05;
 const REQUEST_HEADER_LEN: usize = 24; // common header (16) + alloc_hint, p_cont_id, opnum
@@ -845,7 +824,12 @@ impl<S: RpcStream> RpcConnection<S> {
     fn read_fragment(&mut self, exchange: &mut Exchange) -> Result<Vec<u8>, RpcError> {
         let mut header = [0u8; 16];
         self.read_by(exchange.deadline, &mut header)?;
-        let frag_len = fragment_len(&header)?;
+        let frag_len = usize::from(u16::from_le_bytes([header[8], header[9]]));
+        if frag_len < 16 {
+            return Err(RpcError::Protocol(format!(
+                "invalid fragment length {frag_len}"
+            )));
+        }
         exchange.room = exchange.room.checked_sub(frag_len).ok_or_else(|| {
             RpcError::Protocol(format!(
                 "response longer than {} bytes",
@@ -1226,12 +1210,21 @@ mod tests {
     }
 
     #[test]
-    fn read_pdu_reads_exactly_one_fragment() {
-        let two = [REF_ALTER_RESP_NO_AUTH.as_slice(), &REF_ACCESS_DENIED_FAULT].concat();
-        let mut cursor = std::io::Cursor::new(two);
-        assert_eq!(read_pdu(&mut cursor).unwrap(), REF_ALTER_RESP_NO_AUTH);
-        assert_eq!(read_pdu(&mut cursor).unwrap(), REF_ACCESS_DENIED_FAULT);
-        assert!(read_pdu(&mut cursor).is_err());
+    fn read_fragment_reads_exactly_one_fragment() {
+        let mut conn = replying(&[
+            REF_ALTER_RESP_NO_AUTH.to_vec(),
+            REF_ACCESS_DENIED_FAULT.to_vec(),
+        ]);
+        let mut exchange = conn.exchange();
+        assert_eq!(
+            conn.read_fragment(&mut exchange).unwrap(),
+            REF_ALTER_RESP_NO_AUTH
+        );
+        assert_eq!(
+            conn.read_fragment(&mut exchange).unwrap(),
+            REF_ACCESS_DENIED_FAULT
+        );
+        assert!(conn.read_fragment(&mut exchange).is_err());
     }
 
     struct DummyVariableSsp {
@@ -1689,10 +1682,12 @@ mod tests {
             }
 
             #[test]
-            fn read_pdu_never_panics(
+            fn fragment_reads_never_panic(
                 stream in prop_oneof![bytes(256), mutated_any(REPLIES)],
             ) {
-                let _ = read_pdu(&mut stream.as_slice());
+                let mut conn = replying(&[stream]);
+                let mut exchange = conn.exchange();
+                while conn.read_fragment(&mut exchange).is_ok() {}
             }
 
             #[test]
