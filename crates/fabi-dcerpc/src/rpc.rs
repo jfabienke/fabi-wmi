@@ -1139,7 +1139,7 @@ impl<S: RpcStream> RpcConnection<S> {
             len = response.len(),
             "call complete"
         );
-        tracing::trace!(stub = %hex::encode(&response), "response stub");
+        tracing::trace!(stub = %crate::Hex(&response), "response stub");
         Ok(response)
     }
 }

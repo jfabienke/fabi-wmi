@@ -10,7 +10,7 @@ use thiserror::Error;
 use tracing::{debug, debug_span, error, info, warn};
 
 use fabi_dcerpc::{
-    fault_to_hresult, AuthError, AuthProvider, Credentials, HandshakeStyle, NtlmClient,
+    fault_to_hresult, AuthError, AuthProvider, Credentials, HandshakeStyle, Hex, NtlmClient,
     RpcConnection, RpcError, AUTH_LEVEL_PKT_PRIVACY, RPC_IO_TIMEOUT,
 };
 
@@ -440,8 +440,8 @@ pub fn activate_with_level(
     })?;
     info!(
         port,
-        oxid = %hex::encode(activation.oxid),
-        ipid = %hex::encode(activation.ipid),
+        oxid = %Hex(&activation.oxid),
+        ipid = %Hex(&activation.ipid),
         "DCOM activation succeeded"
     );
     Ok((port, activation))
@@ -575,8 +575,8 @@ pub fn parse_activation_stub(
     })?;
 
     debug!(
-        oxid = %hex::encode(oxid),
-        ipid = %hex::encode(std.ipid),
+        oxid = %Hex(&oxid),
+        ipid = %Hex(&std.ipid),
         ?tcp_bindings,
         "parsed RemoteActivation response"
     );
@@ -625,7 +625,7 @@ pub fn resolve_oxid_with(
     oxid: &[u8; 8],
     auth: impl AuthProvider + 'static,
 ) -> Result<OxidResolution, DcomError> {
-    let _span = debug_span!("resolve_oxid_with", host = %host, oxid = %hex::encode(oxid)).entered();
+    let _span = debug_span!("resolve_oxid_with", host = %host, oxid = %Hex(oxid)).entered();
     let mut conn = RpcConnection::connect(host, 135, CONNECT_TIMEOUT, RPC_IO_TIMEOUT).map_err(
         |e| match e {
             RpcError::Io(io) => DcomError::Connect(io),

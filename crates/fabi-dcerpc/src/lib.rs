@@ -20,3 +20,24 @@ pub use rpc::{
     PTYPE_ALTER_CONTEXT, PTYPE_ALTER_CONTEXT_RESP, PTYPE_AUTH3, PTYPE_BIND, PTYPE_BIND_ACK,
     PTYPE_BIND_NAK, PTYPE_FAULT, PTYPE_REQUEST, PTYPE_RESPONSE, RPC_IO_TIMEOUT,
 };
+
+/// Bytes shown as lowercase hex, for log fields: `stub = %Hex(&stub)`.
+pub struct Hex<'a>(pub &'a [u8]);
+
+impl std::fmt::Display for Hex<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Hex;
+
+    #[test]
+    fn hex_matches_hex_encode() {
+        let bytes = [0x00, 0x0f, 0xab, 0xff, 0x10];
+        assert_eq!(Hex(&bytes).to_string(), hex::encode(bytes));
+        assert_eq!(Hex(&[]).to_string(), "");
+    }
+}
