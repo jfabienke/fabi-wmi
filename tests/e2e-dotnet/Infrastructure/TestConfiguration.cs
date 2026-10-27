@@ -1,73 +1,37 @@
 using Microsoft.Extensions.Configuration;
 using System;
-using System.IO;
 
 namespace LinuxWmi.E2ETests.Infrastructure
 {
+    /// <summary>
+    /// Settings from the TestConfiguration section of appsettings.json, each
+    /// overridable by a WMI_TEST_&lt;NAME&gt; environment variable (for example
+    /// WMI_TEST_DEFAULTHOST).
+    /// </summary>
     public class TestConfiguration
     {
-        private readonly IConfiguration _configuration;
+        private readonly IConfiguration _configuration = new ConfigurationBuilder()
+            .SetBasePath(AppContext.BaseDirectory)
+            .AddJsonFile("appsettings.json", optional: true, reloadOnChange: false)
+            .Build();
 
-        public TestConfiguration()
-        {
-            var builder = new ConfigurationBuilder()
-                .SetBasePath(Directory.GetCurrentDirectory())
-                .AddJsonFile("appsettings.json", optional: true, reloadOnChange: false)
-                .AddEnvironmentVariables(prefix: "WMI_TEST_");
-
-            _configuration = builder.Build();
-        }
-
-        public string DefaultHost => GetValue("DefaultHost", "localhost");
-        public string DefaultUsername => GetValue("DefaultUsername", "wmi-test");
-        public string DefaultPassword => GetValue("DefaultPassword", "P@ssw0rd123");
-        public string DefaultDomain => GetValue("DefaultDomain", "");
+        public string Host => GetValue("DefaultHost", "");
+        public string Username => GetValue("DefaultUsername", "");
+        public string Password => GetValue("DefaultPassword", "");
+        public string Domain => GetValue("DefaultDomain", "");
         public TimeSpan DefaultTimeout => TimeSpan.Parse(GetValue("DefaultTimeout", "00:00:30"));
         public bool SkipNetworkTests => bool.Parse(GetValue("SkipNetworkTests", "false"));
         public bool SkipAuthTests => bool.Parse(GetValue("SkipAuthTests", "false"));
         public bool VerboseLogging => bool.Parse(GetValue("VerboseLogging", "true"));
 
-        public TestHost GetPrimaryHost()
-        {
-            return new TestHost
-            {
-                Host = GetValue("TestHosts:Primary:Host", DefaultHost),
-                Username = GetValue("TestHosts:Primary:Username", DefaultUsername),
-                Password = GetValue("TestHosts:Primary:Password", DefaultPassword),
-                Domain = GetValue("TestHosts:Primary:Domain", DefaultDomain)
-            };
-        }
-
-        public TestHost GetSecondaryHost()
-        {
-            return new TestHost
-            {
-                Host = GetValue("TestHosts:Secondary:Host", "192.168.1.101"),
-                Username = GetValue("TestHosts:Secondary:Username", "admin"),
-                Password = GetValue("TestHosts:Secondary:Password", "AdminPass123"),
-                Domain = GetValue("TestHosts:Secondary:Domain", "TESTDOMAIN")
-            };
-        }
-
         private string GetValue(string key, string defaultValue)
         {
-            // First check environment variables with WMI_TEST_ prefix
-            var envKey = $"WMI_TEST_{key.Replace(":", "_").ToUpper()}";
-            var envValue = Environment.GetEnvironmentVariable(envKey);
-            if (!string.IsNullOrEmpty(envValue))
-                return envValue;
-
-            // Then check configuration
-            var configValue = _configuration[$"TestConfiguration:{key}"];
-            return string.IsNullOrEmpty(configValue) ? defaultValue : configValue;
+            var value = Environment.GetEnvironmentVariable($"WMI_TEST_{key.ToUpperInvariant()}");
+            if (string.IsNullOrEmpty(value))
+            {
+                value = _configuration[$"TestConfiguration:{key}"];
+            }
+            return string.IsNullOrEmpty(value) ? defaultValue : value;
         }
-    }
-
-    public class TestHost
-    {
-        public string Host { get; set; } = "localhost";
-        public string Username { get; set; } = "";
-        public string Password { get; set; } = "";
-        public string Domain { get; set; } = "";
     }
 }

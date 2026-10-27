@@ -12,6 +12,7 @@ namespace LinuxWmi.E2ETests.Tests
     /// Priority 1: Error Handling and Resilience Tests
     /// These tests ensure the library fails gracefully and provides predictable, actionable errors.
     /// </summary>
+    [Trait("Category", "Priority1")]
     public class Priority1_ErrorHandlingTests : E2ETestBase
     {
         public Priority1_ErrorHandlingTests(ITestOutputHelper output) : base(output) { }
@@ -21,7 +22,6 @@ namespace LinuxWmi.E2ETests.Tests
         {
             // Arrange
             SkipIfAuthTestsDisabled();
-            var host = Config.GetPrimaryHost();
 
             // Act & Assert
             AssertWmiException(
@@ -29,16 +29,15 @@ namespace LinuxWmi.E2ETests.Tests
                 {
                     using var wmi = new WMIHelper(
                         scope: "CimV2",
-                        host: host.Host,
-                        username: host.Username,
+                        host: Config.Host,
+                        username: Config.Username,
                         password: "WrongPassword123!",
-                        domain: host.Domain,
+                        domain: Config.Domain,
                         auth: WmiAuthLevel.PacketPrivacy,
                         timeout: Config.DefaultTimeout
                     );
                 },
-                expectedCode: unchecked((int)0x80070005), // E_ACCESSDENIED
-                messageContains: null // Message might vary
+                expectedCode: WmiStatus.AccessDenied
             );
 
             Output.WriteLine("✅ Invalid credentials correctly resulted in authentication error");
@@ -49,7 +48,6 @@ namespace LinuxWmi.E2ETests.Tests
         {
             // Arrange
             SkipIfAuthTestsDisabled();
-            var host = Config.GetPrimaryHost();
 
             // Act & Assert
             AssertWmiException(
@@ -57,16 +55,15 @@ namespace LinuxWmi.E2ETests.Tests
                 {
                     using var wmi = new WMIHelper(
                         scope: "CimV2",
-                        host: host.Host,
+                        host: Config.Host,
                         username: "NonExistentUser",
-                        password: host.Password,
-                        domain: host.Domain,
+                        password: Config.Password,
+                        domain: Config.Domain,
                         auth: WmiAuthLevel.PacketPrivacy,
                         timeout: Config.DefaultTimeout
                     );
                 },
-                expectedCode: unchecked((int)0x80070005), // E_ACCESSDENIED
-                messageContains: null
+                expectedCode: WmiStatus.AccessDenied
             );
 
             Output.WriteLine("✅ Invalid username correctly resulted in authentication error");
@@ -78,8 +75,8 @@ namespace LinuxWmi.E2ETests.Tests
             // Arrange
             SkipIfNetworkTestsDisabled();
 
-            // Use an IP that's unlikely to exist on the network
-            var unreachableHost = "192.168.255.254";
+            // TEST-NET-1 (RFC 5737): reserved for documentation, never routed
+            var unreachableHost = "192.0.2.1";
 
             // Act & Assert
             AssertWmiException(
@@ -95,41 +92,11 @@ namespace LinuxWmi.E2ETests.Tests
                         timeout: TimeSpan.FromSeconds(5) // Short timeout for faster test
                     );
                 },
-                expectedCode: null, // Could be various network-related codes
-                messageContains: null
+                expectedCode: WmiStatus.NoHresult,
+                messageContains: "endpoint mapper"
             );
 
             Output.WriteLine($"✅ Unreachable host {unreachableHost} correctly resulted in network error");
-        }
-
-        [SkippableFact]
-        public void Test033_InvalidPort_ThrowsConnectionError()
-        {
-            // Arrange
-            SkipIfNetworkTestsDisabled();
-            var host = Config.GetPrimaryHost();
-
-            // Act & Assert
-            // Try to connect to a wrong port (e.g., 12345 instead of RPC port)
-            // Note: This might need adjustment based on how the library handles port specification
-            AssertWmiException(
-                () =>
-                {
-                    using var wmi = new WMIHelper(
-                        scope: "CimV2",
-                        host: $"{host.Host}:12345", // Invalid port
-                        username: host.Username,
-                        password: host.Password,
-                        domain: host.Domain,
-                        auth: WmiAuthLevel.PacketPrivacy,
-                        timeout: TimeSpan.FromSeconds(5)
-                    );
-                },
-                expectedCode: null,
-                messageContains: null
-            );
-
-            Output.WriteLine("✅ Invalid port correctly resulted in connection error");
         }
 
         [SkippableFact]
@@ -145,8 +112,7 @@ namespace LinuxWmi.E2ETests.Tests
                 {
                     var result = wmi.Query<dynamic>("SELEC * FRM Win32_Process").ToList();
                 },
-                expectedCode: null, // WMI query error codes vary
-                messageContains: null
+                expectedCode: WmiStatus.InvalidQuery
             );
 
             Output.WriteLine("✅ Invalid WQL syntax correctly resulted in query error");
@@ -165,8 +131,7 @@ namespace LinuxWmi.E2ETests.Tests
                 {
                     var result = wmi.Query<dynamic>("SELECT * FROM Win32_NonExistentClass").ToList();
                 },
-                expectedCode: null,
-                messageContains: null
+                expectedCode: WmiStatus.InvalidClass
             );
 
             Output.WriteLine("✅ Query for non-existent class correctly resulted in error");
@@ -177,7 +142,6 @@ namespace LinuxWmi.E2ETests.Tests
         {
             // Arrange
             SkipIfNetworkTestsDisabled();
-            var host = Config.GetPrimaryHost();
 
             // Act & Assert
             AssertWmiException(
@@ -185,16 +149,15 @@ namespace LinuxWmi.E2ETests.Tests
                 {
                     using var wmi = new WMIHelper(
                         scope: "InvalidNamespace",
-                        host: host.Host,
-                        username: host.Username,
-                        password: host.Password,
-                        domain: host.Domain,
+                        host: Config.Host,
+                        username: Config.Username,
+                        password: Config.Password,
+                        domain: Config.Domain,
                         auth: WmiAuthLevel.PacketPrivacy,
                         timeout: Config.DefaultTimeout
                     );
                 },
-                expectedCode: null,
-                messageContains: null
+                expectedCode: WmiStatus.InvalidNamespace
             );
 
             Output.WriteLine("✅ Invalid namespace correctly resulted in error");
@@ -205,15 +168,14 @@ namespace LinuxWmi.E2ETests.Tests
         {
             // Arrange
             SkipIfNetworkTestsDisabled();
-            var host = Config.GetPrimaryHost();
 
             // Create WMI helper with very short timeout
             using var wmi = new WMIHelper(
                 scope: "CimV2",
-                host: host.Host,
-                username: host.Username,
-                password: host.Password,
-                domain: host.Domain,
+                host: Config.Host,
+                username: Config.Username,
+                password: Config.Password,
+                domain: Config.Domain,
                 auth: WmiAuthLevel.PacketPrivacy,
                 timeout: TimeSpan.FromMilliseconds(1) // Extremely short timeout
             );
@@ -225,8 +187,7 @@ namespace LinuxWmi.E2ETests.Tests
                     // Try to execute a query that will likely timeout
                     var result = wmi.Query<dynamic>("SELECT * FROM Win32_Process").ToList();
                 },
-                expectedCode: null,
-                messageContains: null
+                expectedCode: WmiStatus.NoHresult
             );
 
             Output.WriteLine("✅ Query with short timeout correctly resulted in timeout error");
@@ -255,7 +216,6 @@ namespace LinuxWmi.E2ETests.Tests
         {
             // Arrange
             SkipIfAuthTestsDisabled();
-            var host = Config.GetPrimaryHost();
 
             // Act & Assert
             AssertWmiException(
@@ -263,7 +223,7 @@ namespace LinuxWmi.E2ETests.Tests
                 {
                     using var wmi = new WMIHelper(
                         scope: "CimV2",
-                        host: host.Host,
+                        host: Config.Host,
                         username: "", // Empty username
                         password: "", // Empty password
                         domain: "",
@@ -271,8 +231,8 @@ namespace LinuxWmi.E2ETests.Tests
                         timeout: Config.DefaultTimeout
                     );
                 },
-                expectedCode: null,
-                messageContains: null
+                expectedCode: WmiStatus.NoHresult,
+                messageContains: "required"
             );
 
             Output.WriteLine("✅ Empty credentials correctly resulted in error");

@@ -12,6 +12,7 @@ namespace LinuxWmi.E2ETests.Tests
     /// Priority 0: Critical Path - Basic Query Tests
     /// These tests verify that basic WQL queries work and return expected data.
     /// </summary>
+    [Trait("Category", "Priority0")]
     public class Priority0_BasicQueryTests : E2ETestBase
     {
         public Priority0_BasicQueryTests(ITestOutputHelper output) : base(output) { }
@@ -165,40 +166,36 @@ namespace LinuxWmi.E2ETests.Tests
             process.Should().NotBeNull("System process (PID 4) should exist");
             process!.ProcessId.Should().Be(4);
             process.HandleCount.Should().BeGreaterThan(0, "System process should have handles");
-
-            // Note: Name should be null/empty since we didn't request it
-            // (depending on the WMI implementation, it might still be populated)
+            process.Name.Should().BeNull("WMI returns only the selected properties");
 
             Output.WriteLine($"✅ Specific field query succeeded:");
             Output.WriteLine($"   ProcessId: {process.ProcessId}");
             Output.WriteLine($"   HandleCount: {process.HandleCount}");
         }
 
+        /// <summary>
+        /// WQL has no ORDER BY: Windows rejects the query (ORMi throws there
+        /// too), so callers sort on the client.
+        /// </summary>
         [SkippableFact]
-        public void Test015_QueryWithOrderBy_ReturnsOrderedResults()
+        public void Test015_QueryWithOrderBy_IsRejected()
         {
             // Arrange
             SkipIfNetworkTestsDisabled();
             using var wmi = CreateWmiHelper();
 
-            // Act
+            // Act & Assert
             var query = "SELECT Name, WorkingSetSize FROM Win32_Process ORDER BY WorkingSetSize DESC";
-            var processes = wmi.Query<Win32_Process>(query).Take(5).ToList();
+            AssertWmiException(() => wmi.Query<Win32_Process>(query).ToList(), expectedCode: WmiStatus.InvalidQuery);
 
-            // Assert
-            processes.Should().NotBeNull();
-            processes.Should().NotBeEmpty();
+            var top = wmi.Query<Win32_Process>("SELECT Name, WorkingSetSize FROM Win32_Process")
+                .OrderByDescending(p => p.WorkingSetSize ?? 0)
+                .Take(5)
+                .ToList();
+            top.Should().NotBeEmpty();
 
-            // Verify ordering
-            for (int i = 1; i < processes.Count; i++)
-            {
-                var prev = processes[i - 1].WorkingSetSize ?? 0;
-                var curr = processes[i].WorkingSetSize ?? 0;
-                prev.Should().BeGreaterThanOrEqualTo(curr, "results should be ordered by WorkingSetSize DESC");
-            }
-
-            Output.WriteLine($"✅ Top 5 processes by memory usage:");
-            foreach (var process in processes)
+            Output.WriteLine($"✅ ORDER BY rejected; top 5 processes by memory, sorted on the client:");
+            foreach (var process in top)
             {
                 var memoryMB = (process.WorkingSetSize ?? 0) / (1024.0 * 1024.0);
                 Output.WriteLine($"   {process.Name}: {memoryMB:N2} MB");
