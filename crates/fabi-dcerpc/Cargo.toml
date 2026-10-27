@@ -15,7 +15,7 @@ libc = "0.2"
 md-5 = "0.11"
 md4 = "0.11"
 thiserror = "2"
-tracing = "0.1"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 zeroize = "1.7"
 
 [dev-dependencies]
