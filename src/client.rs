@@ -23,7 +23,7 @@ use crate::wmi_proto::{
 use fabi_dcerpc::AUTH_LEVEL_PKT_PRIVACY;
 use fabi_dcerpc::{
     fault_to_hresult, AuthError, AuthProvider, BoundContext, Credentials, HandshakeStyle,
-    RpcConnection, RpcError, SspiNtlmClient, AUTH_LEVEL_PKT_INTEGRITY, RPC_IO_TIMEOUT,
+    NtlmClient, RpcConnection, RpcError, AUTH_LEVEL_PKT_INTEGRITY, RPC_IO_TIMEOUT,
 };
 use fabi_dcom::{self as dcom, DcomError};
 use fabi_wmio::{decode_object, encode_method_in_params, WmioError};
@@ -104,10 +104,12 @@ fn kerberos_client(host: &str, config: &KerberosConfig) -> Result<KerberosClient
 }
 
 impl Auth {
-    /// A fresh security context for `host`.
+    /// A fresh security context for `host`, which only Kerberos needs (for
+    /// the service principal name).
+    #[cfg_attr(not(feature = "kerberos"), allow(unused_variables))]
     fn provider(&self, host: &str) -> Result<Box<dyn AuthProvider>, Error> {
         Ok(match self {
-            Auth::Ntlm(creds) => Box::new(SspiNtlmClient::new(creds, &format!("host/{host}"))?),
+            Auth::Ntlm(creds) => Box::new(NtlmClient::new(creds)?),
             #[cfg(feature = "kerberos")]
             Auth::Kerberos(config) => Box::new(kerberos_client(host, config)?),
         })
