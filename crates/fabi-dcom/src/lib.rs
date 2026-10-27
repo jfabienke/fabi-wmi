@@ -59,7 +59,7 @@ pub fn hresult_to_err(hr: u32) -> DcomError {
 /// alter_context with status 5 (access denied).
 pub fn rpc_to_err(err: RpcError) -> DcomError {
     match err {
-        RpcError::Fault(status) => hresult_to_err(fault_to_hresult(status)),
+        RpcError::Fault { status, .. } => hresult_to_err(fault_to_hresult(status)),
         other => DcomError::Rpc(other),
     }
 }
@@ -876,19 +876,31 @@ mod tests {
     #[test]
     fn rpc_faults_map_to_dcom_errors() {
         assert!(matches!(
-            rpc_to_err(RpcError::Fault(5)),
+            rpc_to_err(RpcError::Fault {
+                status: 5,
+                did_not_execute: false
+            }),
             DcomError::AccessDenied
         ));
         assert!(matches!(
-            rpc_to_err(RpcError::Fault(0x1c01_0002)),
+            rpc_to_err(RpcError::Fault {
+                status: 0x1c01_0002,
+                did_not_execute: false
+            }),
             DcomError::AccessDenied
         ));
         assert!(matches!(
-            rpc_to_err(RpcError::Fault(0x6ba)),
+            rpc_to_err(RpcError::Fault {
+                status: 0x6ba,
+                did_not_execute: false
+            }),
             DcomError::ServerUnavailable
         ));
         assert!(matches!(
-            rpc_to_err(RpcError::Fault(0x8004_1003)),
+            rpc_to_err(RpcError::Fault {
+                status: 0x8004_1003,
+                did_not_execute: false
+            }),
             DcomError::Hresult { hr: 0x8004_1003 }
         ));
         assert!(matches!(
