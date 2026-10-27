@@ -284,7 +284,7 @@ impl WmiClient {
         // The advertised bindings name the server's own view of itself (which
         // may be unreachable behind NAT); keep dialing the address we were given.
         let mut conn = WmiConnection::open(host, port, auth, timeout)?;
-        let causality_id = *uuid::Uuid::new_v4().as_bytes();
+        let causality_id = dcom::new_causality_id()?;
         let login_ref = InterfaceRef {
             ipid: activation.ipid,
             public_refs: activation.public_refs,
