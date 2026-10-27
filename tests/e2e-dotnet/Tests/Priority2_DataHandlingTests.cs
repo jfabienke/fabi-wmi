@@ -12,6 +12,7 @@ namespace LinuxWmi.E2ETests.Tests
     /// Priority 2: Data Handling and Edge Cases
     /// These tests cover nuances in data handling and less common scenarios.
     /// </summary>
+    [Trait("Category", "Priority2")]
     public class Priority2_DataHandlingTests : E2ETestBase
     {
         public Priority2_DataHandlingTests(ITestOutputHelper output) : base(output) { }
@@ -33,7 +34,7 @@ namespace LinuxWmi.E2ETests.Tests
             public string? Name { get; set; }
             public string? MACAddress { get; set; }
             public bool PhysicalAdapter { get; set; }
-            public uint? Speed { get; set; }
+            public ulong? Speed { get; set; } // uint64 in WMI: 10 Gbit/s exceeds a uint
             public uint Index { get; set; }
         }
 
@@ -108,8 +109,7 @@ namespace LinuxWmi.E2ETests.Tests
             SkipIfNetworkTestsDisabled();
             using var wmi = CreateWmiHelper();
 
-            // Act - Query all files in Windows directory (potentially large result set)
-            // Note: We'll use Win32_Process instead as it's safer and still can be large
+            // Act - Every process: a result set that spans several response fragments
             var query = "SELECT Name, ProcessId, HandleCount FROM Win32_Process";
             var processes = wmi.Query<dynamic>(query).ToList();
 
@@ -309,16 +309,12 @@ namespace LinuxWmi.E2ETests.Tests
             // Assert
             ((object?)system).Should().NotBeNull("Win32_ComputerSystem should return an instance");
 
-            // Note: Array handling depends on JSON serialization
-            // The Roles property might be null or an array
-            if (system != null && system!.Roles != null)
-            {
-                Output.WriteLine($"✅ Array property 'Roles' handled correctly");
-            }
-            else
-            {
-                Output.WriteLine($"✅ Null array property handled correctly");
-            }
+            // Roles is a string array, which a dynamic row holds as a list
+            IEnumerable<object?> roles = system!.Roles;
+            roles.Should().NotBeEmpty("every Windows host has roles such as LM_Workstation");
+            roles.Should().AllBeOfType<string>();
+
+            Output.WriteLine($"✅ Array property 'Roles': {string.Join(", ", roles)}");
         }
     }
 }

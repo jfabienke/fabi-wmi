@@ -1,5 +1,7 @@
 using System;
-using System.Linq;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading;
 using Xunit;
 using Xunit.Abstractions;
 using FluentAssertions;
@@ -8,19 +10,17 @@ using LinuxWmi.E2ETests.Infrastructure;
 namespace LinuxWmi.E2ETests.Tests
 {
     /// <summary>
-    /// Priority 0: Critical Path - Static Method Execution Tests
-    /// These tests verify that static WMI methods can be called with parameters and return expected results.
+    /// Priority 0: Critical Path - Method Execution Tests
+    /// Static methods are called on a class ("Win32_Process"), instance methods
+    /// on an object path ("Win32_Process.Handle=\"736\""). WMIHelper's one
+    /// entry point, ExecuteStaticMethod, passes either to the library.
     /// </summary>
-    public class Priority0_StaticMethodTests : E2ETestBase
+    [Trait("Category", "Priority0")]
+    public class Priority0_MethodTests : E2ETestBase
     {
-        public Priority0_StaticMethodTests(ITestOutputHelper output) : base(output) { }
+        public Priority0_MethodTests(ITestOutputHelper output) : base(output) { }
 
         // Method input/output classes
-        public class GetOwnerInput
-        {
-            public uint ProcessId { get; set; }
-        }
-
         public class GetOwnerOutput
         {
             public uint ReturnValue { get; set; }
@@ -37,12 +37,12 @@ namespace LinuxWmi.E2ETests.Tests
         public class CreateOutput
         {
             public uint ReturnValue { get; set; }
-            public uint ProcessId { get; set; }
+            /// <summary>Unset (null) when Create fails.</summary>
+            public uint? ProcessId { get; set; }
         }
 
         public class TerminateInput
         {
-            public uint ProcessId { get; set; }
             public uint Reason { get; set; }
         }
 
@@ -51,33 +51,40 @@ namespace LinuxWmi.E2ETests.Tests
             public uint ReturnValue { get; set; }
         }
 
+        public class GetSDOutput
+        {
+            public uint ReturnValue { get; set; }
+            public List<byte>? SD { get; set; }
+        }
+
+        public class ProcessRow
+        {
+            public uint ProcessId { get; set; }
+        }
+
+        private static string ProcessPath(uint processId) => $"Win32_Process.Handle=\"{processId}\"";
+
         [SkippableFact]
-        public void Test020_GetOwner_ForSystemProcess_ReturnsSystemUser()
+        public void Test020_GetOwner_OfServicesProcess_ReturnsSystem()
         {
             // Arrange
             SkipIfNetworkTestsDisabled();
             using var wmi = CreateWmiHelper();
+            // services.exe always runs as SYSTEM. (The System process, PID 4,
+            // has no owner to report: GetOwner returns 2 there.)
+            var services = wmi.QueryFirstOrDefault<ProcessRow>(
+                "SELECT ProcessId FROM Win32_Process WHERE Name = 'services.exe'");
+            services.Should().NotBeNull("services.exe always runs");
 
-            // Act - Get owner of System process (PID 4)
-            var input = new GetOwnerInput { ProcessId = 4 };
-            var result = wmi.ExecuteStaticMethod<GetOwnerOutput>(
-                "Win32_Process",
-                "GetOwner",
-                input
-            );
+            // Act - GetOwner is an instance method
+            var result = wmi.ExecuteStaticMethod<GetOwnerOutput>(ProcessPath(services!.ProcessId), "GetOwner");
 
             // Assert
-            result.Should().NotBeNull();
-            result.ReturnValue.Should().Be(0, "GetOwner should succeed for System process");
+            result.ReturnValue.Should().Be(0, "GetOwner should succeed for services.exe");
+            result.User.Should().Be("SYSTEM");
+            result.Domain.Should().Be("NT AUTHORITY");
 
-            // System process typically runs as "SYSTEM" in "NT AUTHORITY" domain
-            result.User.Should().NotBeNullOrEmpty();
-            result.Domain.Should().NotBeNullOrEmpty();
-
-            Output.WriteLine($"✅ GetOwner for PID 4 succeeded:");
-            Output.WriteLine($"   Domain: {result.Domain}");
-            Output.WriteLine($"   User: {result.User}");
-            Output.WriteLine($"   ReturnValue: {result.ReturnValue}");
+            Output.WriteLine($"✅ GetOwner for services.exe (PID {services.ProcessId}): {result.Domain}\\{result.User}");
         }
 
         [SkippableFact]
@@ -108,12 +115,10 @@ namespace LinuxWmi.E2ETests.Tests
             Output.WriteLine($"✅ Process creation succeeded:");
             Output.WriteLine($"   ProcessId: {result.ProcessId}");
             Output.WriteLine($"   ReturnValue: {result.ReturnValue}");
-
-            // Note: The process will exit immediately, so we don't need to clean it up
         }
 
         [SkippableFact]
-        public void Test022_Create_InvalidPath_ReturnsError()
+        public void Test022_Create_InvalidPath_ReturnsPathNotFound()
         {
             // Arrange
             SkipIfNetworkTestsDisabled();
@@ -134,63 +139,46 @@ namespace LinuxWmi.E2ETests.Tests
 
             // Assert
             result.Should().NotBeNull();
-            result.ReturnValue.Should().NotBe(0, "Create should fail for non-existent executable");
-            result.ProcessId.Should().Be(0, "no process should be created");
+            result.ReturnValue.Should().Be(9, "9 is Create's 'path not found'");
+            result.ProcessId.Should().BeNull("Windows leaves ProcessId unset when Create fails");
 
             Output.WriteLine($"✅ Invalid process creation failed as expected:");
-            Output.WriteLine($"   ReturnValue: {result.ReturnValue} (non-zero indicates failure)");
+            Output.WriteLine($"   ReturnValue: {result.ReturnValue} (path not found)");
         }
 
         [SkippableFact]
-        public void Test023_Terminate_NonExistentProcess_ReturnsError()
+        public void Test023_Terminate_NonExistentProcess_ThrowsNotFound()
         {
             // Arrange
             SkipIfNetworkTestsDisabled();
             using var wmi = CreateWmiHelper();
 
-            // Act - Try to terminate a non-existent process
-            var input = new TerminateInput
-            {
-                ProcessId = 99999, // Very unlikely to exist
-                Reason = 0
-            };
-
-            var result = wmi.ExecuteStaticMethod<TerminateOutput>(
-                "Win32_Process",
-                "Terminate",
-                input
+            // Act & Assert - Windows process IDs are multiples of 4, so 99999
+            // never exists, and WMI cannot find the object to call Terminate on.
+            AssertWmiException(
+                () => wmi.ExecuteStaticMethod<TerminateOutput>(ProcessPath(99999), "Terminate", new TerminateInput()),
+                expectedCode: WmiStatus.NotFound
             );
+
+            Output.WriteLine($"✅ Terminate on a non-existent process failed with WBEM_E_NOT_FOUND");
+        }
+
+        [SkippableFact]
+        public void Test024_MethodWithoutParameters_Succeeds()
+        {
+            // Arrange
+            SkipIfNetworkTestsDisabled();
+            using var wmi = CreateWmiHelper();
+
+            // Act - __SystemSecurity.GetSD takes no input parameters and only
+            // reads the namespace's security descriptor
+            var result = wmi.ExecuteStaticMethod<GetSDOutput>("__SystemSecurity", "GetSD");
 
             // Assert
-            result.Should().NotBeNull();
-            result.ReturnValue.Should().NotBe(0, "Terminate should fail for non-existent process");
+            result.ReturnValue.Should().Be(0, "GetSD should succeed for an administrator");
+            result.SD.Should().NotBeNullOrEmpty("GetSD returns the security descriptor as a byte array");
 
-            Output.WriteLine($"✅ Terminate non-existent process failed as expected:");
-            Output.WriteLine($"   ReturnValue: {result.ReturnValue} (non-zero indicates failure)");
-        }
-
-        [SkippableFact]
-        public void Test024_StaticMethod_WithoutParameters_Succeeds()
-        {
-            // Arrange
-            SkipIfNetworkTestsDisabled();
-            using var wmi = CreateWmiHelper();
-
-            // Act - Call a method without parameters
-            // Win32_OperatingSystem.Reboot() - but we'll use a safer method
-            // Note: We won't actually call Reboot as it would restart the system!
-            // Instead, we'll test with Win32_Process.GetAvailableVirtualSize which takes no params
-
-            var result = wmi.ExecuteStaticMethod<dynamic>(
-                "Win32_Process",
-                "GetAvailableVirtualSize",
-                null
-            );
-
-            // Assert (extension methods don't bind on a dynamic receiver)
-            ((object?)result).Should().NotBeNull();
-
-            Output.WriteLine($"✅ Static method without parameters succeeded");
+            Output.WriteLine($"✅ GetSD returned a {result.SD!.Count}-byte security descriptor");
         }
 
         [SkippableFact]
@@ -214,32 +202,28 @@ namespace LinuxWmi.E2ETests.Tests
             );
 
             // Assert creation succeeded
-            createResult.Should().NotBeNull();
             createResult.ReturnValue.Should().Be(0, "Create should succeed");
-            var processId = createResult.ProcessId;
-            processId.Should().BeGreaterThan(0);
+            createResult.ProcessId.Should().BeGreaterThan(0);
+            var processId = createResult.ProcessId!.Value;
 
             Output.WriteLine($"✅ Created process with PID: {processId}");
 
-            // Give the process a moment to start
-            System.Threading.Thread.Sleep(500);
-
-            // Now terminate it
-            var terminateInput = new TerminateInput
-            {
-                ProcessId = processId,
-                Reason = 0
-            };
-
+            // Now terminate it - Terminate is an instance method
             var terminateResult = wmi.ExecuteStaticMethod<TerminateOutput>(
-                "Win32_Process",
+                ProcessPath(processId),
                 "Terminate",
-                terminateInput
+                new TerminateInput()
             );
 
-            // Assert termination succeeded
-            terminateResult.Should().NotBeNull();
+            // Assert termination succeeded and the process is gone
             terminateResult.ReturnValue.Should().Be(0, "Terminate should succeed");
+            var query = $"SELECT ProcessId FROM Win32_Process WHERE ProcessId = {processId}";
+            var stopwatch = Stopwatch.StartNew();
+            while (wmi.QueryFirstOrDefault<ProcessRow>(query) != null && stopwatch.Elapsed < TimeSpan.FromSeconds(10))
+            {
+                Thread.Sleep(250);
+            }
+            wmi.QueryFirstOrDefault<ProcessRow>(query).Should().BeNull("the terminated process should be gone");
 
             Output.WriteLine($"✅ Successfully terminated process {processId}");
         }
