@@ -85,7 +85,9 @@ jobs:
         key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
 
     - name: Build library
-      run: cargo build --lib --release
+      # test-support adds the stub backend the .NET tests use without a
+      # Windows host (only when LINUX_WMI_USE_STUB=1).
+      run: cargo build --lib --release --features test-support
 
     - name: Upload library artifact
       uses: actions/upload-artifact@v7
@@ -133,12 +135,11 @@ jobs:
     - name: Copy library to test output
       run: cp target/release/libfabi_wmi.so tests/e2e-dotnet/bin/Release/net10.0/
 
-    - name: Run tests (mock mode)
+    - name: Run tests (stub backend)
       if: github.event_name != 'workflow_dispatch' || github.event.inputs.skip_network_tests == 'true'
       working-directory: tests/e2e-dotnet
       env:
-        WMI_TEST_SKIPNETWORKTESTS: true
-        WMI_TEST_SKIPAUTHTESTS: true
+        LINUX_WMI_USE_STUB: '1'
       run: |
         dotnet test \
           --configuration Release \
@@ -163,8 +164,7 @@ jobs:
           --no-build \
           --logger "trx;LogFileName=test-results.trx" \
           --logger "console;verbosity=detailed" \
-          --results-directory ./TestResults \
-          --filter "Category!=LongRunning"
+          --results-directory ./TestResults
 
     - name: Upload test results
       uses: actions/upload-artifact@v7

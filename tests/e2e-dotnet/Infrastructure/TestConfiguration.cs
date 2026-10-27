@@ -24,6 +24,12 @@ namespace LinuxWmi.E2ETests.Infrastructure
         public bool SkipAuthTests => bool.Parse(GetValue("SkipAuthTests", "false"));
         public bool VerboseLogging => bool.Parse(GetValue("VerboseLogging", "true"));
 
+        /// <summary>
+        /// Whether the library answers from its canned stub backend instead of
+        /// a Windows host (LINUX_WMI_USE_STUB=1, a build with test-support).
+        /// </summary>
+        public bool StubBackend => Environment.GetEnvironmentVariable("LINUX_WMI_USE_STUB") == "1";
+
         private string GetValue(string key, string defaultValue)
         {
             var value = Environment.GetEnvironmentVariable($"WMI_TEST_{key.ToUpperInvariant()}");

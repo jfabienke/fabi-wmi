@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Run .NET E2E tests for linux-wmi against a real Windows host.
+# Run the .NET E2E tests for linux-wmi against a Windows host, or with --stub
+# against the library's canned stub backend (no host needed).
 # Usage: ./run_dotnet_tests.sh [OPTIONS]
 # Options:
 #   --host HOST         Windows host to test against (default: from config)
 #   --user USER         Username for authentication
 #   --pass PASS         Password for authentication
 #   --domain DOMAIN     Domain for authentication
+#   --stub              Build with test-support and run against the stub backend
 #   --filter FILTER     xUnit test filter expression
 #   --verbose           Enable verbose output
 #   --skip-build        Skip building the Rust library
@@ -20,12 +22,13 @@ LIB_DIR="${REPO_ROOT}/target/debug"
 
 # Parse command line arguments
 HOST=""
-USER=""
+USERNAME_ARG=""
 PASS=""
 DOMAIN=""
 FILTER=""
 VERBOSE=false
 SKIP_BUILD=false
+STUB=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -34,7 +37,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --user)
-            USER="$2"
+            USERNAME_ARG="$2"
             shift 2
             ;;
         --pass)
@@ -51,6 +54,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --verbose)
             VERBOSE=true
+            shift
+            ;;
+        --stub)
+            STUB=true
             shift
             ;;
         --skip-build)
@@ -72,7 +79,11 @@ done
 if [[ "${SKIP_BUILD}" == "false" ]]; then
     echo "🔨 Building fabi-wmi library..."
     cd "${REPO_ROOT}"
-    cargo build --lib
+    if [[ "${STUB}" == "true" ]]; then
+        cargo build --lib --features test-support
+    else
+        cargo build --lib
+    fi
 
     # Check if the library was built
     if [[ ! -f "${LIB_DIR}/libfabi_wmi.dylib" ]] && [[ ! -f "${LIB_DIR}/libfabi_wmi.so" ]]; then
@@ -92,8 +103,11 @@ fi
 if [[ -n "${HOST}" ]]; then
     export WMI_TEST_DEFAULTHOST="${HOST}"
 fi
-if [[ -n "${USER}" ]]; then
-    export WMI_TEST_DEFAULTUSERNAME="${USER}"
+if [[ -n "${USERNAME_ARG}" ]]; then
+    export WMI_TEST_DEFAULTUSERNAME="${USERNAME_ARG}"
+fi
+if [[ "${STUB}" == "true" ]]; then
+    export LINUX_WMI_USE_STUB=1
 fi
 if [[ -n "${PASS}" ]]; then
     export WMI_TEST_DEFAULTPASSWORD="${PASS}"
@@ -120,7 +134,8 @@ cat <<INFO
    Test directory: ${TEST_DIR}
    Library: ${LIB_FILE:-"Using existing build"}
    Host: ${HOST:-"<from config>"}
-   User: ${USER:-"<from config>"}
+   User: ${USERNAME_ARG:-"<from config>"}
+   Stub backend: ${STUB}
    Domain: ${DOMAIN:-"<from config>"}
    Filter: ${FILTER:-"<none>"}
    Verbosity: ${VERBOSITY}

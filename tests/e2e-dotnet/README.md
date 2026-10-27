@@ -1,204 +1,72 @@
 # End-to-End Tests for linux-wmi
 
-This directory contains comprehensive end-to-end tests that validate the entire linux-wmi stack from C# through Rust to Windows WMI.
+xUnit tests that drive the .NET shim (`shim/wmi_shim.cs`) through the C ABI of
+`libfabi_wmi`. They run in one of two modes:
 
-## Prerequisites
+- **Stub backend**: the library answers from canned data (`src/test_support`),
+  so the P/Invoke marshalling, JSON binding and error codes are tested without
+  a Windows host. This is what CI runs.
+- **Live**: against a Windows host over DCOM.
 
-- .NET 10 SDK or later
-- A Windows host with:
-  - WMI service running
-  - RPC Endpoint Mapper accessible (port 135)
-  - Dynamic RPC ports open (49152-65535)
-  - A test user with appropriate permissions
+Each test skips itself unless its mode is configured, so a plain `dotnet test`
+with nothing set skips everything.
 
-## Test Organization
+## Running
 
-Tests are organized by priority:
+```bash
+# Stub backend: build the library with test-support and set LINUX_WMI_USE_STUB
+../../examples/run_dotnet_tests.sh --stub
 
-### Priority 0: Critical Path Tests
-- **ConnectionTests**: Verify successful authentication and session creation
-- **BasicQueryTests**: Test WQL queries returning multiple objects
-- **StaticMethodTests**: Test static method execution with parameters
+# Live: any Windows host that allows remote WMI
+../../examples/run_dotnet_tests.sh --host <host> --user <user> --pass <password> [--domain <domain>]
+```
 
-### Priority 1: Error Handling Tests
-- **ErrorHandlingTests**: Ensure graceful failure with actionable errors
-  - Invalid credentials
-  - Unreachable hosts
-  - Invalid queries
-  - Timeouts
-
-### Priority 2: Data Handling Tests
-- **DataHandlingTests**: Cover edge cases and data type handling
-  - Empty result sets
-  - Various CIM data types
-  - Large result sets
-  - Unicode strings
-  - Nullable properties
+By hand: build the library (`cargo build --lib`, plus `--features test-support`
+for the stub), `dotnet build`, copy `target/debug/libfabi_wmi.{so,dylib}` into
+`bin/Debug/net10.0/`, then `dotnet test --no-build`. With only a newer .NET
+runtime installed, set `DOTNET_ROLL_FORWARD=Major`.
 
 ## Configuration
 
-Tests can be configured via:
+Settings come from the `TestConfiguration` section of `appsettings.json`; a
+`WMI_TEST_<NAME>` environment variable overrides each one:
 
-1. **appsettings.json**: Default configuration file
-2. **Environment variables**: Override settings with `WMI_TEST_` prefix
-3. **Command line**: Pass parameters to the test runner
+| Variable | Meaning |
+|---|---|
+| `WMI_TEST_DEFAULTHOST` | Windows host for live tests; live tests skip when empty |
+| `WMI_TEST_DEFAULTUSERNAME`, `WMI_TEST_DEFAULTPASSWORD` | Account (an administrator, for the method tests) |
+| `WMI_TEST_DEFAULTDOMAIN` | Domain, empty for a local account |
+| `WMI_TEST_DEFAULTTIMEOUT` | Network timeout, default `00:00:30` |
+| `WMI_TEST_SKIPNETWORKTESTS`, `WMI_TEST_SKIPAUTHTESTS` | Skip live tests, or only the credential tests |
+| `LINUX_WMI_USE_STUB=1` | Stub mode: stub tests run, live tests skip |
 
-### Environment Variables
-```bash
-export WMI_TEST_DEFAULTHOST=192.168.1.100
-export WMI_TEST_DEFAULTUSERNAME=wmi-test
-export WMI_TEST_DEFAULTPASSWORD=MyPassword123
-export WMI_TEST_DEFAULTDOMAIN=MYDOMAIN
-export WMI_TEST_SKIPNETWORKTESTS=false
-export WMI_TEST_SKIPAUTHTESTS=false
-```
+## Tests
 
-## Running Tests
+Filter by class trait, e.g. `dotnet test --filter Category=Priority0`:
 
-### Using the Shell Script (Recommended)
-```bash
-# Run all tests with default configuration
-../../examples/run_dotnet_tests.sh
+| Category | Class | Covers |
+|---|---|---|
+| `Priority0` | `Priority0_ConnectionTests` | Connecting, repeated connections, auth levels (accepted, only logged), disposal |
+| `Priority0` | `Priority0_BasicQueryTests` | WQL queries, typed rows, WHERE, selected properties; ORDER BY is rejected (WQL has none) |
+| `Priority0` | `Priority0_MethodTests` | Static methods on a class, instance methods on an object path, output parameters |
+| `Priority1` | `Priority1_ErrorHandlingTests` | Bad credentials, unreachable host, invalid WQL, class and namespace, timeouts |
+| `Priority2` | `Priority2_DataHandlingTests` | Empty results, CIM types, large result sets, Unicode, nulls, uint64, arrays |
+| `Stub` | `StubBackendTests` | The shim and C ABI against the stub backend |
 
-# Run tests against specific host
-../../examples/run_dotnet_tests.sh --host 192.168.1.100 --user admin --pass AdminPass
+Live tests assume a Windows Server host and an administrator account: the
+method tests start and terminate processes (`cmd.exe`, `notepad.exe`) and read
+the namespace's security descriptor.
 
-# Run specific test category
-../../examples/run_dotnet_tests.sh --filter "Category=Priority0"
-
-# Run with verbose output
-../../examples/run_dotnet_tests.sh --verbose
-```
-
-### Using dotnet CLI Directly
-```bash
-# Restore packages
-dotnet restore
-
-# Build the test project
-dotnet build
-
-# Run all tests
-dotnet test
-
-# Run specific tests
-dotnet test --filter "FullyQualifiedName~Priority0"
-
-# Run with detailed output
-dotnet test --logger "console;verbosity=detailed"
-```
-
-## Test Categories
-
-Tests can be filtered by category:
-- `Priority0`: Critical path validation
-- `Priority1`: Error handling
-- `Priority2`: Data handling edge cases
-
-Example:
-```bash
-dotnet test --filter "Category=Priority0"
-```
-
-## Continuous Integration
-
-These tests can be integrated into CI/CD pipelines. Example GitHub Actions workflow:
-
-```yaml
-name: E2E Tests
-on: [push, pull_request]
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    services:
-      windows:
-        image: mcr.microsoft.com/windows/servercore:ltsc2022
-        options: --platform windows
-
-    steps:
-    - uses: actions/checkout@v7
-    - uses: actions/setup-dotnet@v6
-      with:
-        dotnet-version: '10.0.x'
-
-    - name: Build Rust library
-      run: cargo build --lib
-
-    - name: Run E2E tests
-      run: ./examples/run_dotnet_tests.sh --host windows --user testuser --pass testpass
-```
+`WmiException.Code` is the server's HRESULT when it sent one and -1 otherwise;
+`Infrastructure/WmiStatus.cs` names the codes the tests expect.
 
 ## Troubleshooting
 
-### Common Issues
-
-1. **Library not found**: Ensure the Rust library is built and in the correct location
-   ```bash
-   cargo build --lib
-   ```
-
-2. **Authentication failures**: Verify the test user has:
-   - DCOM permissions (Launch and Activation)
-   - WMI namespace permissions (root\CIMV2)
-   - Membership in "Distributed COM Users" group
-
-3. **Network errors**: Check that:
-   - Windows Firewall allows RPC (port 135 and dynamic ports)
-   - The host is reachable from the test machine
-   - WMI service is running on the Windows host
-
-4. **Test timeouts**: Increase timeout in configuration:
-   ```json
-   {
-     "TestConfiguration": {
-       "DefaultTimeout": "00:01:00"
-     }
-   }
-   ```
-
-## Adding New Tests
-
-To add new tests:
-
-1. Create a new test class in the `Tests` directory
-2. Inherit from `E2ETestBase`
-3. Use the `CreateWmiHelper()` method to get a configured WMI client
-4. Follow the naming convention: `TestXXX_Description_ExpectedResult`
-
-Example:
-```csharp
-public class MyNewTests : E2ETestBase
-{
-    public MyNewTests(ITestOutputHelper output) : base(output) { }
-
-    [Fact]
-    public void Test100_MyNewFeature_WorksCorrectly()
-    {
-        // Arrange
-        SkipIfNetworkTestsDisabled();
-        using var wmi = CreateWmiHelper();
-
-        // Act
-        var result = wmi.Query<MyClass>("SELECT * FROM Win32_MyClass");
-
-        // Assert
-        result.Should().NotBeEmpty();
-    }
-}
-```
-
-## Test Data Classes
-
-Define C# classes that match the WMI class properties you're querying:
-
-```csharp
-public class Win32_MyClass
-{
-    public string? Name { get; set; }
-    public uint Id { get; set; }
-    public DateTime? CreatedDate { get; set; }
-}
-```
-
-The JSON deserializer will automatically map WMI properties to these C# properties.
+- **Library not found**: copy `libfabi_wmi.so` (Linux) or `libfabi_wmi.dylib`
+  (macOS) into the test output directory.
+- **"Stub tests need LINUX_WMI_USE_STUB=1"**: the variable must be set before
+  `dotnet test` starts; setting it from inside the tests has no effect.
+- **Access denied**: the account needs DCOM remote launch and activation
+  rights and access to `root\cimv2` (see `docs/INTEGRATION_TESTING.md`).
+- **Network errors**: the host must accept TCP 135 and the WMI service's
+  dynamic port.
