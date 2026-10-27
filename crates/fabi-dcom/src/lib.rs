@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use thiserror::Error;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, debug_span, error, info, warn};
 
 use fabi_dcerpc::{
     fault_to_hresult, AuthError, AuthProvider, Credentials, HandshakeStyle, NtlmClient,
@@ -396,7 +396,6 @@ pub fn activate_with(
 /// [`activate_with`] at `auth_level`, e.g. `AUTH_LEVEL_PKT_INTEGRITY` for a
 /// security provider that can sign DCE/RPC PDUs but not seal them. Windows'
 /// DCOM hardening (KB5004442) requires at least packet integrity.
-#[instrument(level = "debug", skip_all, fields(host = %host, auth_level = auth_level))]
 pub fn activate_with_level(
     host: &str,
     clsid: &[u8; 16],
@@ -404,6 +403,7 @@ pub fn activate_with_level(
     auth: impl AuthProvider + 'static,
     auth_level: u8,
 ) -> Result<(u16, ActivationResponse), DcomError> {
+    let _span = debug_span!("activate_with_level", host = %host, auth_level).entered();
     let mut conn = RpcConnection::connect(host, 135, CONNECT_TIMEOUT, RPC_IO_TIMEOUT).map_err(
         |e| match e {
             RpcError::Io(io) => DcomError::Connect(io),
@@ -610,12 +610,12 @@ pub fn resolve_oxid(
 
 /// Resolve `oxid` via `IObjectExporter::ResolveOxid` (opnum 0) on port 135
 /// using `auth` at packet privacy.
-#[instrument(level = "debug", skip_all, fields(host, oxid = %hex::encode(oxid)))]
 pub fn resolve_oxid_with(
     host: &str,
     oxid: &[u8; 8],
     auth: impl AuthProvider + 'static,
 ) -> Result<OxidResolution, DcomError> {
+    let _span = debug_span!("resolve_oxid_with", host = %host, oxid = %hex::encode(oxid)).entered();
     let mut conn = RpcConnection::connect(host, 135, CONNECT_TIMEOUT, RPC_IO_TIMEOUT).map_err(
         |e| match e {
             RpcError::Io(io) => DcomError::Connect(io),
