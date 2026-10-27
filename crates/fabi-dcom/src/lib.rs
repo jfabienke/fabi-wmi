@@ -483,7 +483,7 @@ pub struct ActivationResponse {
     /// IPID of the OXID's IRemUnknown, used to release references.
     pub ipid_rem_unknown: [u8; 16],
     /// ncacn_ip_tcp bindings the server advertised, as (host, port). Under NAT
-    /// these name the server's own view (e.g. DC01, 10.0.2.15); the caller keeps
+    /// these name the server's own view (e.g. SRV1, 10.0.2.15); the caller keeps
     /// connecting to the address it dialed and only takes the port from here.
     pub tcp_bindings: Vec<(String, u16)>,
 }
@@ -778,7 +778,7 @@ mod tests {
         assert_eq!(
             r.tcp_bindings,
             vec![
-                ("DC01".to_string(), 24158),
+                ("SRV1".to_string(), 24158),
                 ("10.0.2.15".to_string(), 24158),
             ]
         );
@@ -902,7 +902,7 @@ mod tests {
 
     #[test]
     fn split_host_port_parses_binding() {
-        assert_eq!(split_host_port("DC01[24158]"), Some(("DC01".into(), 24158)));
+        assert_eq!(split_host_port("SRV1[24158]"), Some(("SRV1".into(), 24158)));
         assert_eq!(
             split_host_port("10.0.2.15[24158]"),
             Some(("10.0.2.15".into(), 24158))

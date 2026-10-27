@@ -884,10 +884,10 @@ mod tests {
         assert_eq!(
             value,
             serde_json::json!({
-                "Domain": "test.local",
+                "Domain": "corp.local",
                 "Manufacturer": "QEMU",
                 "Model": "Standard PC (Q35 + ICH9, 2009)",
-                "Name": "DC01",
+                "Name": "SRV1",
             })
         );
     }
@@ -896,7 +896,7 @@ mod tests {
     fn parse_object_header_skips_decoration() {
         let hdr = parse_object_header(WMIO_SERVICE).unwrap();
         assert!(hdr.is_instance && hdr.has_decoration);
-        // ObjectFlags at 8, then "\0WIN2022WMI\0" and "\0root\\cimv2\0".
+        // ObjectFlags at 8, then "\0WINSRV2022\0" and "\0root\\cimv2\0".
         assert_eq!(hdr.body_offset, 9 + 12 + 12);
     }
 
@@ -916,7 +916,7 @@ mod tests {
         assert_eq!(row["AcceptStop"], true);
         assert_eq!(row["DelayedAutoStart"], false);
         assert_eq!(row["InstallDate"], serde_json::Value::Null);
-        assert_eq!(row["SystemName"], "WIN2022WMI");
+        assert_eq!(row["SystemName"], "WINSRV2022");
     }
 
     #[test]
