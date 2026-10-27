@@ -19,12 +19,37 @@ pub enum RpcError {
     Io(#[from] std::io::Error),
     #[error("bind rejected (result={result:#06x}, reason={reason:#06x})")]
     Bind { result: u16, reason: u16 },
-    #[error("RPC fault 0x{0:08x}")]
-    Fault(u32),
+    /// The server refused the whole bind or alter_context with a bind_nak.
+    #[error("bind refused: {} (reason {reason})", reject_reason(.reason))]
+    BindNak { reason: u16 },
+    /// A fault PDU. `did_not_execute` is set when the server says the call
+    /// never ran, so it is safe to retry. Windows sets it for faults from the
+    /// RPC runtime, such as access denied on a bind, but not for faults a
+    /// DCOM call returns, even when the call never ran.
+    #[error("RPC fault 0x{status:08x}{}", if *.did_not_execute { " (the call did not run)" } else { "" })]
+    Fault { status: u32, did_not_execute: bool },
     #[error("RPC protocol error: {0}")]
     Protocol(String),
     #[error("RPC message protection failed: {0}")]
     Protection(String),
+}
+
+/// What a bind_nak's `provider_reject_reason` means (C706 12.6.3.1, MS-RPCE
+/// 2.2.2.5).
+fn reject_reason(reason: &u16) -> &'static str {
+    match reason {
+        0 => "reason not specified",
+        1 => "temporary congestion",
+        2 => "local limit exceeded",
+        3 => "called presentation address unknown",
+        4 => "protocol version not supported",
+        5 => "default context not supported",
+        6 => "user data not readable",
+        7 => "no PSAP available",
+        8 => "authentication type not recognized",
+        9 => "invalid checksum",
+        _ => "unknown reason",
+    }
 }
 
 impl From<AuthError> for RpcError {
@@ -53,6 +78,8 @@ pub const PFC_LAST_FRAG: u8 = 0x02;
 /// supports header signing (MS-RPCE 2.2.2.3); elsewhere `PFC_PENDING_CANCEL`.
 pub const PFC_SUPPORT_HEADER_SIGN: u8 = 0x04;
 const PFC_FIRST_LAST: u8 = PFC_FIRST_FRAG | PFC_LAST_FRAG;
+/// In a fault PDU: the call never ran (C706 12.6.3.1).
+const PFC_DID_NOT_EXECUTE: u8 = 0x20;
 const PFC_OBJECT_UUID: u8 = 0x80;
 
 /// max_xmit_frag / max_recv_frag offered in binds (what Windows offers too).
@@ -206,12 +233,11 @@ pub fn parse_bind_ack(pdu: &[u8], expected_ptype: u8) -> Result<BindAck, RpcErro
     }
     match pdu[2] {
         PTYPE_BIND_NAK => {
-            return Err(RpcError::Bind {
-                result: u16_at(16).unwrap_or(0),
-                reason: 0,
+            return Err(RpcError::BindNak {
+                reason: u16_at(16).unwrap_or(0),
             })
         }
-        PTYPE_FAULT => return Err(RpcError::Fault(fault_status(pdu).ok_or_else(malformed)?)),
+        PTYPE_FAULT => return Err(fault_error(pdu).ok_or_else(malformed)?),
         t if t != expected_ptype => {
             return Err(RpcError::Protocol(format!(
                 "expected PDU type 0x{expected_ptype:02x}, got 0x{t:02x}"
@@ -274,6 +300,14 @@ pub fn fault_status(pdu: &[u8]) -> Option<u32> {
         .then(|| pdu.get(24..28))
         .flatten()
         .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+}
+
+/// The error an RPC fault PDU reports, if `pdu` is one.
+fn fault_error(pdu: &[u8]) -> Option<RpcError> {
+    Some(RpcError::Fault {
+        status: fault_status(pdu)?,
+        did_not_execute: pdu[3] & PFC_DID_NOT_EXECUTE != 0,
+    })
 }
 
 pub const AUTH_LEVEL_PKT_PRIVACY: u8 = 0x06;
@@ -519,9 +553,8 @@ pub fn verify_signed_response_pdu(
         return Err(RpcError::Protocol("response PDU too short".into()));
     }
     let ptype = pdu[2];
-    if ptype == PTYPE_FAULT {
-        let status = u32::from_le_bytes(pdu[24..28].try_into().unwrap());
-        return Err(RpcError::Fault(status));
+    if let Some(fault) = fault_error(pdu) {
+        return Err(fault);
     }
     if ptype != PTYPE_RESPONSE {
         return Err(RpcError::Protocol(format!(
@@ -578,9 +611,8 @@ pub fn unseal_response_pdu(auth: &mut dyn AuthProvider, pdu: &[u8]) -> Result<Ve
         return Err(RpcError::Protocol("response PDU too short".into()));
     }
     let ptype = pdu[2];
-    if ptype == PTYPE_FAULT {
-        let status = u32::from_le_bytes(pdu[24..28].try_into().unwrap());
-        return Err(RpcError::Fault(status));
+    if let Some(fault) = fault_error(pdu) {
+        return Err(fault);
     }
     if ptype != PTYPE_RESPONSE {
         return Err(RpcError::Protocol(format!(
@@ -1076,6 +1108,11 @@ mod tests {
     /// Fault Windows sends for an alter_context carrying bad credentials.
     const REF_ACCESS_DENIED_FAULT: [u8; 32] =
         hex_literal::hex!("0500032310000000200000000200000020000000000000000500000000000000");
+    /// Fault Windows sends for a DCOM call to an opnum the interface does not
+    /// have (HRESULT_FROM_WIN32(RPC_S_PROCNUM_OUT_OF_RANGE)), without the flag
+    /// that the call never ran.
+    const REF_PROCNUM_FAULT: [u8; 32] =
+        hex_literal::hex!("050003031000000020000000060000002000000002000000d106078000000000");
     const IREMOTESCMACTIVATOR: [u8; 16] = hex_literal::hex!("a001000000000000c000000000000046");
     const IWBEMLEVEL1LOGIN: [u8; 16] = hex_literal::hex!("18ad09f36ad8d011a07500c04fb68820");
     const IREMUNKNOWN: [u8; 16] = hex_literal::hex!("3101000000000000c000000000000046");
@@ -1170,12 +1207,56 @@ mod tests {
 
     #[test]
     fn parse_bind_ack_reports_access_denied_fault() {
+        let err = parse_bind_ack(&REF_ACCESS_DENIED_FAULT, PTYPE_ALTER_CONTEXT_RESP).unwrap_err();
         assert!(matches!(
-            parse_bind_ack(&REF_ACCESS_DENIED_FAULT, PTYPE_ALTER_CONTEXT_RESP),
-            Err(RpcError::Fault(5))
+            err,
+            RpcError::Fault {
+                status: 5,
+                did_not_execute: true
+            }
         ));
+        assert_eq!(
+            err.to_string(),
+            "RPC fault 0x00000005 (the call did not run)"
+        );
         assert_eq!(fault_status(&REF_ACCESS_DENIED_FAULT), Some(5));
         assert_eq!(fault_status(&REF_ALTER_RESP_NO_AUTH), None);
+    }
+
+    #[test]
+    fn responses_report_faults_and_whether_the_call_ran() {
+        let err = verify_signed_response_pdu(&mut signing_ssp(), &REF_PROCNUM_FAULT).unwrap_err();
+        assert!(matches!(
+            err,
+            RpcError::Fault {
+                status: 0x8007_06d1,
+                did_not_execute: false
+            }
+        ));
+        assert_eq!(err.to_string(), "RPC fault 0x800706d1");
+        let mut not_run = REF_PROCNUM_FAULT;
+        not_run[3] |= PFC_DID_NOT_EXECUTE;
+        assert!(matches!(
+            unseal_response_pdu(&mut signing_ssp(), &not_run),
+            Err(RpcError::Fault {
+                status: 0x8007_06d1,
+                did_not_execute: true
+            })
+        ));
+    }
+
+    #[test]
+    fn parse_bind_ack_reports_bind_nak_reason() {
+        // Windows' bind_nak (C706 12.6.4.5) for a bind with an auth type it
+        // does not know: provider_reject_reason, then the one protocol
+        // version it supports (5.0).
+        let nak = hex_literal::hex!("05000d031000000018000000010000000800010500000000");
+        let err = parse_bind_ack(&nak, PTYPE_BIND_ACK).unwrap_err();
+        assert!(matches!(err, RpcError::BindNak { reason: 8 }));
+        assert_eq!(
+            err.to_string(),
+            "bind refused: authentication type not recognized (reason 8)"
+        );
     }
 
     #[test]

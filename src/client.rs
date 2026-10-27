@@ -187,7 +187,7 @@ impl Error {
             Error::Activation(DcomError::ServerUnavailable) => Some(0x8007_06BA),
             Error::Activation(DcomError::RemoteProcedureCallFailed) => Some(0x8007_06BE),
             Error::Activation(DcomError::Hresult { hr }) => Some(*hr),
-            Error::Rpc(RpcError::Fault(status)) => Some(fault_to_hresult(*status)),
+            Error::Rpc(RpcError::Fault { status, .. }) => Some(fault_to_hresult(*status)),
             Error::Decode(WmioError::MethodNotFound(_)) => Some(WBEM_E_INVALID_METHOD),
             _ => None,
         }
@@ -202,7 +202,7 @@ impl Error {
             Error::Wmi(_)
                 | Error::Decode(_)
                 | Error::Deserialize(_)
-                | Error::Rpc(RpcError::Fault(_))
+                | Error::Rpc(RpcError::Fault { .. })
         )
     }
 }

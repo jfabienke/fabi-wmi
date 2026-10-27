@@ -664,7 +664,10 @@ mod ffi {
             assert_eq!(invalid_class.status(), 0x8004_1010u32 as i32);
             let denied = FfiError::Wmi(Error::Activation(DcomError::AccessDenied));
             assert_eq!(denied.status(), 0x8007_0005u32 as i32);
-            let fault = FfiError::Wmi(Error::Rpc(RpcError::Fault(5)));
+            let fault = FfiError::Wmi(Error::Rpc(RpcError::Fault {
+                status: 5,
+                did_not_execute: false,
+            }));
             assert_eq!(fault.status(), 0x8007_0005u32 as i32);
             assert_eq!(FfiError::Invalid("x".into()).status(), -1);
             let lost = FfiError::Wmi(Error::Protocol("desync".into()));
