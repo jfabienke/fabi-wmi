@@ -3,6 +3,7 @@
 //! packet-integrity (signed) or packet-privacy (sealed) level, request/response
 //! fragmentation, and [`RpcConnection`].
 
+use std::borrow::Cow;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
@@ -77,11 +78,71 @@ fn write_context_list(buf: &mut Vec<u8>, context_id: u16, abstract_syntax: &[u8;
     buf.write_u16::<LittleEndian>(context_id).unwrap(); // p_cont_id
     buf.write_u8(1).unwrap(); // n_transfer_syn
     buf.write_u8(0).unwrap(); // reserved
+    write_syntaxes(buf, abstract_syntax);
+}
+
+/// Write `abstract_syntax` (version 0.0) and the NDR 2.0 transfer syntax, as a
+/// bind offers them and a verification trailer repeats them.
+fn write_syntaxes(buf: &mut Vec<u8>, abstract_syntax: &[u8; 16]) {
     buf.extend_from_slice(abstract_syntax);
     buf.write_u16::<LittleEndian>(0).unwrap(); // abstract syntax version major
     buf.write_u16::<LittleEndian>(0).unwrap(); // abstract syntax version minor
     buf.extend_from_slice(&NDR_TRANSFER_SYNTAX);
     buf.write_u32::<LittleEndian>(2).unwrap(); // NDR version 2
+}
+
+/// Opens a verification trailer (MS-RPCE 2.2.2.13.1).
+const SEC_VT_SIGNATURE: [u8; 8] = [0x8a, 0xe3, 0x13, 0x71, 0x02, 0xf4, 0x36, 0x71];
+const SEC_VT_COMMAND_BITMASK_1: u16 = 0x0001;
+const SEC_VT_COMMAND_PCONTEXT: u16 = 0x0002;
+const SEC_VT_COMMAND_END: u16 = 0x4000;
+/// In `SEC_VT_COMMAND_BITMASK_1`: the bind on this connection offered header
+/// signing (`PFC_SUPPORT_HEADER_SIGN`).
+const CLIENT_SUPPORT_HEADER_SIGNING: u32 = 0x0000_0001;
+
+/// The bytes to append to a request stub of `stub_len` bytes for its
+/// verification trailer (MS-RPCE 2.2.2.13): `header_signing` confirms that the
+/// bind offered header signing, `abstract_syntax` the presentation context the
+/// request uses. Empty when there is neither.
+///
+/// The request's signature or encryption covers the trailer, so a server can
+/// tell when someone on the path removed the header-signing offer from the
+/// unprotected bind, or swapped the presentation context.
+fn verification_trailer(
+    stub_len: usize,
+    header_signing: bool,
+    abstract_syntax: Option<&[u8; 16]>,
+) -> Vec<u8> {
+    let mut trailer = Vec::new();
+    if !header_signing && abstract_syntax.is_none() {
+        return trailer;
+    }
+    // The trailer starts 4-byte aligned in the PDU. Fragments before the last
+    // carry multiples of 16 stub bytes, so aligning it in the stub is enough.
+    trailer.resize(stub_len.next_multiple_of(4) - stub_len, 0);
+    trailer.extend_from_slice(&SEC_VT_SIGNATURE);
+    if header_signing {
+        let end = if abstract_syntax.is_none() {
+            SEC_VT_COMMAND_END
+        } else {
+            0
+        };
+        trailer
+            .write_u16::<LittleEndian>(SEC_VT_COMMAND_BITMASK_1 | end)
+            .unwrap();
+        trailer.write_u16::<LittleEndian>(4).unwrap();
+        trailer
+            .write_u32::<LittleEndian>(CLIENT_SUPPORT_HEADER_SIGNING)
+            .unwrap();
+    }
+    if let Some(abstract_syntax) = abstract_syntax {
+        trailer
+            .write_u16::<LittleEndian>(SEC_VT_COMMAND_PCONTEXT | SEC_VT_COMMAND_END)
+            .unwrap();
+        trailer.write_u16::<LittleEndian>(0x28).unwrap();
+        write_syntaxes(&mut trailer, abstract_syntax);
+    }
+    trailer
 }
 
 fn finish_pdu(ptype: u8, call_id: u32, auth_len: usize, body: Vec<u8>) -> Vec<u8> {
@@ -641,6 +702,9 @@ pub struct BoundContext {
     pub auth_context_id: u32,
     pub auth_level: u8,
     pub auth: Box<dyn AuthProvider>,
+    /// The abstract syntax, until a request on this context has carried it in
+    /// a verification trailer.
+    unconfirmed_syntax: Option<[u8; 16]>,
 }
 
 /// Most bytes one response may take on the wire, all its fragments together.
@@ -691,6 +755,9 @@ pub struct RpcConnection<S = TcpStream> {
     /// Header signing agreed for this connection (MS-RPCE 3.3.1.5.2.2); `None`
     /// until the first authenticated bind or alter_context settles it.
     header_signing: Option<bool>,
+    /// A request has gone out, so the verification trailer that confirms the
+    /// header-signing offer has too, if there was an offer.
+    sent_request: bool,
     /// How long one read or write may block.
     io_timeout: Duration,
     /// The read timeout last set on the stream; `None` until one is set.
@@ -744,6 +811,7 @@ impl<S: RpcStream> RpcConnection<S> {
             next_context_id: 0,
             max_xmit: MAX_FRAG,
             header_signing: None,
+            sent_request: false,
             io_timeout: RPC_IO_TIMEOUT,
             read_timeout: None,
             max_response_len: MAX_RESPONSE_LEN,
@@ -946,12 +1014,17 @@ impl<S: RpcStream> RpcConnection<S> {
             auth_context_id,
             auth_level,
             auth,
+            unconfirmed_syntax: Some(*abstract_syntax),
         })
     }
 
     /// Issue one RPC/ORPC call on `ctx` (splitting the request across fragments
     /// if `stub` exceeds `max_xmit`) and return the reassembled, verified/decrypted
     /// response stub.
+    ///
+    /// As Windows does, the first request on the connection confirms the
+    /// header-signing offer in a verification trailer, and the first request on
+    /// each presentation context confirms its abstract and transfer syntax.
     pub fn call(
         &mut self,
         ctx: &mut BoundContext,
@@ -960,13 +1033,23 @@ impl<S: RpcStream> RpcConnection<S> {
         stub: &[u8],
     ) -> Result<Vec<u8>, RpcError> {
         let call_id = self.next_call_id();
+        let trailer = verification_trailer(
+            stub.len(),
+            !self.sent_request && self.header_signing.is_some(),
+            ctx.unconfirmed_syntax.as_ref(),
+        );
+        let stub: Cow<[u8]> = if trailer.is_empty() {
+            stub.into()
+        } else {
+            [stub, &trailer].concat().into()
+        };
         let pdus = build_request_pdus(
             &mut *ctx.auth,
             call_id,
             ctx.context_id,
             opnum,
             object_ipid,
-            stub,
+            &stub,
             ctx.auth_level,
             ctx.auth_context_id,
             self.max_xmit,
@@ -975,6 +1058,8 @@ impl<S: RpcStream> RpcConnection<S> {
         for pdu in &pdus {
             self.stream.write_all(pdu)?;
         }
+        self.sent_request = true;
+        ctx.unconfirmed_syntax = None;
 
         let mut response = Vec::new();
         let mut first = true;
@@ -1411,8 +1496,98 @@ mod tests {
             auth_context_id: 0,
             auth_level: AUTH_LEVEL_PKT_INTEGRITY,
             auth: Box::new(signing_ssp()),
+            unconfirmed_syntax: None,
         };
         conn.call(&mut ctx, 0, None, &[0; 8])
+    }
+
+    /// A single-fragment signed response to call `call_id`.
+    fn response_to(call_id: u32, stub: &[u8]) -> Vec<u8> {
+        let mut pdu = response_fragment(PFC_FIRST_FRAG | PFC_LAST_FRAG, stub);
+        pdu[12..16].copy_from_slice(&call_id.to_le_bytes());
+        pdu
+    }
+
+    /// The body of each request PDU in `sent`: its stub data and verification
+    /// trailer, without the auth padding.
+    fn request_bodies(mut sent: &[u8]) -> Vec<&[u8]> {
+        let mut bodies = Vec::new();
+        while !sent.is_empty() {
+            let frag_len = usize::from(u16::from_le_bytes([sent[8], sent[9]]));
+            let auth_len = usize::from(u16::from_le_bytes([sent[10], sent[11]]));
+            let (pdu, rest) = sent.split_at(frag_len);
+            if pdu[2] == PTYPE_REQUEST {
+                let trailer_at = frag_len - auth_len - SEC_TRAILER_LEN;
+                let pad = usize::from(pdu[trailer_at + 2]);
+                bodies.push(&pdu[REQUEST_HEADER_LEN..trailer_at - pad]);
+            }
+            sent = rest;
+        }
+        bodies
+    }
+
+    #[test]
+    fn requests_confirm_their_binds_in_a_verification_trailer() {
+        let mut bind_ack = ack_with_token(&REF_BIND_ACK, b"challenge");
+        bind_ack[3] |= PFC_SUPPORT_HEADER_SIGN;
+        let alter_resp = ack_with_token(&REF_ALTER_RESP, b"challenge");
+        let mut conn = replying(&[
+            bind_ack,
+            alter_resp,
+            response_to(3, &[1; 4]),
+            response_to(4, &[1; 4]),
+            response_to(5, &[1; 4]),
+        ]);
+        let mut bind = |name, syntax| {
+            conn.bind_context(
+                name,
+                syntax,
+                AUTH_LEVEL_PKT_INTEGRITY,
+                HandshakeStyle::Auth3,
+                Box::new(signing_ssp()),
+            )
+            .unwrap()
+        };
+        let mut first = bind("first", &[0x11; 16]);
+        let mut second = bind("second", &[0x22; 16]);
+        conn.call(&mut first, 0, None, &[0xAB; 5]).unwrap();
+        conn.call(&mut first, 0, None, &[0xAB; 5]).unwrap();
+        conn.call(&mut second, 0, None, &[0xAB; 5]).unwrap();
+
+        // Bits 0x4000 mark the last command.
+        let bitmask = [0x01, 0x00, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00];
+        let pcontext = |syntax| {
+            [
+                &[0x02, 0x40, 0x28, 0x00][..],
+                &[syntax; 16],
+                &[0, 0, 0, 0],
+                &NDR_TRANSFER_SYNTAX,
+                &[2, 0, 0, 0],
+            ]
+            .concat()
+        };
+        let aligned_stub = [&[0xAB; 5][..], &[0; 3]].concat();
+        let bodies = request_bodies(&conn.stream.sent);
+        assert_eq!(
+            bodies[0],
+            [
+                &aligned_stub,
+                &SEC_VT_SIGNATURE[..],
+                &bitmask,
+                &pcontext(0x11)
+            ]
+            .concat(),
+            "the first request confirms the header-signing offer and its context"
+        );
+        assert_eq!(
+            bodies[1], [0xAB; 5],
+            "a context's later requests carry none"
+        );
+        assert_eq!(
+            bodies[2],
+            [&aligned_stub, &SEC_VT_SIGNATURE[..], &pcontext(0x22)].concat(),
+            "the first request on another context confirms only that context"
+        );
     }
 
     #[test]
