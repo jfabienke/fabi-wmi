@@ -34,7 +34,7 @@ on:
 env:
   RUST_BACKTRACE: 1
   CARGO_TERM_COLOR: always
-  # Cargo.toml path-depends on ../kerbsec, so every job checks out both repos
+  # Cargo.toml path-depends on ../fabi-kerbsec, so every job checks out both repos
   # side by side (see e2e-tests.yml).
   KERBSEC_REF: master
 
@@ -52,13 +52,13 @@ jobs:
         path: linux-wmi
     - uses: actions/checkout@v7
       with:
-        repository: jfabienke/kerbsec
+        repository: jfabienke/fabi-kerbsec
         ref: ${{ env.KERBSEC_REF }}
-        path: kerbsec
+        path: fabi-kerbsec
     - uses: dtolnay/rust-toolchain@stable
       with:
         components: rustfmt
-    # Not `--all`: that also formats the ../kerbsec path dependency.
+    # Not `--all`: that also formats the ../fabi-kerbsec path dependency.
     - run: cargo fmt -- --check
 
   clippy:
@@ -70,9 +70,9 @@ jobs:
         path: linux-wmi
     - uses: actions/checkout@v7
       with:
-        repository: jfabienke/kerbsec
+        repository: jfabienke/fabi-kerbsec
         ref: ${{ env.KERBSEC_REF }}
-        path: kerbsec
+        path: fabi-kerbsec
     - uses: dtolnay/rust-toolchain@stable
       with:
         components: clippy
@@ -90,9 +90,9 @@ jobs:
         path: linux-wmi
     - uses: actions/checkout@v7
       with:
-        repository: jfabienke/kerbsec
+        repository: jfabienke/fabi-kerbsec
         ref: ${{ env.KERBSEC_REF }}
-        path: kerbsec
+        path: fabi-kerbsec
     - uses: dtolnay/rust-toolchain@stable
     - uses: Swatinem/rust-cache@v2.9.3
       with:
@@ -118,9 +118,9 @@ jobs:
         path: linux-wmi
     - uses: actions/checkout@v7
       with:
-        repository: jfabienke/kerbsec
+        repository: jfabienke/fabi-kerbsec
         ref: ${{ env.KERBSEC_REF }}
-        path: kerbsec
+        path: fabi-kerbsec
     - uses: EmbarkStudios/cargo-deny-action@v2.1.1
       with:
         manifest-path: linux-wmi/Cargo.toml
@@ -134,9 +134,9 @@ jobs:
         path: linux-wmi
     - uses: actions/checkout@v7
       with:
-        repository: jfabienke/kerbsec
+        repository: jfabienke/fabi-kerbsec
         ref: ${{ env.KERBSEC_REF }}
-        path: kerbsec
+        path: fabi-kerbsec
     - uses: dtolnay/rust-toolchain@stable
     - uses: taiki-e/install-action@v2.87.31
       with:

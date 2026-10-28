@@ -13,13 +13,13 @@ Rust WMI client workspace (`fabi-*` crates) for Linux/macOS: queries and invokes
 | `fabi-wmio` | `crates/fabi-wmio` | MS-WMIO object decoder (`decode_object`) and method input instance encoder (`spawn_instance`, `extract_method_in_params`, `encode_method_in_params`) |
 | `fabi-dcerpc` | `crates/fabi-dcerpc` | DCE/RPC connection-oriented PDU framing, request/response fragmentation, `RpcConnection`, generalized `AuthProvider` SSP trait, and `NtlmClient` (MS-NLMP NTLMv2 with extended session security; unit-tested against the spec's worked example in 4.2.4) |
 | `fabi-dcom` | `crates/fabi-dcom` | OXID resolution (`resolve_oxid`, `IOXIDResolver::ResolveOxid`), remote activation (`activate`, `activate_with`; `IRemoteSCMActivator` / `IActivation`), consolidated `ObjRef`/`StdObjRef`/`MInterfacePointer`/`DualStringArray` marshaling (`encode_custom_m_interface_pointer`), and `encode_rem_release` (`IRemUnknown::RemRelease`) |
-| `fabi-kerbsec` | `../kerbsec` | GSS-API Kerberos v5 security context with 4-buffer `GSS_C_DCE_STYLE` IOV protection (`SIGN_ONLY` header/trailer, `DATA` stub, `HEADER` `auth_value`); native IOV needs Linux with its `iov` feature |
+| `fabi-kerbsec` | `../fabi-kerbsec` | GSS-API Kerberos v5 security context with 4-buffer `GSS_C_DCE_STYLE` IOV protection (`SIGN_ONLY` header/trailer, `DATA` stub, `HEADER` `auth_value`); native IOV needs Linux with its `iov` feature |
 | `fabi-wmi` | `.` (root) | High-level `WmiClient` (`query`, `query_as`, `exec_method`, `exec_method_as`), MS-WMI ORPC encoders/decoders (`src/wmi_proto.rs`), `KerberosClient` (`AuthProvider` bridge), C ABI (`src/lib.rs`, `ffi` feature), and .NET shim (`shim/wmi_shim.cs`) |
 | `fabi-testkit` | `crates/fabi-testkit` | Dev-only: proptest strategies (random bytes, mutated captures) for the parsers' never-panic properties |
 
 ## Build & Test
 
-Cargo features on `fabi-wmi`: `ffi` (**default**, C ABI exports), `kerberos` (**default**, pulls in `fabi-kerbsec` via path dep `../kerbsec`), `test-support` (in-process stub backend for the C ABI).
+Cargo features on `fabi-wmi`: `ffi` (**default**, C ABI exports), `kerberos` (**default**, pulls in `fabi-kerbsec` via path dep `../fabi-kerbsec`), `test-support` (in-process stub backend for the C ABI).
 
 ```bash
 cargo build --workspace                                  # default (ffi + kerberos) build
@@ -35,7 +35,7 @@ cargo deny check                                         # advisories, licenses,
 
 - Dependency policy: no third-party C compiled into the build. OS libraries are used only where the OS holds the credentials (the system GSS-API for Kerberos); everything else is pure Rust. `deny.toml` bans the crates that compile C (`cc`, `cmake`, `ring`, `aws-lc-*`, `openssl-sys`) and bindgen; CI (`.github/workflows/rust.yml`) runs fmt, clippy, tests and cargo-deny.
 
-- Plain `cargo fmt` formats every workspace member. `cargo fmt --all` also formats the local path dependency `../kerbsec`.
+- Plain `cargo fmt` formats every workspace member. `cargo fmt --all` also formats the local path dependency `../fabi-kerbsec`.
 
 - Building needs no Kerberos packages: kerbsec loads the system GSS-API at run time (its `src/ffi`). Running Kerberos needs `libgssapi-krb5-2` (Debian/Ubuntu), `krb5-libs` (Fedora/RHEL) or macOS's GSS.framework; without it, `Auth::Kerberos` fails at connect with "GSS-API unavailable". `KERBSEC_GSSAPI_LIBRARY` overrides the library.
 - `tests/kerberos_adapter_test.rs` needs the `kerberos` feature.

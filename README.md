@@ -82,12 +82,13 @@ cargo build --no-default-features             # Rust API only, NTLM only
 cargo test --workspace --features test-support  # full test suite (golden tests against captured Windows bytes)
 ```
 
-The `kerberos` feature builds `fabi-kerbsec` from `../kerbsec`, which loads the
-system GSS-API library the first time Kerberos is used (`libgssapi-krb5-2` on
-Debian/Ubuntu, `krb5-libs` on Fedora/RHEL, GSS.framework on macOS). Building
+The `kerberos` feature builds `fabi-kerbsec` from `../fabi-kerbsec`, which loads
+the system GSS-API library the first time Kerberos is used (`libgssapi-krb5-2`
+on Debian/Ubuntu, `krb5-libs` on Fedora/RHEL, GSS.framework on macOS). Building
 needs no Kerberos packages or C toolchain, and NTLM works on hosts without the
-library. Cargo reads `../kerbsec/Cargo.toml` even with the feature off, so
-check out kerbsec next to this repository.
+library. Cargo reads `../fabi-kerbsec/Cargo.toml` even with the feature off, so
+check out [fabi-kerbsec](https://github.com/jfabienke/fabi-kerbsec) next to this
+repository.
 
 Windows targets need DCOM enabled, the account in "Distributed COM Users" (or
 an administrator), WMI namespace permissions, and the firewall open for RPC

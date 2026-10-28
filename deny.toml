@@ -28,7 +28,7 @@ private = { ignore = true }
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
-# Path dependencies (the workspace crates and ../kerbsec) carry no version.
+# Path dependencies (the workspace crates and ../fabi-kerbsec) carry no version.
 allow-wildcard-paths = true
 # Policy: no third-party C compiled into the build. OS libraries are used only
 # where the OS holds the credentials (Kerberos via the system GSS-API).

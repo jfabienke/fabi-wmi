@@ -40,7 +40,7 @@ tracing = { version = "0.1", default-features = false, features = ["std"] }
 [target.'cfg(unix)'.dependencies]
 # Kerberos via the system GSS-API (fabi-kerbsec crate). Only the DCE/RPC pieces:
 # kerbsec's DNS, async runtime and rustls channel-binding features go unused here.
-fabi-kerbsec = { path = "../kerbsec", version = "0.4.0", default-features = false, features = ["channel-bindings", "iov"], optional = true }
+fabi-kerbsec = { path = "../fabi-kerbsec", version = "0.4.0", default-features = false, features = ["channel-bindings", "iov"], optional = true }
 
 [features]
 default = ["ffi", "kerberos"]
