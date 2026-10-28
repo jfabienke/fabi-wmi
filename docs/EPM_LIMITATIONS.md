@@ -1,6 +1,6 @@
 # EPM Limitations for WMI and the Pivot to DCOM Activation
 
-This document explains why the Endpoint Mapper (EPM) protocol fails for resolving WMI endpoints and the necessary pivot to the DCOM activation mechanism. It is based on implementation learnings from the linux-wmi library (v0.1.0), where initial EPM attempts consistently failed, leading to the adoption of DCOM as the standard approach for WMI remote access. The content is derived from Microsoft Open Specifications (MS-EPMR, MS-DCOM, MS-WMI) and real-world testing with Wireshark and PowerShell.
+This document explains why the Endpoint Mapper (EPM) protocol fails for resolving WMI endpoints and the necessary pivot to the DCOM activation mechanism. It is based on implementation learnings from the fabi-wmi library (v0.1.0), where initial EPM attempts consistently failed, leading to the adoption of DCOM as the standard approach for WMI remote access. The content is derived from Microsoft Open Specifications (MS-EPMR, MS-DCOM, MS-WMI) and real-world testing with Wireshark and PowerShell.
 
 ## Overview
 
@@ -56,7 +56,7 @@ This flow returns the dynamic endpoint for the WMI object, enabling subsequent c
   - 0x00010504 (RPC_S_INVALID_STUB): Malformed NDR stub (e.g., wrong BSTR encoding for CLSID).
   - 0x000006F7 (RPC_S_INVALID_CONTEXT): Mismatched context_id in alter_context.
 
-## Implementation in linux-wmi
+## Implementation in fabi-wmi
 
 The library implements the DCOM flow with the following components (v0.1.0):
 

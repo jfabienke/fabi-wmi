@@ -1,8 +1,8 @@
-# Security Guide - linux-wmi with kerbsec v0.2.0
+# Security Guide - fabi-wmi with kerbsec v0.2.0
 
 ## Overview
 
-This guide covers security features, best practices, and threat mitigation strategies for linux-wmi with the enhanced kerbsec v0.2.0 integration.
+This guide covers security features, best practices, and threat mitigation strategies for fabi-wmi with the enhanced kerbsec v0.2.0 integration.
 
 ## Table of Contents
 
@@ -393,7 +393,7 @@ use tracing::{info, warn, error};
 
 fn setup_security_logging() {
     tracing_subscriber::fmt()
-        .with_env_filter("linux_wmi=info,kerbsec=info")
+        .with_env_filter("fabi_wmi=info,kerbsec=info")
         .with_target(true)
         .with_timestamp(true)
         .json()  // For SIEM ingestion

@@ -1,6 +1,6 @@
 # Async API Roadmap
 
-This document tracks the async API implementation status and roadmap for linux-wmi.
+This document tracks the async API implementation status and roadmap for fabi-wmi.
 
 ## Current Status (January 2024)
 

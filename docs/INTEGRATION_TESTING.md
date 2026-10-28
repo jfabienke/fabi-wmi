@@ -1,4 +1,4 @@
-# Integration Testing Guide for linux-wmi
+# Integration Testing Guide for fabi-wmi
 
 This guide provides instructions for setting up and running integration tests against real Windows hosts.
 
@@ -117,7 +117,7 @@ cargo test --features kerberos,integration-tests test_delegated_auth
 
 ```bash
 # Enable detailed logging
-export RUST_LOG=linux_wmi=debug,linux_wmi::transport=trace
+export RUST_LOG=fabi_wmi=debug,fabi_wmi::transport=trace
 
 # Run with debug output
 cargo run --example test_connect $LINUX_WMI_TEST_HOST --user $LINUX_WMI_TEST_USER --pass $LINUX_WMI_TEST_PASS --domain $LINUX_WMI_TEST_DOMAIN 2>&1 | tee debug.log
@@ -194,6 +194,6 @@ wait
 When reporting integration test failures, include:
 1. Windows version and edition (`winver.exe`)
 2. Network topology (domain-joined, workgroup, etc.)
-3. Debug logs with `RUST_LOG=linux_wmi=trace`
+3. Debug logs with `RUST_LOG=fabi_wmi=trace`
 4. Wireshark capture if possible
 5. Output of diagnostic commands above

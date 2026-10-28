@@ -96,7 +96,7 @@ klist
 
 ```bash
 # Start capture
-cd linux-wmi
+cd fabi-wmi
 ./examples/test_kerberos_e2e.sh TESTLAB.LOCAL win11.testlab.local true
 
 # Or manually with specific query

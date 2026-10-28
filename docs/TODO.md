@@ -1,4 +1,4 @@
-# linux-wmi TODO List
+# fabi-wmi TODO List
 
 This document consolidates all TODO items from the codebase for better tracking and visibility.
 

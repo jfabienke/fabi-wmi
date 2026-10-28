@@ -1,6 +1,6 @@
 # References and External Sources
 
-This document catalogs the official specifications, cloned repositories, and other resources leveraged in the linux-wmi project. We prioritize open-source (MIT/Apache-2.0) or public-domain materials for inspiration, constants, and validation. No code is directly copied from GPL-licensed sources (e.g., Impacket); only structural patterns and verified constants are adapted or reimplemented from scratch. All usage aligns with our project's permissive license (MIT, as per Cargo.toml).
+This document catalogs the official specifications, cloned repositories, and other resources leveraged in the fabi-wmi project. We prioritize open-source (MIT/Apache-2.0) or public-domain materials for inspiration, constants, and validation. No code is directly copied from GPL-licensed sources (e.g., Impacket); only structural patterns and verified constants are adapted or reimplemented from scratch. All usage aligns with our project's permissive license (MIT, as per Cargo.toml).
 
 The goal is to build a spec-compliant DCOM/WMI client without reinventing low-level details, while ensuring compatibility and verifiability. For each source:
 - **Purpose**: What it's used for (e.g., validation, constants).
@@ -79,7 +79,7 @@ All cloned to `/Users/jvindahl/Development/` (e.g., `windows-classic-samples`). 
   - **Leverage**: Adapt patterns from rpc.c (e.g., RPC_HEADER for ptype=0x0B bind, context_id tracking); verify transport.rs parse_bind_ack. No direct code—Rust reimpl.
   - **Compatibility**: Apache-2.0 (compatible with MIT; attribution in code comments).
 
-- **Impacket** (Path: `/Users/jvindahl/Development/linux-wmi/impacket`; License: AGPL-3.0)
+- **Impacket** (Path: `/Users/jvindahl/Development/fabi-wmi/impacket`; License: AGPL-3.0)
   - **Purpose**: Python RPC/WMI client for golden traces (e.g., epm.py for TowerConnectEx).
   - **Leverage**: Run tools (rpcdump.py, wmiexec.py) for Wireshark validation; compare PDUs to transport.rs (no code ported—GPL avoidance).
   - **Compatibility**: AGPL-3.0 (copyleft; use only for testing/traces, not integration).

@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-The linux-wmi library has successfully implemented SPNEGO wrapping for NTLMv2 authentication, meeting the protocol requirements for modern Windows systems. However, Windows 11 24H2 and later actively reject NTLM authentication for DCOM as part of Microsoft's security hardening initiative. This is not a bug in linux-wmi but a fundamental Windows policy change.
+The fabi-wmi library has successfully implemented SPNEGO wrapping for NTLMv2 authentication, meeting the protocol requirements for modern Windows systems. However, Windows 11 24H2 and later actively reject NTLM authentication for DCOM as part of Microsoft's security hardening initiative. This is not a bug in fabi-wmi but a fundamental Windows policy change.
 
 ## Current Status
 
@@ -40,7 +40,7 @@ bind_nak (reason: 9, version: 1)
 
 ### Our SPNEGO Implementation
 
-The linux-wmi SPNEGO implementation correctly produces:
+The fabi-wmi SPNEGO implementation correctly produces:
 ```
 60 6b                         # Application constructed tag
 06 06 2b 06 01 05 05 02      # SPNEGO OID (1.3.6.1.5.5.2)
@@ -60,7 +60,7 @@ This structure is **correctly formed** and Windows successfully parses it. The r
 
 According to Microsoft's official timeline:
 
-| Date               | Change                               | Impact on linux-wmi              |
+| Date               | Change                               | Impact on fabi-wmi               |
 |--------------------|--------------------------------------|----------------------------------|
 | **2024 (Current)** | Windows 11 24H2 blocks NTLM for DCOM | DCOM activation fails            |
 | **Sept 2025**      | Audit mode with Event ID 4024        | Warnings logged                  |
@@ -170,10 +170,10 @@ sudo kadmin.local -q "addprinc -pw testpass testuser"
 sudo kadmin.local -q "addprinc -randkey host/windows.example.com"
 ```
 
-### Using linux-wmi with Kerberos
+### Using fabi-wmi with Kerberos
 
 ```rust
-use linux_wmi::{
+use fabi_wmi::{
     KerberosClient,
     KerberosConfig,
     KerberosCacheBackend,
@@ -289,7 +289,7 @@ For workgroup scenarios without Active Directory:
 
 ## Conclusion
 
-The linux-wmi library has successfully implemented the protocol requirements (SPNEGO wrapping), but Windows 11's security policies prevent NTLM-based DCOM authentication. This is not a bug but a fundamental shift in Windows authentication architecture.
+The fabi-wmi library has successfully implemented the protocol requirements (SPNEGO wrapping), but Windows 11's security policies prevent NTLM-based DCOM authentication. This is not a bug but a fundamental shift in Windows authentication architecture.
 
 **Key Takeaways:**
 - Our SPNEGO implementation is correct and Windows parses it successfully

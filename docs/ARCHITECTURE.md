@@ -1,6 +1,6 @@
-# Linux-WMI Architecture
+# fabi-wmi Architecture
 
-High-level overview of the linux-wmi implementation architecture, reflecting the current state (Phases 1-2 complete) and design decisions made during development.
+High-level overview of the fabi-wmi implementation architecture, reflecting the current state (Phases 1-2 complete) and design decisions made during development.
 
 ## Architecture Diagram
 
@@ -116,7 +116,7 @@ examples/
 
 ### Dual Authentication Support
 
-linux-wmi supports both NTLM and Kerberos authentication through a modular design:
+fabi-wmi supports both NTLM and Kerberos authentication through a modular design:
 
 ```
 ┌──────────────────────────────────────────┐
@@ -325,7 +325,7 @@ sequenceDiagram
 
 - `LINUX_WMI_SKIP_EPM=1`: Skip port resolution, use fixed port 135
 - `USE_DCOM_ACTIVATION=1`: Force DCOM activation path (deprecated)
-- `RUST_LOG=linux_wmi=debug`: Enable detailed tracing
+- `RUST_LOG=fabi_wmi=debug`: Enable detailed tracing
 
 ---
 

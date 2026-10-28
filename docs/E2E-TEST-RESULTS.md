@@ -121,4 +121,4 @@ The E2E test failure appears to be related to Windows-side configuration or secu
 ---
 
 *Generated: 2025-09-21*
-*Integration Version: kerbsec v0.2.0 + linux-wmi v0.1.0*
+*Integration Version: kerbsec v0.2.0 + fabi-wmi v0.1.0*

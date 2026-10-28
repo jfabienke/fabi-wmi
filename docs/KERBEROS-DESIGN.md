@@ -1,8 +1,8 @@
-# Kerberos Authentication Design for linux-wmi
+# Kerberos Authentication Design for fabi-wmi
 
 ## Executive Summary
 
-This document describes the production-ready Kerberos authentication implementation in linux-wmi v0.2.0, addressing Microsoft's accelerated NTLM removal timeline. The implementation, powered by kerbsec v0.2.0, uses a layered approach with platform-specific GSS/SSPI implementations for DCE-style RPC security and includes enterprise features like credential caching, automatic memory zeroization, and TLS channel bindings.
+This document describes the production-ready Kerberos authentication implementation in fabi-wmi v0.2.0, addressing Microsoft's accelerated NTLM removal timeline. The implementation, powered by kerbsec v0.2.0, uses a layered approach with platform-specific GSS/SSPI implementations for DCE-style RPC security and includes enterprise features like credential caching, automatic memory zeroization, and TLS channel bindings.
 
 ## Motivation
 
@@ -1086,4 +1086,4 @@ let session = WmiSession::with_auto_auth(
 *Last Updated: January 2025*
 *Design Version: 2.0*
 *Status: Production Ready with kerbsec v0.2.0*
-*Release: linux-wmi v0.2.0*
+*Release: fabi-wmi v0.2.0*

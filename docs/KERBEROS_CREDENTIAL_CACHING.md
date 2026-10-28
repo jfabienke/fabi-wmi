@@ -2,7 +2,7 @@
 
 ## Overview
 
-The linux-wmi library implements a **production-grade Kerberos credential caching system** that provides enterprise-level authentication capabilities for Windows management from Linux systems. This document details the implementation, security architecture, and performance characteristics of the credential management system.
+The fabi-wmi library implements a **production-grade Kerberos credential caching system** that provides enterprise-level authentication capabilities for Windows management from Linux systems. This document details the implementation, security architecture, and performance characteristics of the credential management system.
 
 ## Implementation Architecture
 
@@ -158,7 +158,7 @@ perform_sensitive_operation()?;
 
 ## Comparison with Enterprise Tools
 
-| Aspect                | linux-wmi                 | PowerShell Core     | SSSD/Winbind                 |
+| Aspect                | fabi-wmi                  | PowerShell Core     | SSSD/Winbind                 |
 |-----------------------|---------------------------|---------------------|------------------------------|
 | **Cache Location**    | `/tmp/krb5cc_<uid>_<pid>` | `/tmp/krb5cc_<uid>` | `KCM:` or `/var/lib/sss/db/` |
 | **Acquisition**       | kinit via stdin           | kinit or GSSAPI     | Internal or kinit            |
@@ -262,7 +262,7 @@ pub enum CacheStrategy {
 ## Usage Example
 
 ```rust
-use linux_wmi::{
+use fabi_wmi::{
     KerberosClient,
     KerberosConfig,
     KerberosCacheBackend,
@@ -321,13 +321,13 @@ export KRB5_TRACE=/dev/stderr
 # Set custom cache location
 export KRB5CCNAME=FILE:/tmp/my_cache
 
-# Enable linux-wmi debug logging
+# Enable fabi-wmi debug logging
 export RUST_LOG=debug
 ```
 
 ## Conclusion
 
-The linux-wmi Kerberos credential caching implementation provides:
+The fabi-wmi Kerberos credential caching implementation provides:
 
 - ✅ **Enterprise-grade security** with proper credential lifecycle
 - ✅ **Excellent performance** through intelligent caching
