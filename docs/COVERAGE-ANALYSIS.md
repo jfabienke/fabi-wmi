@@ -1,7 +1,7 @@
 # Test Coverage Analysis Report
 
 ## Executive Summary
-After extensive testing efforts across multiple milestones, the linux-wmi project has achieved **56.81% test coverage** (989/1741 lines). While this falls short of the ambitious 90% target, it represents solid coverage for a protocol implementation library with significant low-level and network-dependent code.
+After extensive testing efforts across multiple milestones, the fabi-wmi project has achieved **56.81% test coverage** (989/1741 lines). While this falls short of the ambitious 90% target, it represents solid coverage for a protocol implementation library with significant low-level and network-dependent code.
 
 ## Coverage Progression
 | Stage                   | Coverage | Lines Covered | Tests | Key Achievements                 |
@@ -135,7 +135,7 @@ Add comments explaining why certain code isn't tested:
 - **Accept** gaps in platform-specific code
 
 ## Conclusion
-The linux-wmi project has achieved solid test coverage of 56.81% with 97 passing tests. While short of the 90% target, this represents good coverage of critical functionality. The remaining gaps are primarily in hard-to-test areas (network I/O, private helpers) that would require disproportionate effort to cover.
+The fabi-wmi project has achieved solid test coverage of 56.81% with 97 passing tests. While short of the 90% target, this represents good coverage of critical functionality. The remaining gaps are primarily in hard-to-test areas (network I/O, private helpers) that would require disproportionate effort to cover.
 
 The focus should shift from line coverage metrics to:
 1. Integration testing with real Windows hosts

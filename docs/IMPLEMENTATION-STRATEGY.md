@@ -8,8 +8,8 @@ This strategy supersedes the earlier draft and maps directly to the updated phas
 - `[x]` Complete
 
 ## Debug Logging
-- Structured logging is available via the `tracing` crate. Enable with `RUST_LOG=linux_wmi=debug` to capture spans/events in JSON.
-- Example: `RUST_LOG=linux_wmi=debug cargo run --example test_connect <host> | jq '.'`
+- Structured logging is available via the `tracing` crate. Enable with `RUST_LOG=fabi_wmi=debug` to capture spans/events in JSON.
+- Example: `RUST_LOG=fabi_wmi=debug cargo run --example test_connect <host> | jq '.'`
 - Tests set `LINUX_WMI_SKIP_EPM=1` to avoid live network calls; unset for end-to-end tracing against a real host.
 
 ---

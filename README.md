@@ -1,4 +1,4 @@
-# Linux WMI Client
+# fabi-wmi
 
 Query Windows Management Instrumentation (WMI) on Windows hosts from Linux or
 macOS, in Rust, without Windows components or agents: DCOM activation and

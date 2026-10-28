@@ -2,7 +2,7 @@
 
 ## Overview
 
-**kerbsec** is linux-wmi's internal, purpose-built Kerberos library that provides production-grade authentication for Windows systems. Unlike traditional third-party dependencies, kerbsec is specifically designed for DCE/RPC protocols used in WMI/DCOM communication.
+**kerbsec** is fabi-wmi's internal, purpose-built Kerberos library that provides production-grade authentication for Windows systems. Unlike traditional third-party dependencies, kerbsec is specifically designed for DCE/RPC protocols used in WMI/DCOM communication.
 
 ## Key Characteristics
 
@@ -147,7 +147,7 @@ All sensitive data is automatically zeroized:
 
 ### Basic Setup
 ```rust
-use linux_wmi::{KerberosConfig, KerberosClient};
+use fabi_wmi::{KerberosConfig, KerberosClient};
 
 let config = KerberosConfig::new("CORP.EXAMPLE.COM")
     .with_spn("HOST/server.example.com")
@@ -186,7 +186,7 @@ let config = KerberosConfig::new("CORP.EXAMPLE.COM")
 let client = KerberosClient::new("192.168.1.100", config, creds)?;
 ```
 
-## Integration with linux-wmi
+## Integration with fabi-wmi
 
 ### Automatic Credential Acquisition
 ```rust
@@ -267,7 +267,7 @@ env::set_var("RUST_LOG", "kerbsec=debug");
 
 ## Conclusion
 
-kerbsec provides linux-wmi with a production-grade, purpose-built Kerberos implementation that is:
+kerbsec provides fabi-wmi with a production-grade, purpose-built Kerberos implementation that is:
 - **Lightweight** but fully-featured
 - **Fast** with credential caching and zero-copy operations
 - **Secure** with modern protections

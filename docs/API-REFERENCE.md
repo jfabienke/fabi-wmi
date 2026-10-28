@@ -1,4 +1,4 @@
-# API Reference - linux-wmi with kerbsec v0.2.0
+# API Reference - fabi-wmi with kerbsec v0.2.0
 
 ## Table of Contents
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the .NET E2E tests for linux-wmi against a Windows host, or with --stub
+# Run the .NET E2E tests for fabi-wmi against a Windows host, or with --stub
 # against the library's canned stub backend (no host needed).
 # Usage: ./run_dotnet_tests.sh [OPTIONS]
 # Options:
@@ -130,7 +130,7 @@ fi
 
 # Print test configuration
 cat <<INFO
-🚀 Running .NET E2E tests for linux-wmi
+🚀 Running .NET E2E tests for fabi-wmi
    Test directory: ${TEST_DIR}
    Library: ${LIB_FILE:-"Using existing build"}
    Host: ${HOST:-"<from config>"}

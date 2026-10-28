@@ -48,12 +48,12 @@ jobs:
     runs-on: ubuntu-26.04
     defaults:
       run:
-        working-directory: linux-wmi
+        working-directory: fabi-wmi
 
     steps:
     - uses: actions/checkout@v7
       with:
-        path: linux-wmi
+        path: fabi-wmi
 
     - uses: actions/checkout@v7
       with:
@@ -81,7 +81,7 @@ jobs:
     - name: Cache target
       uses: actions/cache@v6
       with:
-        path: linux-wmi/target
+        path: fabi-wmi/target
         key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
 
     - name: Build library
@@ -92,8 +92,8 @@ jobs:
     - name: Upload library artifact
       uses: actions/upload-artifact@v7
       with:
-        name: linux-wmi-library
-        path: linux-wmi/target/release/libfabi_wmi.so
+        name: fabi-wmi-library
+        path: fabi-wmi/target/release/libfabi_wmi.so
 
   test-dotnet:
     name: .NET E2E Tests
@@ -118,7 +118,7 @@ jobs:
     - name: Download library artifact
       uses: actions/download-artifact@v8
       with:
-        name: linux-wmi-library
+        name: fabi-wmi-library
         path: target/release
 
     - name: Set execute permissions on library

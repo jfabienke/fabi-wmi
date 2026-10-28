@@ -1,6 +1,6 @@
   ### Lessons Learned from DCOM/WMI Implementation
 
-  Throughout the development of the linux-wmi library (Phases 1-2 complete, with EPM pivot to DCOM activation, NTLM handshake, and stubbed queries), several key insights emerged from protocol behavior, implementation challenges, and testing. These are derived from spec adherence (MS-DCOM/RPCE/EPMR/WMI/NLMP), real-world troubleshooting (Wireshark, host logs), and iterative fixes (e.g., UUID mismatches, auth faults). They inform future phases (NDR, scaling).
+  Throughout the development of the fabi-wmi library (Phases 1-2 complete, with EPM pivot to DCOM activation, NTLM handshake, and stubbed queries), several key insights emerged from protocol behavior, implementation challenges, and testing. These are derived from spec adherence (MS-DCOM/RPCE/EPMR/WMI/NLMP), real-world troubleshooting (Wireshark, host logs), and iterative fixes (e.g., UUID mismatches, auth faults). They inform future phases (NDR, scaling).
 
   #### Protocol Behavior Insights
   - **EPM Limitations for WMI**: WMI endpoints are not pre-registered in the Endpoint Mapper (EPM on TCP 135), leading to EPT_S_NOT_REGISTERED (0x1c00001a) faults. WMI relies on dynamic DCOM activation via SCM (IRemoteSCMActivator::RemoteActivation opnum=4), which returns OXID/port on-demand. Lesson: Always validate assumptions with specs—EPM works for general RPC but not WMI; use Wireshark/impacket traces for confirmation.

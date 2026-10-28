@@ -1,6 +1,6 @@
 # Migration Guide: Upgrading to kerbsec v0.2.0
 
-This guide helps you upgrade your linux-wmi code to use the enhanced features from kerbsec v0.2.0 integration.
+This guide helps you upgrade your fabi-wmi code to use the enhanced features from kerbsec v0.2.0 integration.
 
 ## Table of Contents
 
@@ -50,12 +50,12 @@ The password field now uses `SecureString` internally, but this is transparent t
 
 **Before:**
 ```rust
-use linux_wmi::{WmiSession, Credentials, KerberosConfig};
+use fabi_wmi::{WmiSession, Credentials, KerberosConfig};
 ```
 
 **After:**
 ```rust
-use linux_wmi::{
+use fabi_wmi::{
     WmiSession,
     Credentials,
     KerberosConfig,
@@ -71,7 +71,7 @@ Ensure you're using the latest version:
 
 ```toml
 [dependencies]
-linux-wmi = { version = "0.2", features = ["kerberos"] }
+fabi-wmi = { version = "0.2", features = ["kerberos"] }
 ```
 
 ### Step 2: Update Credentials Creation
@@ -151,7 +151,7 @@ Dramatically improve performance by caching Kerberos tickets:
 
 ```rust
 // Choose cache backend based on your needs
-use linux_wmi::KerberosCacheBackend;
+use fabi_wmi::KerberosCacheBackend;
 
 // FILE: Persistent across restarts (default)
 let config = config.with_cache_backend(KerberosCacheBackend::File);

@@ -1,6 +1,6 @@
-//! Adapter layer mapping linux-wmi Kerberos API to kerbsec
+//! Adapter layer mapping fabi-wmi Kerberos API to kerbsec
 //!
-//! This adapter provides the integration between linux-wmi and the
+//! This adapter provides the integration between fabi-wmi and the
 //! internal kerbsec library for Kerberos authentication.
 //!
 //! ## Resolved with kerbsec v0.2.0+

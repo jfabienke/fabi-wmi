@@ -27,7 +27,7 @@ Microsoft has accelerated NTLM removal beyond deprecation - they are actively re
 - NTLMv2 will eventually be removed (timeline not yet announced)
 - Complete transition to Kerberos and modern authentication
 
-## Impact on linux-wmi
+## Impact on fabi-wmi
 
 ### Current Situation
 - Windows 11 already rejects NTLM for DCOM authentication

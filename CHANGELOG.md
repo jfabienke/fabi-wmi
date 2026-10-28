@@ -1,11 +1,16 @@
 # Changelog
 
-All notable changes to linux-wmi will be documented in this file.
+All notable changes to fabi-wmi will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+### Changed
+- The repository is now `jfabienke/fabi-wmi`, named like the root crate (GitHub redirects
+  the old URL), and expects `fabi-kerbsec` checked out next to it as `../fabi-kerbsec`. The
+  C header (`linux_wmi.h`) and the `LINUX_WMI_*` environment variables keep their names.
 
 ## [0.2.0] - 2025-01-22
 
@@ -66,6 +71,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/jfabienke/linux-wmi/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/jfabienke/linux-wmi/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/jfabienke/linux-wmi/releases/tag/v0.1.0
+[Unreleased]: https://github.com/jfabienke/fabi-wmi/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/jfabienke/fabi-wmi/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/jfabienke/fabi-wmi/releases/tag/v0.1.0

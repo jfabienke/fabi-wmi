@@ -1,6 +1,6 @@
-# Kerberos Configuration Guide for linux-wmi
+# Kerberos Configuration Guide for fabi-wmi
 
-This guide documents all Kerberos configuration options available in linux-wmi, including the new runtime-configurable GSS flags introduced with kerbsec v0.2.0+.
+This guide documents all Kerberos configuration options available in fabi-wmi, including the new runtime-configurable GSS flags introduced with kerbsec v0.2.0+.
 
 ## Table of Contents
 
@@ -17,7 +17,7 @@ This guide documents all Kerberos configuration options available in linux-wmi, 
 ### Minimal Configuration
 
 ```rust
-use linux_wmi::{KerberosConfig, KerberosClient, Credentials};
+use fabi_wmi::{KerberosConfig, KerberosClient, Credentials};
 
 let config = KerberosConfig::new("CONTOSO.COM")
     .with_spn("HOST/server.contoso.com");
@@ -120,7 +120,7 @@ let config = KerberosConfig::new("CONTOSO.COM")
 Full encryption and integrity protection:
 
 ```rust
-use linux_wmi::AuthLevel;
+use fabi_wmi::AuthLevel;
 
 let config = KerberosConfig::new("CONTOSO.COM")
     .with_spn("HOST/server.contoso.com")
@@ -154,7 +154,7 @@ let config = KerberosConfig::new("CONTOSO.COM")
 Persistent cache using MIT Kerberos ccache format:
 
 ```rust
-use linux_wmi::KerberosCacheBackend;
+use fabi_wmi::KerberosCacheBackend;
 
 let config = KerberosConfig::new("CONTOSO.COM")
     .with_spn("HOST/server.contoso.com")
@@ -329,7 +329,7 @@ let client = KerberosClient::new("192.168.1.100", config, creds)?;
 Enable detailed logging to troubleshoot:
 
 ```bash
-RUST_LOG=linux_wmi=debug,kerbsec=debug cargo run --example test_kerberos
+RUST_LOG=fabi_wmi=debug,kerbsec=debug cargo run --example test_kerberos
 ```
 
 ## Migration Guide
@@ -368,4 +368,4 @@ cargo run --example dce_rpc_kerberos --features kerberos -- \
 
 ---
 
-*Configuration guide for linux-wmi with kerbsec v0.2.0+*
+*Configuration guide for fabi-wmi with kerbsec v0.2.0+*

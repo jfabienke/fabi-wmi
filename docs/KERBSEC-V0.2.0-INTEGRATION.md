@@ -1,14 +1,14 @@
-# Kerbsec v0.2.0 Integration Guide for linux-wmi
+# Kerbsec v0.2.0 Integration Guide for fabi-wmi
 
 ## Overview
 
-This document describes the integration of kerbsec v0.2.0's new features into linux-wmi, providing enhanced security and performance through credential caching, TLS channel bindings, and automatic memory zeroization.
+This document describes the integration of kerbsec v0.2.0's new features into fabi-wmi, providing enhanced security and performance through credential caching, TLS channel bindings, and automatic memory zeroization.
 
 ## New Features Integrated
 
 ### 1. Credential Cache Support
 
-linux-wmi now supports multiple credential cache backends for improved performance and flexibility:
+fabi-wmi now supports multiple credential cache backends for improved performance and flexibility:
 
 #### Available Cache Backends
 
@@ -35,7 +35,7 @@ linux-wmi now supports multiple credential cache backends for improved performan
 #### Configuration Example
 
 ```rust
-use linux_wmi::{KerberosConfig, CacheBackend};
+use fabi_wmi::{KerberosConfig, CacheBackend};
 
 // Use file-based cache (default)
 let config = KerberosConfig::new("CORP.EXAMPLE.COM")
@@ -73,7 +73,7 @@ Channel bindings provide protection against relay attacks by cryptographically b
 #### Configuration Example
 
 ```rust
-use linux_wmi::{KerberosConfig, KerberosClient};
+use fabi_wmi::{KerberosConfig, KerberosClient};
 
 // When using TLS connection
 let tls_stream = establish_tls_connection(host)?;
@@ -108,7 +108,7 @@ All sensitive data is now automatically zeroized when no longer needed, preventi
 #### Usage Example
 
 ```rust
-use linux_wmi::auth_exports::Credentials;
+use fabi_wmi::auth_exports::Credentials;
 
 // Credentials automatically zeroize password on drop
 {
@@ -283,7 +283,7 @@ cargo run --example test_kerberos_tls -- \
 Enable detailed logging for troubleshooting:
 
 ```bash
-RUST_LOG=kerbsec=trace,linux_wmi=debug cargo run ...
+RUST_LOG=kerbsec=trace,fabi_wmi=debug cargo run ...
 ```
 
 ## API Reference
@@ -344,10 +344,10 @@ For issues or questions about the v0.2.0 integration:
 
 ## Conclusion
 
-The kerbsec v0.2.0 integration brings significant security and performance improvements to linux-wmi. By leveraging credential caching, TLS channel bindings, and automatic memory zeroization, applications can achieve enterprise-grade security while maintaining excellent performance.
+The kerbsec v0.2.0 integration brings significant security and performance improvements to fabi-wmi. By leveraging credential caching, TLS channel bindings, and automatic memory zeroization, applications can achieve enterprise-grade security while maintaining excellent performance.
 
 ---
 
 *Last updated: January 2025*
 *kerbsec version: 0.2.0*
-*linux-wmi version: 0.1.0*
+*fabi-wmi version: 0.1.0*

@@ -1,4 +1,4 @@
-# End-to-End Tests for linux-wmi
+# End-to-End Tests for fabi-wmi
 
 xUnit tests that drive the .NET shim (`shim/wmi_shim.cs`) through the C ABI of
 `libfabi_wmi`. They run in one of two modes:

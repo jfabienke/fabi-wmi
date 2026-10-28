@@ -1,10 +1,10 @@
 # WMI Authentication Guide
 
-This guide explains the authentication methods available in linux-wmi and how to troubleshoot connection issues, particularly with Windows 11 and other security-hardened environments.
+This guide explains the authentication methods available in fabi-wmi and how to troubleshoot connection issues, particularly with Windows 11 and other security-hardened environments.
 
 ## Overview
 
-linux-wmi supports multiple authentication methods and port resolution strategies to connect to Windows WMI services. Due to varying Windows security policies, different methods may be required for different environments.
+fabi-wmi supports multiple authentication methods and port resolution strategies to connect to Windows WMI services. Due to varying Windows security policies, different methods may be required for different environments.
 
 ## ⚠️ Critical Update: NTLM Being Removed from Windows
 
@@ -196,7 +196,7 @@ See [kerbsec Features Guide](./KERBSEC-FEATURES.md) for complete documentation.
 
 #### Basic Kerberos Authentication
 ```rust
-use linux_wmi::{KerberosConfig, WmiSession, Credentials};
+use fabi_wmi::{KerberosConfig, WmiSession, Credentials};
 
 let config = KerberosConfig::new("CONTOSO.COM")
     .with_spn("host/server.contoso.com");
@@ -217,7 +217,7 @@ let mut session = WmiSession::with_kerberos(
 
 #### With Credential Caching (30x Faster)
 ```rust
-use linux_wmi::{KerberosConfig, KerberosCacheBackend};
+use fabi_wmi::{KerberosConfig, KerberosCacheBackend};
 
 // Enable caching for dramatic performance improvement
 let config = KerberosConfig::new("CONTOSO.COM")
@@ -323,7 +323,7 @@ let config = config
 
 ## SPNEGO Support (NEW)
 
-linux-wmi now includes full SPNEGO (Simple and Protected GSS-API Negotiation) support for Windows 11 compatibility:
+fabi-wmi now includes full SPNEGO (Simple and Protected GSS-API Negotiation) support for Windows 11 compatibility:
 
 ### What is SPNEGO?
 SPNEGO wraps authentication tokens (NTLM or Kerberos) in a negotiation structure that allows Windows to choose the best authentication method.

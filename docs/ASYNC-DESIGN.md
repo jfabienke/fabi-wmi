@@ -65,7 +65,7 @@ _Last updated: 2025-09-18_
 ## 4. API & Feature Flags
 
 - `async` feature flag (disabled by default). When enabled:
-  - `AsyncWmiSession` exposed via `linux_wmi::async_api`.
+  - `AsyncWmiSession` exposed via `fabi_wmi::async_api`.
   - FFI gains async variants:
     ```c
     typedef void (*wmi_async_callback)(const char* json, size_t len, int status, void* user);

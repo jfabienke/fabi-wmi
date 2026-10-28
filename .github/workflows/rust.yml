@@ -40,7 +40,7 @@ env:
 
 defaults:
   run:
-    working-directory: linux-wmi
+    working-directory: fabi-wmi
 
 jobs:
   fmt:
@@ -49,7 +49,7 @@ jobs:
     steps:
     - uses: actions/checkout@v7
       with:
-        path: linux-wmi
+        path: fabi-wmi
     - uses: actions/checkout@v7
       with:
         repository: jfabienke/fabi-kerbsec
@@ -67,7 +67,7 @@ jobs:
     steps:
     - uses: actions/checkout@v7
       with:
-        path: linux-wmi
+        path: fabi-wmi
     - uses: actions/checkout@v7
       with:
         repository: jfabienke/fabi-kerbsec
@@ -78,7 +78,7 @@ jobs:
         components: clippy
     - uses: Swatinem/rust-cache@v2.9.3
       with:
-        workspaces: linux-wmi
+        workspaces: fabi-wmi
     - run: cargo clippy --workspace --all-targets --features test-support -- -D warnings
 
   test:
@@ -87,7 +87,7 @@ jobs:
     steps:
     - uses: actions/checkout@v7
       with:
-        path: linux-wmi
+        path: fabi-wmi
     - uses: actions/checkout@v7
       with:
         repository: jfabienke/fabi-kerbsec
@@ -96,7 +96,7 @@ jobs:
     - uses: dtolnay/rust-toolchain@stable
     - uses: Swatinem/rust-cache@v2.9.3
       with:
-        workspaces: linux-wmi
+        workspaces: fabi-wmi
     - name: Test (default features + test-support)
       run: cargo test --workspace --features test-support
     - name: Test (no default features)
@@ -115,7 +115,7 @@ jobs:
     steps:
     - uses: actions/checkout@v7
       with:
-        path: linux-wmi
+        path: fabi-wmi
     - uses: actions/checkout@v7
       with:
         repository: jfabienke/fabi-kerbsec
@@ -123,7 +123,7 @@ jobs:
         path: fabi-kerbsec
     - uses: EmbarkStudios/cargo-deny-action@v2.1.1
       with:
-        manifest-path: linux-wmi/Cargo.toml
+        manifest-path: fabi-wmi/Cargo.toml
 
   c-header:
     name: C header (cbindgen)
@@ -131,7 +131,7 @@ jobs:
     steps:
     - uses: actions/checkout@v7
       with:
-        path: linux-wmi
+        path: fabi-wmi
     - uses: actions/checkout@v7
       with:
         repository: jfabienke/fabi-kerbsec
