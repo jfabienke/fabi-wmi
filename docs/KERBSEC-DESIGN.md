@@ -66,7 +66,7 @@ Your RPC Transport  <—auth trailer—>  kerbsec  <—GSS tokens—>  libgssapi
 ## Module Layout & Estimated LOC
 
 ```text
-kerbsec/
+fabi-kerbsec/
 ├── Cargo.toml                         — features (dns,runtime,ccache), pins, gates         —  ~45
 ├── LICENSE                            — MIT                                                —   ~2
 ├── README.md                          — overview, macOS/MIT notes, CI matrix               —  ~80

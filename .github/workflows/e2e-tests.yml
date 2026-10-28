@@ -37,7 +37,7 @@ on:
 env:
   RUST_BACKTRACE: 1
   CARGO_TERM_COLOR: always
-  # Cargo.toml path-depends on ../kerbsec, and Cargo reads that manifest even
+  # Cargo.toml path-depends on ../fabi-kerbsec, and Cargo reads that manifest even
   # with the kerberos feature off, so every cargo job checks out both repos
   # side by side.
   KERBSEC_REF: master
@@ -57,9 +57,9 @@ jobs:
 
     - uses: actions/checkout@v7
       with:
-        repository: jfabienke/kerbsec
+        repository: jfabienke/fabi-kerbsec
         ref: ${{ env.KERBSEC_REF }}
-        path: kerbsec
+        path: fabi-kerbsec
 
     - name: Setup Rust
       uses: dtolnay/rust-toolchain@stable

@@ -96,7 +96,7 @@ src/
 ├── tower.rs                # EPM tower builder/parser
 └── rpc_fixtures.rs         # Test fixtures, golden PDUs
 
-../kerbsec/                 # Internal Kerberos library
+../fabi-kerbsec/            # Internal Kerberos library
 ├── src/
 │   ├── context.rs         # GSS-API context management
 │   ├── config.rs          # Configuration builder
